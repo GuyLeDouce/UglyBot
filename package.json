@@ -1,0 +1,13 @@
+{
+  "name": "charm-of-the-ugly-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot for displaying random Charm of the Ugly NFTs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.11.0",
+    "node-fetch": "^2.6.7"
+  }
+}
