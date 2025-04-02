@@ -2,11 +2,8 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
 
-// Load secrets from environment
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
-
-// Contract for Charm of the Ugly
 const COLLECTION_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
 
 const client = new Client({
@@ -17,7 +14,6 @@ const client = new Client({
   ]
 });
 
-// Load wallet links
 let walletLinks = {};
 if (fs.existsSync('walletLinks.json')) {
   walletLinks = JSON.parse(fs.readFileSync('walletLinks.json'));
@@ -44,7 +40,7 @@ client.on('messageCreate', async (message) => {
     return message.reply(`✅ Wallet linked: ${address}`);
   }
 
-  // !ugly command - show random NFT
+  // !ugly command - random NFT
   if (command === 'ugly') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) {
@@ -73,7 +69,7 @@ client.on('messageCreate', async (message) => {
       const imgUrl = `https://ipfs.io/ipfs/bafybeie5o7afc4yxyv3xx4jhfjzqugjwl25wuauwn3554jrp26mlcmprhe/${randomToken}`;
 
       return message.reply({
-        content: `🎨 Here's one of your **Charm of the Ugly** NFTs!\n**Token ID**: ${randomToken}`,
+        content: `Token ID: ${randomToken}`,
         files: [{
           attachment: imgUrl,
           name: `ugly-${randomToken}.jpg`
@@ -86,7 +82,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !myuglys command - show all owned NFTs (up to 10)
+  // !myuglys command - all owned NFTs (max 10)
   if (command === 'myuglys') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) {
@@ -113,19 +109,15 @@ client.on('messageCreate', async (message) => {
         return message.reply('😢 You don’t currently own any Charm of the Ugly NFTs.');
       }
 
-      const count = tokenArray.length;
-      const limitedTokens = tokenArray.slice(0, 10); // Discord file limit
+      const limitedTokens = tokenArray.slice(0, 10); // Discord limit
       const files = limitedTokens.map((tokenId) => ({
         attachment: `https://ipfs.io/ipfs/bafybeie5o7afc4yxyv3xx4jhfjzqugjwl25wuauwn3554jrp26mlcmprhe/${tokenId}`,
         name: `ugly-${tokenId}.jpg`
       }));
 
-      const listedIds = limitedTokens.map(id => `#${id}`).join(', ');
+      const listedIds = limitedTokens.map(id => `Token ID: ${id}`).join('\n');
 
-      let replyText = `🧟‍♂️ You own **${count} Charm of the Ugly NFTs**!\nHere are the first ${limitedTokens.length}: ${listedIds}`;
-      if (count > 10) replyText += `\n_(Only showing first 10 images)_`;
-
-      return message.reply({ content: replyText, files });
+      return message.reply({ content: listedIds, files });
 
     } catch (err) {
       console.error(err);
