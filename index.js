@@ -2,15 +2,19 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
 
-// Load secrets from environment (Railway or .env)
+// Load secrets from environment
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 
-// Charm of the Ugly NFT contract
+// Contract for Charm of the Ugly
 const COLLECTION_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 // Load wallet links
@@ -29,7 +33,7 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(1).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // Link wallet command
+  // !linkwallet command
   if (command === 'linkwallet') {
     const address = args[0];
     if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -40,7 +44,7 @@ client.on('messageCreate', async (message) => {
     return message.reply(`✅ Wallet linked: ${address}`);
   }
 
-  // Show random Ugly NFT
+  // !ugly command - show random NFT
   if (command === 'ugly') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) {
@@ -78,7 +82,54 @@ client.on('messageCreate', async (message) => {
 
     } catch (err) {
       console.error(err);
-      message.reply('⚠️ Error fetching your NFTs. Please try again later.');
+      return message.reply('⚠️ Error fetching your NFTs. Please try again later.');
+    }
+  }
+
+  // !myuglys command - show all owned NFTs (up to 10)
+  if (command === 'myuglys') {
+    const wallet = walletLinks[message.author.id];
+    if (!wallet) {
+      return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    }
+
+    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${COLLECTION_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
+
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+
+      const owned = new Set();
+      for (const tx of data.result) {
+        if (tx.to.toLowerCase() === wallet.toLowerCase()) {
+          owned.add(tx.tokenID);
+        } else if (tx.from.toLowerCase() === wallet.toLowerCase()) {
+          owned.delete(tx.tokenID);
+        }
+      }
+
+      const tokenArray = Array.from(owned);
+      if (tokenArray.length === 0) {
+        return message.reply('😢 You don’t currently own any Charm of the Ugly NFTs.');
+      }
+
+      const count = tokenArray.length;
+      const limitedTokens = tokenArray.slice(0, 10); // Discord file limit
+      const files = limitedTokens.map((tokenId) => ({
+        attachment: `https://ipfs.io/ipfs/bafybeie5o7afc4yxyv3xx4jhfjzqugjwl25wuauwn3554jrp26mlcmprhe/${tokenId}`,
+        name: `ugly-${tokenId}.jpg`
+      }));
+
+      const listedIds = limitedTokens.map(id => `#${id}`).join(', ');
+
+      let replyText = `🧟‍♂️ You own **${count} Charm of the Ugly NFTs**!\nHere are the first ${limitedTokens.length}: ${listedIds}`;
+      if (count > 10) replyText += `\n_(Only showing first 10 images)_`;
+
+      return message.reply({ content: replyText, files });
+
+    } catch (err) {
+      console.error(err);
+      return message.reply('⚠️ Error fetching your NFTs. Please try again later.');
     }
   }
 });
