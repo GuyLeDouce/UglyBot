@@ -32,28 +32,27 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(1).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-// !linkwallet
-if (command === 'linkwallet') {
-  const address = args[0];
-  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-    return message.reply('❌ Please enter a valid Ethereum wallet address.');
+  // !linkwallet
+  if (command === 'linkwallet') {
+    const address = args[0];
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      return message.reply('❌ Please enter a valid Ethereum wallet address.');
+    }
+
+    walletLinks[message.author.id] = address;
+    fs.writeFileSync('walletLinks.json', JSON.stringify(walletLinks, null, 2));
+
+    try {
+      await message.delete(); // delete original message for privacy
+    } catch (err) {
+      console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message);
+    }
+
+    return message.channel.send({
+      content: '✅ Wallet linked.',
+      allowedMentions: { repliedUser: false }
+    });
   }
-
-  walletLinks[message.author.id] = address;
-  fs.writeFileSync('walletLinks.json', JSON.stringify(walletLinks, null, 2));
-
-  try {
-    await message.delete(); // Delete the original message to protect wallet privacy
-  } catch (err) {
-    console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message);
-  }
-
-  return message.channel.send({
-    content: '✅ Wallet linked.',
-    allowedMentions: { repliedUser: false }
-  });
-}
-
 
   // !ugly
   if (command === 'ugly') {
