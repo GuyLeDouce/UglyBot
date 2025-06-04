@@ -142,7 +142,7 @@ client.on('messageCreate', async (message) => {
 
       const tokenArray = Array.from(owned);
       const randomToken = tokenArray[Math.floor(Math.random() * tokenArray.length)];
-      const imgUrl = `https://ipfs.io/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${randomToken}.webp`;
+      const imgUrl = `https://gateway.pinata.cloud/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${randomToken}.webp`;
 
       const embed = new EmbedBuilder()
         .setTitle(`👹 Ugly Monster`)
@@ -285,7 +285,7 @@ client.on('messageCreate', async (message) => {
         return tokens.map(tokenId =>
           new EmbedBuilder()
             .setTitle(`👹 Monster #${tokenId}`)
-            .setImage(`https://ipfs.io/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${tokenId}.webp`)
+            .setImage(`https://gateway.pinata.cloud/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${tokenId}.webp`)
             .setColor(0xff4444)
             .setFooter({ text: `Page ${page + 1} of ${totalPages}` })
         );
