@@ -16,8 +16,8 @@ const UGLY_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
 const SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 
-const CHARM_REWARD_CHANCE = 20; // 1 in 200
-const CHARM_REWARDS = [100, 100, 100, 200]; // Weighted pool
+const CHARM_REWARD_CHANCE = 100; // 1 in 200
+const CHARM_REWARDS = [150, 200, 350, 200]; // Weighted pool
 
 const client = new Client({
   intents: [
