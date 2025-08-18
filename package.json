@@ -1,14 +1,19 @@
 {
   "name": "charm-of-the-ugly-bot",
-  "version": "1.0.0",
-  "description": "A Discord bot for displaying random Charm of the Ugly NFTs",
+  "version": "1.1.0",
+  "description": "Ugly Bot + Squig Card renderer",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "discord.js": "^14.11.0",
-    "node-fetch": "^2.6.7",
-    "ethers": "^6.10.0"
+    "@napi-rs/canvas": "^0.1.66",
+    "discord.js": "^14.16.3",
+    "ethers": "^6.10.0",
+    "node-fetch": "^2.6.7"
   }
 }
+
