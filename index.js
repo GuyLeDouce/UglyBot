@@ -571,7 +571,7 @@ client.on('interactionCreate', async (interaction) => {
       : null;
 
     const rarityLabel = simpleRarityLabel(traitsRaw);
-    const headerStripe = rarityColorFromLabel(rarityLabel);
+    const headerStripe = stripeFromRarity(rarityLabel);
 
     const buffer = await renderSquigCard({
       name: displayName,
@@ -889,4 +889,8 @@ function normalizeTraits(attrs) {
   }
 
   return groups;
+}
+// Back-compat alias for older code paths
+function rarityColorFromLabel(label) {
+  return stripeFromRarity(label);
 }
