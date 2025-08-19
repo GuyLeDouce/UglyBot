@@ -1,4 +1,6 @@
+// Load local .env when running outside Railway (Railway still injects envs)
 try { require('dotenv').config(); } catch (_) {}
+
 const {
   Client,
   GatewayIntentBits,
@@ -15,19 +17,21 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 
-const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN; // fallback just in case
+// ===== ENV =====
+const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN; // fallback
 const DISCORD_CLIENT_ID  = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID           = process.env.GUILD_ID;
 const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 
-// --- env sanity log (AFTER constants) ---
+// Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
   hasToken: !!DISCORD_TOKEN,
   clientId: DISCORD_CLIENT_ID,
   guildId: GUILD_ID,
   hasAlchemy: !!ALCHEMY_API_KEY
 });
+
 // ===== CONTRACTS =====
 const UGLY_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
@@ -39,11 +43,7 @@ const CHARM_REWARDS = [150, 200, 350, 200]; // Weighted pool
 
 // ===== CLIENT =====
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 // ===== UTILS =====
@@ -65,7 +65,7 @@ if (fs.existsSync('walletLinks.json')) {
   walletLinks = JSON.parse(fs.readFileSync('walletLinks.json'));
 }
 
-// ===== Slash command registrar (guild-scoped for fast iteration) =====
+// ===== Slash command registrar (guild-scoped) =====
 async function registerSlashCommands() {
   try {
     if (!DISCORD_CLIENT_ID || !GUILD_ID) {
@@ -77,22 +77,21 @@ async function registerSlashCommands() {
     const commands = [
       new SlashCommandBuilder()
         .setName('card')
-        .setDescription(`Create a Squigs trading card JPEG (${Date.now()})`) // bump description to force refresh
+        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh
         .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-        .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
+        .addStringOption(o => o.setName('name').setDescription('Optional display name'))
         .toJSON()
     ];
 
-    const data = await rest.put(
-      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log(`✅ Registered ${data.length} guild slash command(s) to ${GUILD_ID}.`);
+    const route = Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID);
+    const putRes = await rest.put(route, { body: commands });
+    console.log(`✅ Registered ${putRes.length} guild slash command(s) to ${GUILD_ID}.`);
+    const listRes = await rest.get(route);
+    console.log('🔎 Guild commands now:', listRes.map(c => `${c.name} (${c.id})`).join(', '));
   } catch (e) {
-    console.error('❌ Slash register error:', e?.data ?? e);
+    console.error('❌ Slash register error:', e?.rawError ?? e?.data ?? e);
   }
 }
-
 
 // ===== READY =====
 client.on('ready', async () => {
@@ -104,7 +103,7 @@ client.on('ready', async () => {
 function maybeRewardCharm(userId, username) {
   const roll = Math.floor(Math.random() * 200);
   if (roll === 0) {
-    const rewards = [100, 100, 100, 200]; // weighted pool
+    const rewards = [100, 100, 100, 200];
     const reward = rewards[Math.floor(Math.random() * rewards.length)];
     const loreMessages = [
       "A Squig blinked and $CHARM fell out of the sky.",
@@ -122,7 +121,7 @@ function maybeRewardCharm(userId, username) {
   return null;
 }
 
-// ===== PREFIX COMMANDS (your existing ones) =====
+// ===== PREFIX COMMANDS (existing ones) =====
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith('!') || message.author.bot) return;
 
@@ -137,9 +136,7 @@ client.on('messageCreate', async (message) => {
     }
     walletLinks[message.author.id] = address;
     fs.writeFileSync('walletLinks.json', JSON.stringify(walletLinks, null, 2));
-    try { await message.delete(); } catch (err) {
-      console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message);
-    }
+    try { await message.delete(); } catch (err) { console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message); }
     return message.channel.send({ content: '✅ Wallet linked.', allowedMentions: { repliedUser: false } });
   }
 
@@ -152,13 +149,11 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
         else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
       }
-
       if (owned.size === 0) return message.reply('😢 You don’t own any Charm of the Ugly NFTs.');
 
       const tokenArray = Array.from(owned);
@@ -188,13 +183,11 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
         else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
       }
-
       if (owned.size === 0) return message.reply('😢 You don’t own any Ugly Monster NFTs.');
 
       const tokenArray = Array.from(owned);
@@ -215,7 +208,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !myuglys with pagination
+  // !myuglys
   if (command === 'myuglys') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -224,7 +217,6 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -234,10 +226,8 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Charm of the Ugly NFTs.');
 
-      const itemsPerPage = 5;
-      let page = 0;
+      const itemsPerPage = 5; let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -260,34 +250,20 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
+        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
       });
 
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-      });
-
+      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
     } catch (err) {
       console.error('❌ Fetch failed (myuglys):', err.message);
       return message.reply('⚠️ Error fetching your Uglies. Please try again later.');
     }
   }
 
-  // !mymonsters with pagination
+  // !mymonsters
   if (command === 'mymonsters') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -296,7 +272,6 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -306,10 +281,8 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Ugly Monster NFTs.');
 
-      const itemsPerPage = 5;
-      let page = 0;
+      const itemsPerPage = 5; let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -332,27 +305,13 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
+        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
       });
 
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-      });
-
+      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
     } catch (err) {
       console.error('❌ Fetch failed (mymonsters):', err.message);
       return message.reply('⚠️ Error fetching your Monsters. Please try again later.');
@@ -368,7 +327,6 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -418,7 +376,7 @@ client.on('messageCreate', async (message) => {
     return message.reply({ embeds: [embed] });
   }
 
-  // !mysquigs with pagination
+  // !mysquigs
   if (command === 'mysquigs') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -427,7 +385,6 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
-
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -437,10 +394,8 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Squigs.');
 
-      const itemsPerPage = 5;
-      let page = 0;
+      const itemsPerPage = 5; let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -464,34 +419,19 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
+        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
+        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
       });
 
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-
-      });
+      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
 
       const charmDrop = maybeRewardCharm(message.author.id, message.author.username);
       if (charmDrop) {
         message.channel.send(`🎁 **${message.author.username}** just got **${charmDrop.reward} $CHARM**!\n*${charmDrop.lore}*\n👉 Ping <@826581856400179210> to get your $CHARM`);
         console.log(`CHARM REWARD: ${message.author.username} (${message.author.id}) got ${charmDrop.reward} $CHARM.`);
       }
-
     } catch (err) {
       console.error('❌ Fetch failed (mysquigs):', err.message);
       return message.reply('⚠️ Error fetching your Squigs. Please try again later.');
@@ -512,27 +452,25 @@ client.on('interactionCreate', async (interaction) => {
 
     // Metadata from Alchemy (no ownership check)
     const meta = await getNftMetadataAlchemy(tokenId);
-    const traits =
+    const rawTraits =
       Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
       (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
     const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
 
     const traitCounts = loadTraitCountsSafe();
-    const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-    const rarity = simpleRarityLabel(traits);
+    const cardTraits = buildCardTraits(rawTraits, traitCounts); // <<< fixed categories in order
+    const rarity = simpleRarityLabel(rawTraits);
 
     const buffer = await renderSquigCard({
       name: displayName,
       rarity,
       tokenId,
-      imageUrl,
-      traits,
-      traitCounts
+      imageUrl: `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`,
+      cardTraits
     });
 
     const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
     await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
-
   } catch (err) {
     console.error('❌ /card error:', err);
     if (interaction.deferred) {
@@ -546,7 +484,7 @@ client.on('interactionCreate', async (interaction) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 
-// ===== Helper funcs (metadata, canvas, utils) =====
+// ===== Helpers (metadata, traits, canvas) =====
 async function getNftMetadataAlchemy(tokenId) {
   const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
               `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
@@ -573,7 +511,45 @@ function simpleRarityLabel(attrs) {
   return 'Common';
 }
 
-async function renderSquigCard({ name, rarity, tokenId, imageUrl, traits, traitCounts }) {
+/** ===== Trait canonicalization ===== **/
+const CANON_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+const TRAIT_ALIASES = {
+  background: 'Background', bg: 'Background', backdrop: 'Background',
+  body: 'Body',
+  eyes: 'Eyes', eye: 'Eyes',
+  head: 'Head', hat: 'Head', headwear: 'Head',
+  legend: 'Legend',
+  skin: 'Skin',
+  special: 'Special', accessory: 'Special',
+  type: 'Type', class: 'Type'
+};
+
+function canonicalizeTraits(rawTraits) {
+  const map = {};
+  (rawTraits || []).forEach(t => {
+    const key = String(t?.trait_type ?? '').trim().toLowerCase();
+    const canon = TRAIT_ALIASES[key];
+    if (!canon) return;
+    if (map[canon]) return; // first one wins
+    map[canon] = (t?.value ?? '').toString();
+  });
+  return map;
+}
+
+function buildCardTraits(rawTraits, traitCounts) {
+  const map = canonicalizeTraits(rawTraits);
+  const out = [];
+  for (const label of CANON_ORDER) {
+    const value = map[label];
+    if (!value) continue;
+    const count = traitCounts?.[label]?.[value];
+    out.push({ label, value, count: (typeof count === 'number' ? count : null) });
+  }
+  return out;
+}
+
+/** ===== Card renderer ===== **/
+async function renderSquigCard({ name, rarity, tokenId, imageUrl, cardTraits }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
@@ -609,29 +585,48 @@ async function renderSquigCard({ name, rarity, tokenId, imageUrl, traits, traitC
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
 
-  // Traits
+  // Traits panel (fixed categories, in order)
   const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 60;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff', '#e3e3e3');
-  ctx.fillStyle = '#333'; ctx.font = 'bold 26px Arial';
-  ctx.fillText('Traits', TX + 16, TY + 34);
 
-  ctx.font = '22px Arial'; ctx.fillStyle = '#3a3a3a';
-  let y = TY + 70, lh = 30;
-  (traits || []).slice(0, 8).forEach(t => {
-    const type = t?.trait_type || 'Trait';
-    const val = (t?.value ?? '').toString();
-    const count = traitCounts?.[type]?.[val];
-    const suffix = typeof count === 'number' ? ` — ${count} in collection` : '';
-    ctx.fillText(`• ${type}: ${val}${suffix}`, TX + 16, y);
-    y += lh;
+  ctx.fillStyle = '#333'; ctx.font = 'bold 26px Arial';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('Traits', TX + 16, TY + 36);
+
+  // divider
+  ctx.strokeStyle = '#E9E9EF'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(TX + 12, TY + 44); ctx.lineTo(TX + TW - 12, TY + 44); ctx.stroke();
+
+  const rowH = 38;
+  let y = TY + 80;
+
+  (cardTraits || []).forEach(({ label, value, count }) => {
+    ctx.font = 'bold 22px Arial';
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillText(label + ':', TX + 16, y);
+
+    ctx.font = '22px Arial';
+    ctx.fillStyle = '#141414';
+    const valueText = String(value);
+    ctx.fillText(valueText, TX + 160, y);
+
+    if (typeof count === 'number') {
+      ctx.font = '20px Arial';
+      ctx.fillStyle = '#6a6a6a';
+      const w = ctx.measureText(valueText).width;
+      ctx.fillText(`— ${count} in collection`, TX + 160 + w + 12, y);
+    }
+    y += rowH;
   });
 
+  // footer line
   ctx.font = '18px Arial'; ctx.fillStyle = '#666';
   ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, H - 28);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
 
+// ========== Drawing helpers ==========
 function drawRoundRect(ctx, x, y, w, h, r, fill, stroke) {
   const rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
@@ -641,7 +636,7 @@ function drawRoundRect(ctx, x, y, w, h, r, fill, stroke) {
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
-  ctx.fillStyle = fill; ctx.fill();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
   if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
 }
 
