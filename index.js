@@ -27,7 +27,6 @@ const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
 // ===== FONT REGISTRATION (auto-download if missing) =====
-// Using TypeTogether repo for TTFs to avoid GF path issues.
 let FONT_REGULAR_FAMILY = 'PlaypenSans-Regular';
 let FONT_BOLD_FAMILY    = 'PlaypenSans-Bold';
 
@@ -136,7 +135,6 @@ async function registerSlashCommands() {
     );
     console.log(`✅ Registered ${data.length} guild slash command(s) to ${GUILD_ID}.`);
 
-    // list commands for sanity
     const guildCmds = await rest.get(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID));
     console.log('🔎 Guild commands now:', guildCmds.map(c => `${c.name} (${c.id})`).join(', '));
   } catch (e) {
@@ -560,7 +558,6 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await interaction.deferReply();
 
-    // Metadata from Alchemy (no ownership check)
     const meta = await getNftMetadataAlchemy(tokenId);
     const traitsRaw =
       Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
@@ -569,21 +566,12 @@ client.on('interactionCreate', async (interaction) => {
     const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
     const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-    // Try to fetch OpenSea rarity rank (optional)
     const rankInfo = OPENSEA_API_KEY
       ? await fetchOpenSeaRank(tokenId).catch(() => null)
       : null;
 
-    // Fallback rarity label if no rank
     const rarityLabel = simpleRarityLabel(traitsRaw);
     const headerStripe = rarityColorFromLabel(rarityLabel);
-
-    console.log('Traits debug:', {
-      tokenId,
-      groups: Object.fromEntries(Object.entries(traits).map(([k, v]) => [k, v?.length || 0])),
-      rank: rankInfo?.rank ?? null,
-      label: rarityLabel
-    });
 
     const buffer = await renderSquigCard({
       name: displayName,
@@ -632,15 +620,6 @@ async function fetchOpenSeaRank(tokenId) {
   return rank ? { rank, score, percentile, total } : null;
 }
 
-function loadTraitCountsSafe() {
-  try {
-    if (fs.existsSync('trait_counts.json')) {
-      return JSON.parse(fs.readFileSync('trait_counts.json', 'utf8'));
-    }
-  } catch {}
-  return {};
-}
-
 function simpleRarityLabel(attrs) {
   const n = Array.isArray(attrs) ? attrs.length : 0;
   if (n >= 9) return 'Mythic';
@@ -649,7 +628,6 @@ function simpleRarityLabel(attrs) {
   if (n >= 3) return 'Uncommon';
   return 'Common';
 }
-
 function rarityColorFromLabel(label) {
   switch ((label || '').toLowerCase()) {
     case 'mythic':    return '#7C3AED';
@@ -676,34 +654,33 @@ function normalizeTraits(list) {
     const key = (t?.trait_type || '').trim();
     const val = t?.value;
     if (!key || typeof val === 'undefined' || val === null) continue;
-    const target = (key in groups) ? key : key; // keep original for unknowns
+    const target = (key in groups) ? key : key;
     if (!groups[target]) groups[target] = [];
     groups[target].push({ trait_type: key, value: val });
   }
   return groups;
 }
 
-// ====== RENDERER (2-column trait grid with shaded mini-cards) ======
+// ====== RENDERER (compact layout, color updates) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // Background
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#f6f7ff'); g.addColorStop(1, '#e9ecff');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // Card background — light blue
+  ctx.fillStyle = '#E6F3FF';
+  ctx.fillRect(0, 0, W, H);
 
   // Outer frame
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, '#ffffff');
-  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
 
   // Header stripe (rarity color)
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 88, 18, headerStripe);
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripe);
   ctx.fillStyle = '#0f172a';
   ctx.textBaseline = 'middle';
   ctx.font = `36px ${FONT_BOLD_FAMILY}`;
-  ctx.fillText(name, 64, 96);
+  ctx.fillText(name, 64, 94);
 
   // Rank / rarity (right)
   const rightText = rankInfo?.rank
@@ -711,56 +688,57 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     : rarityLabel;
   ctx.font = `28px ${FONT_BOLD_FAMILY}`;
   const tw = ctx.measureText(rightText).width;
-  ctx.fillText(rightText, W - 64 - tw, 96);
+  ctx.fillText(rightText, W - 64 - tw, 94);
 
-  // Art window
-  const AX = 60, AY = 160, AW = W - 120, AH = 520;
-  drawRoundRect(ctx, AX, AY, AW, AH, 16, '#f9fafb');
-  ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
+  // Art window (slightly smaller; image fills/cover & clipped to rounded corners)
+  const AX = 72, AY = 154, AW = W - 144, AH = 420; // smaller than before
+  roundRectPath(ctx, AX, AY, AW, AH, 16);
+  ctx.save(); ctx.clip();
+  drawRoundRect(ctx, AX, AY, AW, AH, 16, '#f9fafb'); // backfill
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = contain(img.width, img.height, AW - 24, AH - 24);
-    ctx.drawImage(img, AX + 12 + dx, AY + 12 + dy, dw, dh);
+    const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
+    ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   } catch {
     ctx.fillStyle = '#9CA3AF'; ctx.font = `26px ${FONT_REGULAR_FAMILY}`;
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
+  ctx.restore();
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; roundRectPath(ctx, AX, AY, AW, AH, 16); ctx.stroke();
 
-  // Traits panel background
-  const TX = 60, TY = AY + AH + 28, TW = W - 120, TH = H - TY - 60;
-  const pg = ctx.createLinearGradient(0, TY, 0, TY + TH);
-  pg.addColorStop(0, '#f8fbff'); pg.addColorStop(1, '#eef2ff');
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, pg);
-  ctx.strokeStyle = '#dbe3ff'; ctx.lineWidth = 2; ctx.stroke();
+  // Traits panel — white background
+  const TX = 60, TY = AY + AH + 22, TW = W - 120, TH = H - TY - 88; // leave space for footer token text
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
+  ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Inner grid area
-  const PAD = 16;
+  // Inner grid area (2 columns)
+  const PAD = 14;
   const innerX = TX + PAD, innerY = TY + PAD;
   const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 16, COL_W = (innerW - COL_GAP) / 2;
+  const COL_GAP = 14, COL_W = (innerW - COL_GAP) / 2;
 
-  // Prepare categories in order, skipping empties
   const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
   const boxes = [];
   for (const cat of order) {
     const items = traits[cat] || [];
     if (!items.length) continue;
 
-    // Cap visible items per box; show "+N more" if necessary
-    const maxLines = 6;
-    const lines = items.slice(0, maxLines).map(t => `• ${String(t?.value ?? '')}`);
-    const hidden = items.length - lines.length;
-    if (hidden > 0) lines.push(`+${hidden} more`);
+    // make rows tighter
+    const lines = items.map(t => `• ${String(t?.value ?? '')}`);
+    const maxLines = 5;
+    const shown = lines.slice(0, maxLines);
+    const hidden = lines.length - shown.length;
+    if (hidden > 0) shown.push(`+${hidden} more`);
 
-    // Dynamic height
-    const titleH = 26;
-    const lineH = 22;
-    const boxH = 20 + titleH + lines.length * lineH + 14;
+    const titleH = 30;       // header height
+    const lineH  = 18;       // row height (smaller)
+    const blockPad = 8;      // inner padding
+    const boxH = blockPad + titleH + shown.length * lineH + blockPad;
 
-    boxes.push({ cat, lines, boxH });
+    boxes.push({ cat, lines: shown, boxH });
   }
 
-  // Masonry flow into two columns
+  // Masonry into two columns
   let yL = innerY, yR = innerY;
   const placed = [];
   for (const b of boxes) {
@@ -771,49 +749,48 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
   }
 
-  // Draw each mini-card
+  // Draw mini-cards with color spec
   for (const b of placed) {
-    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb');
+    // outer card with soft shadow
+    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb', '#0000001a', 10, 2);
 
-    // Header tint
-    const headH = 36;
-    const headG = ctx.createLinearGradient(0, b.y, 0, b.y + headH);
-    headG.addColorStop(0, '#f3f4f6'); headG.addColorStop(1, '#eceef2');
-    drawRoundRect(ctx, b.x, b.y, b.w, headH, 12, headG);
-    ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
+    // trait type block — light blue
+    const headH = 30;
+    drawRoundRect(ctx, b.x, b.y, b.w, headH, 12, '#D9ECFF');
+    ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 1.5; ctx.stroke();
 
-    // Category title
-    ctx.fillStyle = '#111827';
-    ctx.font = `22px ${FONT_BOLD_FAMILY}`;
+    // title text
+    ctx.fillStyle = '#0F172A';
+    ctx.font = `20px ${FONT_BOLD_FAMILY}`;
     ctx.textBaseline = 'alphabetic';
-    ctx.fillText(b.cat, b.x + 14, b.y + 25);
+    ctx.fillText(b.cat, b.x + 12, b.y + 22);
 
-    // Optional divider line
-    ctx.strokeStyle = '#e5e7eb';
-    ctx.beginPath();
-    ctx.moveTo(b.x, b.y + headH + 0.5);
-    ctx.lineTo(b.x + b.w, b.y + headH + 0.5);
-    ctx.stroke();
+    // rows background (white)
+    const rowsY = b.y + headH;
+    drawRect(ctx, b.x, rowsY, b.w, b.boxH - headH, '#ffffff');
 
-    // Trait lines
-    let yy = b.y + headH + 12;
-    ctx.fillStyle = '#334155';
-    ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
+    // rows text — light blue
+    let yy = rowsY + 8;
+    ctx.fillStyle = '#3B82F6'; // blue-500
+    ctx.font = `16px ${FONT_REGULAR_FAMILY}`;
     for (const line of b.lines) {
-      ctx.fillText(line, b.x + 14, yy);
-      yy += 22;
+      ctx.fillText(line, b.x + 12, yy);
+      yy += 18;
     }
   }
 
-  // Footer token line
-  ctx.fillStyle = '#6B7280';
+  // Footer token line — in the border under trait section
+  ctx.fillStyle = '#667085';
   ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
-  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 18, TY + TH - 14);
+  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
 
-function drawRoundRect(ctx, x, y, w, h, r, fill) {
+// ---------- drawing helpers ----------
+function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
+
+function roundRectPath(ctx, x, y, w, h, r) {
   const rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
@@ -822,6 +799,10 @@ function drawRoundRect(ctx, x, y, w, h, r, fill) {
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
+}
+
+function drawRoundRect(ctx, x, y, w, h, r, fill) {
+  roundRectPath(ctx, x, y, w, h, r);
   ctx.fillStyle = fill; ctx.fill();
 }
 
@@ -831,24 +812,14 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   ctx.shadowBlur = shadowBlur;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = shadowDy;
-
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-
+  drawRoundRect(ctx, x, y, w, h, r, fill);
   ctx.restore();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
 }
 
-function contain(sw, sh, mw, mh) {
-  const s = Math.min(mw / sw, mh / sh);
+// image cover (fills, may crop)
+function cover(sw, sh, mw, mh) {
+  const s = Math.max(mw / sw, mh / sh);
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
   return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
 }
