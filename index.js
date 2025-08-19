@@ -555,45 +555,56 @@ client.on('interactionCreate', async (interaction) => {
   const tokenId = interaction.options.getInteger('token_id');
   const customName = interaction.options.getString('name') || null;
 
-  try {
-    await interaction.deferReply();
+ try {
+  await interaction.deferReply();
 
-    const meta = await getNftMetadataAlchemy(tokenId);
-    const traitsRaw =
-      Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
-      (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
-    const traits = normalizeTraits(traitsRaw);
-    const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
-    const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+  // Alchemy metadata (no ownership check)
+  const meta = await getNftMetadataAlchemy(tokenId);
 
-    const rankInfo = OPENSEA_API_KEY
-      ? await fetchOpenSeaRank(tokenId).catch(() => null)
-      : null;
+  // Robust trait fetch (scan Alchemy; fallback to OpenSea if needed)
+  const { attrs: traitsRaw, source: traitSource } = await getTraitsForToken(meta, tokenId);
 
-    const rarityLabel = simpleRarityLabel(traitsRaw);
-    const headerStripe = stripeFromRarity(rarityLabel);
+  // Debug
+  console.log('Traits debug:', {
+    tokenId,
+    source: traitSource,
+    count: traitsRaw?.length ?? 0,
+    sample: (traitsRaw || []).slice(0, 3)
+  });
 
-    const buffer = await renderSquigCard({
-      name: displayName,
-      tokenId,
-      imageUrl,
-      traits,
-      rankInfo,
-      rarityLabel,
-      headerStripe
-    });
+  const traits = normalizeTraits(traitsRaw);
+  const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
+  const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-    const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
-    await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+  // Rank (OpenSea) if API key present; otherwise null
+  const rankInfo = OPENSEA_API_KEY ? await fetchOpenSeaRank(tokenId).catch(() => null) : null;
 
-  } catch (err) {
-    console.error('❌ /card error:', err);
-    if (interaction.deferred) {
-      await interaction.editReply('⚠️ Something went wrong building that card.');
-    } else {
-      await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
-    }
+  // Heuristic rarity label (kept for header color if rank missing)
+  const rarityLabel = simpleRarityLabel(traitsRaw);
+  const headerStripe = stripeFromRarity(rarityLabel);
+
+  // Render card
+  const buffer = await renderSquigCard({
+    name: displayName,
+    tokenId,
+    imageUrl,
+    traits,
+    rankInfo,
+    rarityLabel,
+    headerStripe
+  });
+
+  const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
+  await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+
+} catch (err) {
+  console.error('❌ /card error:', err);
+  if (interaction.deferred) {
+    await interaction.editReply('⚠️ Something went wrong building that card.');
+  } else {
+    await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
   }
+}
 });
 
 // ===== LOGIN =====
@@ -603,21 +614,30 @@ client.login(DISCORD_TOKEN);
 async function getNftMetadataAlchemy(tokenId) {
   const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
               `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
-  const res = await fetchWithRetry(url);
+  const res = await fetch(url, { timeout: 10000 });
+  if (!res.ok) throw new Error(`Alchemy HTTP ${res.status}`);
   return res.json();
 }
 
-// OpenSea v2: Get NFT (attempt to read rarity)
+// OpenSea v2: Get rarity/rank for a single NFT
 async function fetchOpenSeaRank(tokenId) {
+  if (!OPENSEA_API_KEY) return null;
   const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
-  const res = await fetchWithRetry(url, 2, 500, { headers: { 'X-API-KEY': OPENSEA_API_KEY } });
-  const data = await res.json();
-  const rarity = data?.rarity || data?.item?.rarity || null;
-  const rank = rarity?.rank ?? rarity?.ranking ?? null;
-  const score = rarity?.score ?? null;
-  const percentile = rarity?.percentile ?? null;
-  const total = rarity?.max_rank ?? rarity?.collection_size ?? null;
-  return rank ? { rank, score, percentile, total } : null;
+  // tiny built-in retry
+  for (let i = 0; i < 2; i++) {
+    const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY }, timeout: 10000 });
+    if (res.ok) {
+      const data = await res.json();
+      const rarity = data?.rarity || data?.item?.rarity || null;
+      const rank = rarity?.rank ?? rarity?.ranking ?? null;
+      const score = rarity?.score ?? null;
+      const percentile = rarity?.percentile ?? null;
+      const total = rarity?.max_rank ?? rarity?.collection_size ?? null;
+      return rank ? { rank, score, percentile, total } : null;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return null;
 }
 
 function simpleRarityLabel(attrs) {
@@ -628,6 +648,7 @@ function simpleRarityLabel(attrs) {
   if (n >= 3) return 'Uncommon';
   return 'Common';
 }
+
 // ===== COLORS / THEME (drop-in) =====
 const PALETTE = {
   cardBg: '#242623',
@@ -654,7 +675,7 @@ const PALETTE = {
   traitCardStroke: '#b9dded',
   traitCardShadow: '#0000001A',
 
-  // Note: header fill is now dynamic per rarity; stroke remains configurable here
+  // Note: header fill is dynamic per rarity; stroke remains configurable here
   traitHeaderFill:   '#b9dded', // (unused for fill; kept for reference)
   traitHeaderStroke: '#b9dded',
 
@@ -668,7 +689,7 @@ function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
 
-// Local font aliases (works whether your file defines FONT_* or FONT_FAMILY_*)
+// Local font aliases
 const FONT_REG =
   (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
   (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
@@ -790,9 +811,9 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
 
     // trait type head — use rarity stripe color for fill
-    const traitHeaderFill = headerStripeFill; // matches rarity palette
+    const traitHeaderFill = headerStripeFill;
     drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
-    ctx.strokeStyle = PALETTE.traitHeaderStroke; // keep stroke as configured (set to traitHeaderFill if you want it to match)
+    ctx.strokeStyle = PALETTE.traitHeaderStroke;
     ctx.lineWidth = 1.5; ctx.stroke();
 
     // title text
@@ -871,7 +892,7 @@ async function fetchBuffer(url) {
   return Buffer.from(ab);
 }
 
-// ===== TRAIT NORMALIZER (add this) =====
+// ===== TRAIT NORMALIZER & flexible fetch =====
 const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
 
 function normalizeTraits(attrs) {
@@ -884,18 +905,84 @@ function normalizeTraits(attrs) {
     if (!type || val == null) continue;
 
     const valStr = String(val).trim();
-    if (!valStr || valStr.toLowerCase() === 'none') continue; // drop missing/none
+    if (!valStr || valStr.toLowerCase() === 'none') continue;
 
-    // only keep the categories we care about
-    if (!groups.hasOwnProperty(type)) continue;
-
+    if (!groups.hasOwnProperty(type)) continue; // only our categories
     groups[type].push({ value: valStr });
   }
-
   return groups;
 }
 
 // Back-compat alias for older code paths
 function rarityColorFromLabel(label) {
   return stripeFromRarity(label);
+}
+
+// -------- flexible trait extraction + OpenSea fallback --------
+async function getTraitsForToken(alchemyMeta, tokenId) {
+  const attrsFromAlchemy = extractAttributesFlexible(alchemyMeta);
+  if (attrsFromAlchemy.length) return { attrs: attrsFromAlchemy, source: 'alchemy' };
+
+  if (OPENSEA_API_KEY) {
+    try {
+      const os = await fetchOpenSeaNFT(SQUIGS_CONTRACT, tokenId);
+      const osAttrs = Array.isArray(os?.nft?.traits) ? os.nft.traits : [];
+      if (osAttrs.length) return { attrs: osAttrs.map(massageTraitKeys), source: 'opensea' };
+    } catch (e) {
+      console.warn('OpenSea traits fallback failed:', e.message);
+    }
+  }
+  return { attrs: [], source: 'none' };
+}
+
+function extractAttributesFlexible(alchemyMeta) {
+  if (!alchemyMeta) return [];
+  const candidates = [];
+  const addIfAttrArray = (arr) => {
+    if (Array.isArray(arr) && arr.length && looksLikeAttributeArray(arr)) candidates.push(arr);
+  };
+
+  addIfAttrArray(alchemyMeta?.metadata?.attributes);
+  addIfAttrArray(alchemyMeta?.raw?.metadata?.attributes);
+  addIfAttrArray(alchemyMeta?.metadata?.traits);
+  addIfAttrArray(alchemyMeta?.raw?.metadata?.traits);
+  addIfAttrArray(alchemyMeta?.metadata?.properties?.attributes);
+  addIfAttrArray(alchemyMeta?.raw?.metadata?.properties?.attributes);
+
+  const tryParse = (maybeStr) => {
+    try {
+      if (typeof maybeStr === 'string' && maybeStr.trim().startsWith('{')) {
+        const obj = JSON.parse(maybeStr);
+        addIfAttrArray(obj.attributes);
+        addIfAttrArray(obj.traits);
+        addIfAttrArray(obj?.properties?.attributes);
+      }
+    } catch {}
+  };
+  tryParse(alchemyMeta?.raw?.metadata);
+  tryParse(alchemyMeta?.metadata);
+
+  const first = candidates.find(Boolean) || [];
+  return first.map(massageTraitKeys).filter(t => {
+    const v = String(t.value ?? '').trim().toLowerCase();
+    return v && v !== 'none';
+  });
+}
+
+function looksLikeAttributeArray(arr) {
+  return arr.some(o => o && typeof o === 'object' &&
+    ('value' in o) && ('trait_type' in o || 'traitType' in o || 'type' in o || 'key' in o));
+}
+
+function massageTraitKeys(t) {
+  const trait_type = String(t.trait_type ?? t.traitType ?? t.type ?? t.key ?? '').trim();
+  return { trait_type, value: t.value };
+}
+
+async function fetchOpenSeaNFT(contract, tokenId) {
+  if (!OPENSEA_API_KEY) throw new Error('No OPENSEA_API_KEY');
+  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contract}/nfts/${tokenId}`;
+  const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY }, timeout: 10000 });
+  if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
+  return res.json();
 }
