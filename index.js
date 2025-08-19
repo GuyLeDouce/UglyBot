@@ -628,38 +628,52 @@ function simpleRarityLabel(attrs) {
   if (n >= 3) return 'Uncommon';
   return 'Common';
 }
-function rarityColorFromLabel(label) {
-  switch ((label || '').toLowerCase()) {
-    case 'mythic':    return '#7C3AED';
-    case 'legendary': return '#F59E0B';
-    case 'rare':      return '#3B82F6';
-    case 'uncommon':  return '#10B981';
-    default:          return '#9CA3AF';
-  }
+// ===== COLORS / THEME (drop-in) =====
+const PALETTE = {
+  cardBg: '#242623',
+  frameFill: '#b9dded',
+  frameStroke: '#CFE3FF',
+  headerText: '#0F172A',
+
+  // rarity → header stripe color
+  rarityStripeByTier: {
+    Mythic:   '#fadf6a',
+    Legendary:'#b5a6e9',
+    Rare:     '#f2d2ea',
+    Uncommon: '#a6fbba',
+    Common:   '#c8dfea',
+  },
+
+  artBackfill: '#b9dded',
+  artStroke:   '#F9FAFB',
+
+  traitsPanelBg:     '#b9dded',
+  traitsPanelStroke: '#000000',
+
+  traitCardFill:   '#FFFFFF',
+  traitCardStroke: '#b9dded',
+  traitCardShadow: '#0000001A',
+
+  traitHeaderFill:   '#b9dded',
+  traitHeaderStroke: '#b9dded',
+
+  traitTitleText: '#222625',
+  traitValueText: '#775fbb',
+
+  footerText: '#212524',
+};
+
+function stripeFromRarity(label) {
+  return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
 
-// Group traits into fixed categories
-function normalizeTraits(list) {
-  const groups = {
-    Background: [],
-    Body: [],
-    Eyes: [],
-    Head: [],
-    Legend: [],
-    Skin: [],
-    Special: [],
-    Type: []
-  };
-  for (const t of (list || [])) {
-    const key = (t?.trait_type || '').trim();
-    const val = t?.value;
-    if (!key || typeof val === 'undefined' || val === null) continue;
-    const target = (key in groups) ? key : key;
-    if (!groups[target]) groups[target] = [];
-    groups[target].push({ trait_type: key, value: val });
-  }
-  return groups;
-}
+// Local font aliases (works whether your file defines FONT_* or FONT_FAMILY_*)
+const FONT_REG =
+  (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
+  (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
+const FONT_BOLD =
+  (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
+  (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
 
 // ====== RENDERER (square art, tighter traits, auto-compress) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
@@ -667,53 +681,54 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // Card background — light blue
-  ctx.fillStyle = '#E6F3FF';
+  // Use palette
+  ctx.fillStyle = PALETTE.cardBg;
   ctx.fillRect(0, 0, W, H);
 
   // Outer frame
-  drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, '#ffffff');
-  ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
+  drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
+  ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
 
   // Header stripe (rarity color)
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripe);
-  ctx.fillStyle = '#0f172a';
+  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel);
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
+  ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  ctx.font = `36px ${FONT_BOLD_FAMILY}`;
+  ctx.font = `36px ${FONT_BOLD}`;
   ctx.fillText(name, 64, 94);
 
   // Rank / rarity (right)
   const rightText = rankInfo?.rank
     ? (rankInfo?.total ? `OpenSea Rank #${rankInfo.rank}/${rankInfo.total}` : `OpenSea Rank #${rankInfo.rank}`)
-    : rarityLabel;
-  ctx.font = `28px ${FONT_BOLD_FAMILY}`;
+    : (rarityLabel || '');
+  ctx.font = `28px ${FONT_BOLD}`;
   const tw = ctx.measureText(rightText).width;
   ctx.fillText(rightText, W - 64 - tw, 94);
 
   // === Art window: square, image fills & clips ===
-  const AW = 420, AH = 420;                           // smaller to free space
+  const AW = 420, AH = 420;
   const AX = Math.round((W - AW) / 2);
   const AY = 160;
 
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, 22, '#f9fafb');  // backfill
+  drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill); // backfill
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
     const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
     ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   } catch {
-    ctx.fillStyle = '#9CA3AF'; ctx.font = `26px ${FONT_REGULAR_FAMILY}`;
+    ctx.fillStyle = '#9CA3AF'; ctx.font = `26px ${FONT_REG}`;
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
   ctx.restore();
-  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2;
+  ctx.strokeStyle = PALETTE.artStroke; ctx.lineWidth = 2;
   roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
 
-  // === Traits panel — white background ===
+  // === Traits panel — white/blue theme ===
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92; // leave room for footer
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
-  ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, PALETTE.traitsPanelBg);
+  ctx.strokeStyle = PALETTE.traitsPanelStroke; ctx.lineWidth = 2; ctx.stroke();
 
   // Build compact boxes in order; filter out "None"/empty
   const PAD = 12;
@@ -739,7 +754,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       if (hidden > 0) shown.push(`+${hidden} more`);
 
       const rowsH = shown.length * lineH;
-      const minRows = 36; // ensure a bit of room
+      const minRows = 34; // ensure a bit of room
       const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
 
       boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
@@ -771,28 +786,28 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Draw mini-cards
   for (const b of L.placed) {
     // outer card
-    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb', '#0000001a', 10, 2);
+    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
 
-    // trait type head — light blue
-    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, '#D9ECFF');
-    ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 1.5; ctx.stroke();
+    // trait type head
+    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, PALETTE.traitHeaderFill);
+    ctx.strokeStyle = PALETTE.traitHeaderStroke; ctx.lineWidth = 1.5; ctx.stroke();
 
     // title text
-    ctx.fillStyle = '#0F172A';
-    ctx.font = `19px ${FONT_BOLD_FAMILY}`;
+    ctx.fillStyle = PALETTE.traitTitleText;
+    ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
     ctx.fillText(b.cat, b.x + 12, b.y + Math.min(22, b.titleH - 8));
 
-    // rows area (white) + vertically centered rows
+    // rows area + vertically centered rows
     const rowsY = b.y + b.titleH;
-    drawRect(ctx, b.x, rowsY, b.w, b.boxH - b.titleH, '#ffffff');
+    drawRect(ctx, b.x, rowsY, b.w, b.boxH - b.titleH, PALETTE.traitCardFill);
 
     const avail = (b.boxH - b.titleH);
     const rowsH = b.lines.length * b.lineH;
     let yy = rowsY + Math.max(8, Math.floor((avail - rowsH) / 2) + 1);
 
-    ctx.fillStyle = '#3B82F6'; // blue-500 text
-    ctx.font = `15px ${FONT_REGULAR_FAMILY}`;
+    ctx.fillStyle = PALETTE.traitValueText;
+    ctx.font = `15px ${FONT_REG}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
       ctx.fillText(line, b.x + 12, yy + b.lineH / 2);
@@ -801,8 +816,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   }
 
   // Footer token line — outside trait section
-  ctx.fillStyle = '#667085';
-  ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
+  ctx.fillStyle = PALETTE.footerText;
+  ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
 
