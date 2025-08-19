@@ -26,23 +26,27 @@ const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
-// ===== FONT REGISTRATION (Playpen Sans) =====
-let FONT_FAMILY_REGULAR = 'Playpen Sans';
-let FONT_FAMILY_BOLD    = 'Playpen Sans'; // same family; weight decides the face
+// ===== FONT REGISTRATION (auto-download if missing) =====
+// Using official TypeTogether repo TTFs to avoid the Google Fonts 404.
+let FONT_REGULAR_FAMILY = 'PlaypenSans-Regular';
+let FONT_BOLD_FAMILY    = 'PlaypenSans-Bold';
 
 async function ensureFonts() {
+  const FONT_DIR = 'fonts';
+  fs.mkdirSync(FONT_DIR, { recursive: true });
+
   const files = [
     {
-      url: 'https://raw.githubusercontent.com/google/fonts/main/ofl/playpensans/PlaypenSans-Regular.ttf',
-      path: 'fonts/PlaypenSans-Regular.ttf'
+      url: 'https://raw.githubusercontent.com/TypeTogether/Playpen-Sans/main/fonts/ttf/PlaypenSans-Regular.ttf',
+      path: `${FONT_DIR}/PlaypenSans-Regular.ttf`,
+      family: 'PlaypenSans-Regular'
     },
     {
-      url: 'https://raw.githubusercontent.com/google/fonts/main/ofl/playpensans/PlaypenSans-Bold.ttf',
-      path: 'fonts/PlaypenSans-Bold.ttf'
+      url: 'https://raw.githubusercontent.com/TypeTogether/Playpen-Sans/main/fonts/ttf/PlaypenSans-Bold.ttf',
+      path: `${FONT_DIR}/PlaypenSans-Bold.ttf`,
+      family: 'PlaypenSans-Bold'
     }
   ];
-
-  fs.mkdirSync('fonts', { recursive: true });
 
   for (const f of files) {
     if (!fs.existsSync(f.path)) {
@@ -50,24 +54,17 @@ async function ensureFonts() {
       if (!r.ok) throw new Error(`Font download failed: ${r.status} (${f.url})`);
       fs.writeFileSync(f.path, Buffer.from(await r.arrayBuffer()));
     }
+    try { GlobalFonts.registerFromPath(f.path, f.family); } catch (e) {
+      console.warn('Font register error:', e.message);
+    }
   }
-
-  // Register both under the SAME family so "bold" picks the bold face.
-  try { GlobalFonts.registerFromPath('fonts/PlaypenSans-Regular.ttf', 'Playpen Sans'); } catch {}
-  try { GlobalFonts.registerFromPath('fonts/PlaypenSans-Bold.ttf',    'Playpen Sans'); } catch {}
-
-  console.log('🖋 Fonts ready: Playpen Sans (regular+bold)');
+  console.log('🖋 Fonts ready:', files.map(f => f.family).join(', '));
 }
-
-// fire-and-forget; it’ll finish before the first /card render
 ensureFonts().catch(e => {
   console.warn('⚠️ Could not ensure fonts:', e.message);
-  FONT_FAMILY_REGULAR = 'sans-serif';
-  FONT_FAMILY_BOLD    = 'sans-serif';
+  FONT_REGULAR_FAMILY = 'sans-serif';
+  FONT_BOLD_FAMILY    = 'sans-serif';
 });
-
-
-
 
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
@@ -89,14 +86,18 @@ const CHARM_REWARDS = [150, 200, 350, 200]; // Weighted pool
 
 // ===== CLIENT =====
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 // ===== UTILS =====
-const fetchWithRetry = async (url, retries = 3, delay = 1000) => {
+const fetchWithRetry = async (url, retries = 3, delay = 1000, opts = {}) => {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const res = await fetch(url, { timeout: 7000 });
+      const res = await fetch(url, { timeout: 10000, ...opts });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
     } catch (err) {
@@ -111,7 +112,7 @@ if (fs.existsSync('walletLinks.json')) {
   walletLinks = JSON.parse(fs.readFileSync('walletLinks.json'));
 }
 
-// ===== Slash command registrar (guild-scoped) =====
+// ===== Slash command registrar (guild-scoped for fast iteration) =====
 async function registerSlashCommands() {
   try {
     if (!DISCORD_CLIENT_ID || !GUILD_ID) {
@@ -123,19 +124,23 @@ async function registerSlashCommands() {
     const commands = [
       new SlashCommandBuilder()
         .setName('card')
-        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh
+        .setDescription(`Create a Squigs trading card JPEG (${Date.now()})`)
         .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-        .addStringOption(o => o.setName('name').setDescription('Optional display name'))
+        .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
         .toJSON()
     ];
 
-    const route = Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID);
-    const putRes = await rest.put(route, { body: commands });
-    console.log(`✅ Registered ${putRes.length} guild slash command(s) to ${GUILD_ID}.`);
-    const listRes = await rest.get(route);
-    console.log('🔎 Guild commands now:', listRes.map(c => `${c.name} (${c.id})`).join(', '));
+    const data = await rest.put(
+      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+    console.log(`✅ Registered ${data.length} guild slash command(s) to ${GUILD_ID}.`);
+
+    // list commands for sanity
+    const guildCmds = await rest.get(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID));
+    console.log('🔎 Guild commands now:', guildCmds.map(c => `${c.name} (${c.id})`).join(', '));
   } catch (e) {
-    console.error('❌ Slash register error:', e?.rawError ?? e?.data ?? e);
+    console.error('❌ Slash register error:', e?.data ?? e);
   }
 }
 
@@ -149,7 +154,7 @@ client.on('ready', async () => {
 function maybeRewardCharm(userId, username) {
   const roll = Math.floor(Math.random() * 200);
   if (roll === 0) {
-    const rewards = [100, 100, 100, 200];
+    const rewards = [100, 100, 100, 200]; // weighted pool
     const reward = rewards[Math.floor(Math.random() * rewards.length)];
     const loreMessages = [
       "A Squig blinked and $CHARM fell out of the sky.",
@@ -167,7 +172,7 @@ function maybeRewardCharm(userId, username) {
   return null;
 }
 
-// ===== PREFIX COMMANDS (your existing ones) =====
+// ===== PREFIX COMMANDS (existing ones, unchanged) =====
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith('!') || message.author.bot) return;
 
@@ -279,8 +284,10 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Charm of the Ugly NFTs.');
 
-      const itemsPerPage = 5; let page = 0;
+      const itemsPerPage = 5;
+      let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
+
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -303,13 +310,27 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
+        if (interaction.user.id !== message.author.id) {
+          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        }
+        if (interaction.customId === 'prev') {
+          page = page > 0 ? page - 1 : totalPages - 1;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'next') {
+          page = page < totalPages - 1 ? page + 1 : 0;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'stop') {
+          collector.stop();
+          await interaction.update({ components: [] });
+        }
       });
 
-      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
+      collector.on('end', async () => {
+        try { await messageReply.edit({ components: [] }); } catch (e) {}
+      });
+
     } catch (err) {
       console.error('❌ Fetch failed (myuglys):', err.message);
       return message.reply('⚠️ Error fetching your Uglies. Please try again later.');
@@ -335,8 +356,10 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Ugly Monster NFTs.');
 
-      const itemsPerPage = 5; let page = 0;
+      const itemsPerPage = 5;
+      let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
+
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -359,13 +382,27 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
+        if (interaction.user.id !== message.author.id) {
+          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        }
+        if (interaction.customId === 'prev') {
+          page = page > 0 ? page - 1 : totalPages - 1;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'next') {
+          page = page < totalPages - 1 ? page + 1 : 0;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'stop') {
+          collector.stop();
+          await interaction.update({ components: [] });
+        }
       });
 
-      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
+      collector.on('end', async () => {
+        try { await messageReply.edit({ components: [] }); } catch (e) {}
+      });
+
     } catch (err) {
       console.error('❌ Fetch failed (mymonsters):', err.message);
       return message.reply('⚠️ Error fetching your Monsters. Please try again later.');
@@ -450,8 +487,10 @@ client.on('messageCreate', async (message) => {
       const tokenArray = Array.from(owned);
       if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Squigs.');
 
-      const itemsPerPage = 5; let page = 0;
+      const itemsPerPage = 5;
+      let page = 0;
       const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
+
       const generateEmbeds = (page) => {
         const start = page * itemsPerPage;
         const tokens = tokenArray.slice(start, start + itemsPerPage);
@@ -475,19 +514,34 @@ client.on('messageCreate', async (message) => {
       const collector = messageReply.createMessageComponentCollector({ time: 120000 });
 
       collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        if (interaction.customId === 'prev') { page = page > 0 ? page - 1 : totalPages - 1; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'next') { page = page < totalPages - 1 ? page + 1 : 0; await interaction.update({ embeds: generateEmbeds(page) }); }
-        if (interaction.customId === 'stop') { collector.stop(); await interaction.update({ components: [] }); }
+        if (interaction.user.id !== message.author.id) {
+          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
+        }
+        if (interaction.customId === 'prev') {
+          page = page > 0 ? page - 1 : totalPages - 1;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'next') {
+          page = page < totalPages - 1 ? page + 1 : 0;
+          await interaction.update({ embeds: generateEmbeds(page) });
+        }
+        if (interaction.customId === 'stop') {
+          collector.stop();
+          await interaction.update({ components: [] });
+        }
       });
 
-      collector.on('end', async () => { try { await messageReply.edit({ components: [] }); } catch (e) {} });
+      collector.on('end', async () => {
+        try { await messageReply.edit({ components: [] }); } catch (e) {}
+
+      });
 
       const charmDrop = maybeRewardCharm(message.author.id, message.author.username);
       if (charmDrop) {
         message.channel.send(`🎁 **${message.author.username}** just got **${charmDrop.reward} $CHARM**!\n*${charmDrop.lore}*\n👉 Ping <@826581856400179210> to get your $CHARM`);
         console.log(`CHARM REWARD: ${message.author.username} (${message.author.id}) got ${charmDrop.reward} $CHARM.`);
       }
+
     } catch (err) {
       console.error('❌ Fetch failed (mysquigs):', err.message);
       return message.reply('⚠️ Error fetching your Squigs. Please try again later.');
@@ -506,31 +560,42 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await interaction.deferReply();
 
-    // Traits (Alchemy → on-chain fallback)
-    const { nameFromMeta, traits } = await getTraitsForSquig(tokenId);
-    console.log('Traits debug:', { tokenId, count: traits.length, sample: traits.slice(0, 3) });
+    // Metadata from Alchemy (no ownership check)
+    const meta = await getNftMetadataAlchemy(tokenId);
+    const traitsRaw =
+      Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
+      (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
+    const traits = normalizeTraits(traitsRaw);
+    const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
+    const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-    const displayName = customName || nameFromMeta || `Squig #${tokenId}`;
-    const traitCounts = loadTraitCountsSafe();
-    const cardTraits = buildCardTraits(traits, traitCounts);
+    // Try to fetch OpenSea rarity rank (optional)
+    const rankInfo = OPENSEA_API_KEY
+      ? await fetchOpenSeaRank(tokenId).catch(() => null)
+      : null;
 
-    // RARITY: try OpenSea rank, else heuristic
-    const os = await getOpenSeaRarityRank(tokenId);
-    let rarityText, tier;
-    if (os?.rank) { rarityText = `Rank #${os.rank}`; tier = tierFromRank(os.rank); }
-    else { const h = simpleRarityLabel(traits); rarityText = h; tier = h; }
+    // Fallback rarity label if no rank
+    const rarityLabel = simpleRarityLabel(traitsRaw);
+    const headerStripe = rarityColorFromLabel(rarityLabel);
+
+    console.log('Traits debug:', {
+      tokenId, groups: Object.fromEntries(Object.entries(traits).map(([k, v]) => [k, v?.length || 0])),
+      rank: rankInfo?.rank ?? null, label: rarityLabel
+    });
 
     const buffer = await renderSquigCard({
       name: displayName,
-      rarityText,
-      tier,
       tokenId,
-      imageUrl: `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`,
-      cardTraits
+      imageUrl,
+      traits,
+      rankInfo,
+      rarityLabel,
+      headerStripe
     });
 
     const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
     await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+
   } catch (err) {
     console.error('❌ /card error:', err);
     if (interaction.deferred) {
@@ -544,72 +609,28 @@ client.on('interactionCreate', async (interaction) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 
-// ===== Helpers (metadata, traits, rarity, canvas) =====
-async function getTraitsForSquig(tokenId) {
-  // 1) Try Alchemy REST
-  try {
-    const meta = await getNftMetadataAlchemy(tokenId);
-    const traits = extractTraits(meta);
-    const nameFromMeta = getNameFromMeta(meta);
-    if (traits.length) return { nameFromMeta, traits };
-  } catch (e) {
-    console.warn('Alchemy getNFTMetadata failed, will try on-chain:', e.message);
-  }
-  // 2) On-chain fallback: tokenURI → IPFS JSON
-  try {
-    const provider = new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`);
-    const abi = ["function tokenURI(uint256) view returns (string)"];
-    const contract = new ethers.Contract(SQUIGS_CONTRACT, abi, provider);
-    const uri = await contract.tokenURI(tokenId);
-    const http = ipfsToHttp(uri);
-    const res = await fetch(http);
-    if (!res.ok) throw new Error(`tokenURI fetch ${res.status}`);
-    const json = await res.json();
-    const traits = Array.isArray(json?.attributes) ? json.attributes : [];
-    const nameFromMeta = json?.name || null;
-    return { nameFromMeta, traits };
-  } catch (e) {
-    console.error('On-chain metadata fallback failed:', e.message);
-    return { nameFromMeta: null, traits: [] };
-  }
-}
-
+// ===== Helper funcs (metadata, rarity, canvas, utils) =====
 async function getNftMetadataAlchemy(tokenId) {
   const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
               `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Alchemy metadata error: ${res.status}`);
+  const res = await fetchWithRetry(url);
   return res.json();
 }
 
-function ipfsToHttp(uri) {
-  if (!uri) return uri;
-  return uri.replace(/^ipfs:\/\//, 'https://ipfs.io/ipfs/').replace('ipfs/ipfs/', 'ipfs/');
-}
-
-function extractTraits(meta) {
-  if (Array.isArray(meta?.metadata?.attributes)) return meta.metadata.attributes;
-  let raw = meta?.raw?.metadata;
-  if (typeof raw === 'string') {
-    try { raw = JSON.parse(raw); } catch { raw = null; }
-  }
-  if (Array.isArray(raw?.attributes)) return raw.attributes;
-  const os = meta?.openSea || meta?.open_sea;
-  if (os && os.traits && typeof os.traits === 'object') {
-    const arr = [];
-    for (const [trait_type, value] of Object.entries(os.traits)) arr.push({ trait_type, value });
-    if (arr.length) return arr;
-  }
-  if (Array.isArray(meta?.attributes)) return meta.attributes;
-  return [];
-}
-
-function getNameFromMeta(meta) {
-  if (meta?.metadata && typeof meta.metadata === 'object' && meta.metadata.name) return meta.metadata.name;
-  let raw = meta?.raw?.metadata;
-  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { raw = null; } }
-  if (raw && typeof raw === 'object' && raw.name) return raw.name;
-  return null;
+// OpenSea v2: Get NFT (includes rarity)
+// https://api.opensea.io/api/v2/chain/ethereum/contract/{address}/nfts/{identifier}
+async function fetchOpenSeaRank(tokenId) {
+  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
+  const res = await fetchWithRetry(url, 2, 500, { headers: { 'X-API-KEY': OPENSEA_API_KEY } });
+  const data = await res.json();
+  // Rarity object shape can evolve; guard everything:
+  const rarity = data?.rarity || data?.item?.rarity || null;
+  // Some responses embed total supply or percentile — guard for both:
+  const rank = rarity?.rank ?? rarity?.ranking ?? null;
+  const score = rarity?.score ?? null;
+  const percentile = rarity?.percentile ?? null;
+  const total = rarity?.max_rank ?? rarity?.collection_size ?? null;
+  return rank ? { rank, score, percentile, total } : null;
 }
 
 function loadTraitCountsSafe() {
@@ -630,82 +651,40 @@ function simpleRarityLabel(attrs) {
   return 'Common';
 }
 
-async function getOpenSeaRarityRank(tokenId) {
-  if (!OPENSEA_API_KEY) return null;
-  const endpoints = [
-    `https://api.opensea.io/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`,
-    `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`
-  ];
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY } });
-      if (!res.ok) continue;
-      const j = await res.json();
-      const rankAny = j?.nft?.rarity?.rank ?? j?.rarity?.rank ?? j?.nft?.rarity_rank ?? j?.rarity_rank;
-      const rank = typeof rankAny === 'number' ? rankAny : parseInt(rankAny, 10);
-      if (!Number.isNaN(rank)) return { rank };
-    } catch {}
-  }
-  return null;
-}
-
-function tierFromRank(rank) {
-  if (rank <= 100) return 'Mythic';
-  if (rank <= 500) return 'Legendary';
-  if (rank <= 1500) return 'Rare';
-  if (rank <= 3000) return 'Uncommon';
-  return 'Common';
-}
-
-const CANON_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
-const TRAIT_ALIASES = {
-  background: 'Background', bg: 'Background', backdrop: 'Background',
-  body: 'Body',
-  eyes: 'Eyes', eye: 'Eyes',
-  head: 'Head', hat: 'Head', headwear: 'Head',
-  legend: 'Legend',
-  skin: 'Skin',
-  special: 'Special', accessory: 'Special',
-  type: 'Type', class: 'Type'
-};
-
-function canonicalizeTraits(rawTraits) {
-  const map = {};
-  (rawTraits || []).forEach(t => {
-    const key = String(t?.trait_type ?? '').trim().toLowerCase();
-    const canon = TRAIT_ALIASES[key];
-    if (!canon) return;
-    if (map[canon]) return; // first one wins
-    map[canon] = (t?.value ?? '').toString();
-  });
-  return map;
-}
-
-function buildCardTraits(rawTraits, traitCounts) {
-  const map = canonicalizeTraits(rawTraits);
-  const out = [];
-  for (const label of CANON_ORDER) {
-    const value = map[label];
-    if (!value) continue;
-    const count = traitCounts?.[label]?.[value];
-    out.push({ label, value, count: (typeof count === 'number' ? count : null) });
-  }
-  return out;
-}
-
-// ===== Card renderer =====
-function headerColorForTier(tier) {
-  switch (tier) {
-    case 'Mythic':    return '#FF6B6B'; // red
-    case 'Legendary': return '#E6B325'; // gold
-    case 'Rare':      return '#6C5CE7'; // purple
-    case 'Uncommon':  return '#2ECC71'; // green
-    case 'Common':
-    default:          return '#F2D95C'; // yellow
+function rarityColorFromLabel(label) {
+  switch ((label || '').toLowerCase()) {
+    case 'mythic':    return '#7C3AED';
+    case 'legendary': return '#F59E0B';
+    case 'rare':      return '#3B82F6';
+    case 'uncommon':  return '#10B981';
+    default:          return '#9CA3AF';
   }
 }
 
-async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, cardTraits }) {
+// Group traits into fixed categories
+function normalizeTraits(list) {
+  const groups = {
+    Background: [],
+    Body: [],
+    Eyes: [],
+    Head: [],
+    Legend: [],
+    Skin: [],
+    Special: [],
+    Type: []
+  };
+  for (const t of (list || [])) {
+    const key = (t?.trait_type || '').trim();
+    const val = t?.value;
+    if (!key || typeof val === 'undefined' || val === null) continue;
+    const target = (key in groups) ? key : key; // keep original for unknowns
+    if (!groups[target]) groups[target] = [];
+    groups[target].push({ trait_type: key, value: val });
+  }
+  return groups;
+}
+
+async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
@@ -717,87 +696,78 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
 
   // Frame
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, '#ffffff');
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Header (colored by tier)
-  const headerColor = headerColorForTier(tier);
-  drawRoundRect(ctx, 48, 52, W - 96, 80, 18, headerColor);
-
-  // Title + rarity text
-  ctx.fillStyle = '#1c1c1c';
+  // Header stripe (colored by rarity)
+  drawRoundRect(ctx, 48, 52, W - 96, 88, 18, headerStripe);
+  // Name (left)
+  ctx.fillStyle = '#0f172a';
   ctx.textBaseline = 'middle';
-  ctx.font = `bold 32px ${FONT_FAMILY_BOLD}`;
-  ctx.fillText(name, 64, 92);
+  ctx.font = `36px ${FONT_BOLD_FAMILY}`;
+  ctx.fillText(name, 64, 96);
 
-  ctx.font = `bold 28px ${FONT_FAMILY_BOLD}`;
-  const label = rarityText || '—';
-  const tw = ctx.measureText(label).width;
-  ctx.fillText(label, W - 64 - tw, 92);
+  // Rank / Rarity (right)
+  const rightText = rankInfo?.rank
+    ? (rankInfo?.total ? `OpenSea Rank #${rankInfo.rank}/${rankInfo.total}` : `OpenSea Rank #${rankInfo.rank}`)
+    : rarityLabel;
+  ctx.font = `28px ${FONT_BOLD_FAMILY}`;
+  const tw = ctx.measureText(rightText).width;
+  ctx.fillText(rightText, W - 64 - tw, 96);
 
   // Art window
-  const AX = 60, AY = 150, AW = W - 120, AH = 540;
-  drawRoundRect(ctx, AX, AY, AW, AH, 16, '#fafafa', '#e3e3e3');
+  const AX = 60, AY = 160, AW = W - 120, AH = 520;
+  drawRoundRect(ctx, AX, AY, AW, AH, 16, '#f9fafb');
+  ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = contain(img.width, img.height, AW - 16, AH - 16);
-    ctx.drawImage(img, AX + 8 + dx, AY + 8 + dy, dw, dh);
+    const { dx, dy, dw, dh } = contain(img.width, img.height, AW - 24, AH - 24);
+    ctx.drawImage(img, AX + 12 + dx, AY + 12 + dy, dw, dh);
   } catch {
-    ctx.fillStyle = '#bbb';
-    ctx.font = `26px ${FONT_FAMILY_REGULAR}`;
+    ctx.fillStyle = '#9CA3AF'; ctx.font = `26px ${FONT_REGULAR_FAMILY}`;
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
 
   // Traits panel
-  const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 60;
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff', '#e3e3e3');
+  const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 70;
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
+  ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
 
-  ctx.fillStyle = '#333';
-  ctx.font = `bold 26px ${FONT_FAMILY_BOLD}`;
-  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText('Traits', TX + 16, TY + 36);
+  const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+  let y = TY + 30;
 
-  // divider
-  ctx.strokeStyle = '#E9E9EF'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(TX + 12, TY + 44); ctx.lineTo(TX + TW - 12, TY + 44); ctx.stroke();
+  for (const cat of order) {
+    const items = traits[cat] || [];
+    if (!items.length) continue;
 
-  const rowH = 38;
-  let y = TY + 80;
+    // Category title
+    ctx.fillStyle = '#111827';
+    ctx.font = `24px ${FONT_BOLD_FAMILY}`;
+    ctx.fillText(cat, TX + 16, y);
+    y += 28;
 
-  if (!cardTraits || cardTraits.length === 0) {
-    ctx.font = `20px ${FONT_FAMILY_REGULAR}`;
-    ctx.fillStyle = '#8a8a8a';
-    ctx.fillText('No categorized traits found for this token.', TX + 16, y);
-  } else {
-    (cardTraits || []).forEach(({ label, value, count }) => {
-      ctx.font = `bold 22px ${FONT_FAMILY_BOLD}`;
-      ctx.fillStyle = '#3a3a3a';
-      ctx.fillText(label + ':', TX + 16, y);
-
-      ctx.font = `22px ${FONT_FAMILY_REGULAR}`;
-      ctx.fillStyle = '#141414';
-      const valueText = String(value);
-      ctx.fillText(valueText, TX + 160, y);
-
-      if (typeof count === 'number') {
-        ctx.font = `20px ${FONT_FAMILY_REGULAR}`;
-        ctx.fillStyle = '#6a6a6a';
-        const w = ctx.measureText(valueText).width;
-        ctx.fillText(`— ${count} in collection`, TX + 160 + w + 12, y);
-      }
-      y += rowH;
-    });
+    // Trait rows
+    ctx.fillStyle = '#334155';
+    ctx.font = `20px ${FONT_REGULAR_FAMILY}`;
+    for (const t of items) {
+      // Show normalized "trait value"
+      const val = (t?.value ?? '').toString();
+      ctx.fillText(`• ${val}`, TX + 28, y);
+      y += 24;
+      if (y > TY + TH - 40) break; // avoid overflow
+    }
+    y += 12;
+    if (y > TY + TH - 28) break;
   }
 
-  // footer inside panel
-  ctx.font = `18px ${FONT_FAMILY_REGULAR}`;
-  ctx.fillStyle = '#666';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, TY + TH - 16);
+  // Footer line with token id
+  ctx.fillStyle = '#6B7280';
+  ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
+  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, TY + TH - 12);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
 
-// ========== Drawing helpers ==========
-function drawRoundRect(ctx, x, y, w, h, r, fill, stroke) {
+function drawRoundRect(ctx, x, y, w, h, r, fill) {
   const rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
@@ -806,8 +776,7 @@ function drawRoundRect(ctx, x, y, w, h, r, fill, stroke) {
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
-  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-  if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+  ctx.fillStyle = fill; ctx.fill();
 }
 
 function contain(sw, sh, mw, mh) {
