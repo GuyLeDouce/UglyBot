@@ -27,7 +27,7 @@ const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
 // ===== FONT REGISTRATION (auto-download if missing) =====
-// Using official TypeTogether repo TTFs to avoid the Google Fonts 404.
+// Using TypeTogether repo for TTFs to avoid GF path issues.
 let FONT_REGULAR_FAMILY = 'PlaypenSans-Regular';
 let FONT_BOLD_FAMILY    = 'PlaypenSans-Bold';
 
@@ -172,7 +172,7 @@ function maybeRewardCharm(userId, username) {
   return null;
 }
 
-// ===== PREFIX COMMANDS (existing ones, unchanged) =====
+// ===== PREFIX COMMANDS (existing ones) =====
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith('!') || message.author.bot) return;
 
@@ -579,8 +579,10 @@ client.on('interactionCreate', async (interaction) => {
     const headerStripe = rarityColorFromLabel(rarityLabel);
 
     console.log('Traits debug:', {
-      tokenId, groups: Object.fromEntries(Object.entries(traits).map(([k, v]) => [k, v?.length || 0])),
-      rank: rankInfo?.rank ?? null, label: rarityLabel
+      tokenId,
+      groups: Object.fromEntries(Object.entries(traits).map(([k, v]) => [k, v?.length || 0])),
+      rank: rankInfo?.rank ?? null,
+      label: rarityLabel
     });
 
     const buffer = await renderSquigCard({
@@ -617,15 +619,12 @@ async function getNftMetadataAlchemy(tokenId) {
   return res.json();
 }
 
-// OpenSea v2: Get NFT (includes rarity)
-// https://api.opensea.io/api/v2/chain/ethereum/contract/{address}/nfts/{identifier}
+// OpenSea v2: Get NFT (attempt to read rarity)
 async function fetchOpenSeaRank(tokenId) {
   const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
   const res = await fetchWithRetry(url, 2, 500, { headers: { 'X-API-KEY': OPENSEA_API_KEY } });
   const data = await res.json();
-  // Rarity object shape can evolve; guard everything:
   const rarity = data?.rarity || data?.item?.rarity || null;
-  // Some responses embed total supply or percentile — guard for both:
   const rank = rarity?.rank ?? rarity?.ranking ?? null;
   const score = rarity?.score ?? null;
   const percentile = rarity?.percentile ?? null;
@@ -684,6 +683,7 @@ function normalizeTraits(list) {
   return groups;
 }
 
+// ====== RENDERER (2-column trait grid with shaded mini-cards) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -691,22 +691,21 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // Background
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#f6f6ff'); g.addColorStop(1, '#e9ecff');
+  g.addColorStop(0, '#f6f7ff'); g.addColorStop(1, '#e9ecff');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 
-  // Frame
+  // Outer frame
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, '#ffffff');
   ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Header stripe (colored by rarity)
-  drawRoundRect(ctx, 48, 52, W - 96, 88, 18, headerStripe);
-  // Name (left)
+  // Header stripe (rarity color)
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 88, 18, headerStripe);
   ctx.fillStyle = '#0f172a';
   ctx.textBaseline = 'middle';
   ctx.font = `36px ${FONT_BOLD_FAMILY}`;
   ctx.fillText(name, 64, 96);
 
-  // Rank / Rarity (right)
+  // Rank / rarity (right)
   const rightText = rankInfo?.rank
     ? (rankInfo?.total ? `OpenSea Rank #${rankInfo.rank}/${rankInfo.total}` : `OpenSea Rank #${rankInfo.rank}`)
     : rarityLabel;
@@ -727,42 +726,89 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
 
-  // Traits panel
-  const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 70;
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
-  ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
+  // Traits panel background
+  const TX = 60, TY = AY + AH + 28, TW = W - 120, TH = H - TY - 60;
+  const pg = ctx.createLinearGradient(0, TY, 0, TY + TH);
+  pg.addColorStop(0, '#f8fbff'); pg.addColorStop(1, '#eef2ff');
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, pg);
+  ctx.strokeStyle = '#dbe3ff'; ctx.lineWidth = 2; ctx.stroke();
 
+  // Inner grid area
+  const PAD = 16;
+  const innerX = TX + PAD, innerY = TY + PAD;
+  const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  const COL_GAP = 16, COL_W = (innerW - COL_GAP) / 2;
+
+  // Prepare categories in order, skipping empties
   const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
-  let y = TY + 30;
-
+  const boxes = [];
   for (const cat of order) {
     const items = traits[cat] || [];
     if (!items.length) continue;
 
-    // Category title
-    ctx.fillStyle = '#111827';
-    ctx.font = `24px ${FONT_BOLD_FAMILY}`;
-    ctx.fillText(cat, TX + 16, y);
-    y += 28;
+    // Cap visible items per box; show "+N more" if necessary
+    const maxLines = 6;
+    const lines = items.slice(0, maxLines).map(t => `• ${String(t?.value ?? '')}`);
+    const hidden = items.length - lines.length;
+    if (hidden > 0) lines.push(`+${hidden} more`);
 
-    // Trait rows
-    ctx.fillStyle = '#334155';
-    ctx.font = `20px ${FONT_REGULAR_FAMILY}`;
-    for (const t of items) {
-      // Show normalized "trait value"
-      const val = (t?.value ?? '').toString();
-      ctx.fillText(`• ${val}`, TX + 28, y);
-      y += 24;
-      if (y > TY + TH - 40) break; // avoid overflow
-    }
-    y += 12;
-    if (y > TY + TH - 28) break;
+    // Dynamic height
+    const titleH = 26;
+    const lineH = 22;
+    const boxH = 20 + titleH + lines.length * lineH + 14;
+
+    boxes.push({ cat, lines, boxH });
   }
 
-  // Footer line with token id
+  // Masonry flow into two columns
+  let yL = innerY, yR = innerY;
+  const placed = [];
+  for (const b of boxes) {
+    const left = yL <= yR;
+    const x = left ? innerX : innerX + COL_W + COL_GAP;
+    const y = left ? yL : yR;
+    placed.push({ ...b, x, y, w: COL_W });
+    if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
+  }
+
+  // Draw each mini-card
+  for (const b of placed) {
+    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb');
+
+    // Header tint
+    const headH = 36;
+    const headG = ctx.createLinearGradient(0, b.y, 0, b.y + headH);
+    headG.addColorStop(0, '#f3f4f6'); headG.addColorStop(1, '#eceef2');
+    drawRoundRect(ctx, b.x, b.y, b.w, headH, 12, headG);
+    ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
+
+    // Category title
+    ctx.fillStyle = '#111827';
+    ctx.font = `22px ${FONT_BOLD_FAMILY}`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(b.cat, b.x + 14, b.y + 25);
+
+    // Optional divider line
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y + headH + 0.5);
+    ctx.lineTo(b.x + b.w, b.y + headH + 0.5);
+    ctx.stroke();
+
+    // Trait lines
+    let yy = b.y + headH + 12;
+    ctx.fillStyle = '#334155';
+    ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
+    for (const line of b.lines) {
+      ctx.fillText(line, b.x + 14, yy);
+      yy += 22;
+    }
+  }
+
+  // Footer token line
   ctx.fillStyle = '#6B7280';
   ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
-  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, TY + TH - 12);
+  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 18, TY + TH - 14);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
@@ -777,6 +823,28 @@ function drawRoundRect(ctx, x, y, w, h, r, fill) {
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
   ctx.fillStyle = fill; ctx.fill();
+}
+
+function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
+  ctx.save();
+  ctx.shadowColor = shadowColor;
+  ctx.shadowBlur = shadowBlur;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = shadowDy;
+
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+
+  ctx.restore();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
 }
 
 function contain(sw, sh, mw, mh) {
