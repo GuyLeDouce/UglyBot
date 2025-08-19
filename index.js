@@ -26,6 +26,36 @@ const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
+// ===== FONT REGISTRATION =====
+let FONT_REGULAR = 'Inter-Regular';
+let FONT_BOLD = 'Inter-Bold';
+let FONT_FAMILY_REGULAR = 'Inter';
+let FONT_FAMILY_BOLD = 'Inter';
+
+(function registerFonts() {
+  const candidates = [
+    { path: 'fonts/Inter-Regular.ttf', name: FONT_REGULAR, family: 'Inter' },
+    { path: 'fonts/Inter-Bold.ttf',    name: FONT_BOLD,    family: 'Inter' },
+  ];
+  let ok = 0;
+  for (const { path, name, family } of candidates) {
+    if (fs.existsSync(path)) {
+      try {
+        GlobalFonts.registerFromPath(path, name);
+        ok++;
+      } catch (e) {
+        console.warn('⚠️ Failed to register font', path, e.message);
+      }
+    }
+  }
+  if (ok < candidates.length) {
+    console.warn('⚠️ Fonts not fully registered. Add TTFs in /fonts for text rendering. Using generic fallback.');
+    // Fall back to generic families (may still render nothing on minimal images)
+    FONT_FAMILY_REGULAR = 'sans-serif';
+    FONT_FAMILY_BOLD = 'sans-serif';
+  }
+})();
+
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
   hasToken: !!DISCORD_TOKEN,
