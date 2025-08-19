@@ -867,3 +867,26 @@ async function fetchBuffer(url) {
   const ab = await r.arrayBuffer();
   return Buffer.from(ab);
 }
+// ===== TRAIT NORMALIZER (add this) =====
+const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+
+function normalizeTraits(attrs) {
+  const groups = {};
+  for (const k of TRAIT_ORDER) groups[k] = [];
+
+  for (const t of (Array.isArray(attrs) ? attrs : [])) {
+    const type = String(t?.trait_type ?? '').trim();
+    let val = t?.value;
+    if (!type || val == null) continue;
+
+    const valStr = String(val).trim();
+    if (!valStr || valStr.toLowerCase() === 'none') continue; // drop missing/none
+
+    // only keep the categories we care about
+    if (!groups.hasOwnProperty(type)) continue;
+
+    groups[type].push({ value: valStr });
+  }
+
+  return groups;
+}
