@@ -61,22 +61,32 @@ if (fs.existsSync('walletLinks.json')) {
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
 async function registerSlashCommands() {
-  if (!DISCORD_CLIENT_ID || !GUILD_ID) {
-    console.warn('⚠️ Set DISCORD_CLIENT_ID and GUILD_ID to register /card (guild-scoped).');
-    return;
+  try {
+    if (!DISCORD_CLIENT_ID || !GUILD_ID) {
+      console.warn('⚠️ DISCORD_CLIENT_ID or GUILD_ID missing; cannot register /card.');
+      return;
+    }
+    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+    const commands = [
+      new SlashCommandBuilder()
+        .setName('card')
+        .setDescription(`Create a Squigs trading card JPEG (${Date.now()})`) // bump description to force refresh
+        .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
+        .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
+        .toJSON()
+    ];
+
+    const data = await rest.put(
+      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+    console.log(`✅ Registered ${data.length} guild slash command(s) to ${GUILD_ID}.`);
+  } catch (e) {
+    console.error('❌ Slash register error:', e?.data ?? e);
   }
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('card')
-      .setDescription('Create a Squigs trading card JPEG')
-      .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-      .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
-      .toJSON()
-  ];
-  await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID), { body: commands });
-  console.log('✅ Registered /card (guild).');
 }
+
 
 // ===== READY =====
 client.on('ready', async () => {
