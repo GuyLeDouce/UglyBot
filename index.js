@@ -1,10 +1,4 @@
-require('dotenv').config();
-console.log('ENV CHECK:', {
-  hasToken: !!DISCORD_TOKEN,
-  clientId: DISCORD_CLIENT_ID,
-  guildId: GUILD_ID,
-  hasAlchemy: !!ALCHEMY_API_KEY
-});
+try { require('dotenv').config(); } catch (_) {}
 const {
   Client,
   GatewayIntentBits,
@@ -21,14 +15,19 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 
-// ===== ENV =====
-const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN; // fallback just in case
+const DISCORD_CLIENT_ID  = process.env.DISCORD_CLIENT_ID;
+const GUILD_ID           = process.env.GUILD_ID;
+const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
+const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
-const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
-
+// --- env sanity log (AFTER constants) ---
+console.log('ENV CHECK:', {
+  hasToken: !!DISCORD_TOKEN,
+  clientId: DISCORD_CLIENT_ID,
+  guildId: GUILD_ID,
+  hasAlchemy: !!ALCHEMY_API_KEY
+});
 // ===== CONTRACTS =====
 const UGLY_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
