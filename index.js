@@ -26,36 +26,46 @@ const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
-// ===== FONT REGISTRATION (auto-download if missing) =====
-// IMPORTANT: use the same family names here as you use in ctx.font
-let FONT_FAMILY_REGULAR = 'Inter-Regular';
-let FONT_FAMILY_BOLD    = 'Inter-Bold';
+// ===== FONT REGISTRATION (Playpen Sans) =====
+let FONT_FAMILY_REGULAR = 'Playpen Sans';
+let FONT_FAMILY_BOLD    = 'Playpen Sans'; // same family; weight decides the face
 
 async function ensureFonts() {
   const files = [
-    { url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Regular.ttf',
-      path: 'fonts/Inter-Regular.ttf', name: 'Inter-Regular' },
-    { url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Bold.ttf',
-      path: 'fonts/Inter-Bold.ttf',    name: 'Inter-Bold' }
+    {
+      url: 'https://raw.githubusercontent.com/google/fonts/main/ofl/playpensans/PlaypenSans-Regular.ttf',
+      path: 'fonts/PlaypenSans-Regular.ttf'
+    },
+    {
+      url: 'https://raw.githubusercontent.com/google/fonts/main/ofl/playpensans/PlaypenSans-Bold.ttf',
+      path: 'fonts/PlaypenSans-Bold.ttf'
+    }
   ];
+
   fs.mkdirSync('fonts', { recursive: true });
+
   for (const f of files) {
     if (!fs.existsSync(f.path)) {
       const r = await fetch(f.url);
-      if (!r.ok) throw new Error(`Font download failed: ${r.status}`);
+      if (!r.ok) throw new Error(`Font download failed: ${r.status} (${f.url})`);
       fs.writeFileSync(f.path, Buffer.from(await r.arrayBuffer()));
     }
-    try { GlobalFonts.registerFromPath(f.path, f.name); } catch {}
   }
-  console.log('🖋 Fonts ready:', files.map(f => f.name).join(', '));
+
+  // Register both under the SAME family so "bold" picks the bold face.
+  try { GlobalFonts.registerFromPath('fonts/PlaypenSans-Regular.ttf', 'Playpen Sans'); } catch {}
+  try { GlobalFonts.registerFromPath('fonts/PlaypenSans-Bold.ttf',    'Playpen Sans'); } catch {}
+
+  console.log('🖋 Fonts ready: Playpen Sans (regular+bold)');
 }
 
-// fire-and-forget; it will finish before the first /card render
+// fire-and-forget; it’ll finish before the first /card render
 ensureFonts().catch(e => {
   console.warn('⚠️ Could not ensure fonts:', e.message);
   FONT_FAMILY_REGULAR = 'sans-serif';
   FONT_FAMILY_BOLD    = 'sans-serif';
 });
+
 
 
 
