@@ -27,20 +27,16 @@ const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
 // ===== FONT REGISTRATION (auto-download if missing) =====
-let FONT_FAMILY_REGULAR = 'Inter';
-let FONT_FAMILY_BOLD = 'Inter';
-const { GlobalFonts } = require('@napi-rs/canvas');
+// IMPORTANT: use the same family names here as you use in ctx.font
+let FONT_FAMILY_REGULAR = 'Inter-Regular';
+let FONT_FAMILY_BOLD    = 'Inter-Bold';
 
 async function ensureFonts() {
   const files = [
-    {
-      url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Regular.ttf',
-      path: 'fonts/Inter-Regular.ttf', name: 'Inter-Regular'
-    },
-    {
-      url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Bold.ttf',
-      path: 'fonts/Inter-Bold.ttf', name: 'Inter-Bold'
-    }
+    { url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Regular.ttf',
+      path: 'fonts/Inter-Regular.ttf', name: 'Inter-Regular' },
+    { url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Bold.ttf',
+      path: 'fonts/Inter-Bold.ttf',    name: 'Inter-Bold' }
   ];
   fs.mkdirSync('fonts', { recursive: true });
   for (const f of files) {
@@ -54,12 +50,13 @@ async function ensureFonts() {
   console.log('🖋 Fonts ready:', files.map(f => f.name).join(', '));
 }
 
-// call it immediately (don’t await; it runs before first /card usage)
+// fire-and-forget; it will finish before the first /card render
 ensureFonts().catch(e => {
   console.warn('⚠️ Could not ensure fonts:', e.message);
   FONT_FAMILY_REGULAR = 'sans-serif';
-  FONT_FAMILY_BOLD = 'sans-serif';
+  FONT_FAMILY_BOLD    = 'sans-serif';
 });
+
 
 
 // Debug env (safe booleans/ids only)
