@@ -1,4 +1,4 @@
-// Load local .env when running outside Railway (Railway still injects envs)
+// Load local .env when running outside Railway (Railway injects envs)
 try { require('dotenv').config(); } catch (_) {}
 
 const {
@@ -16,6 +16,7 @@ const {
 const fetch = require('node-fetch');
 const fs = require('fs');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { ethers } = require('ethers');
 
 // ===== ENV =====
 const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN; // fallback
@@ -33,8 +34,8 @@ console.log('ENV CHECK:', {
 });
 
 // ===== CONTRACTS =====
-const UGLY_CONTRACT = '0x9492505633d74451bdf3079c09ccc979588bc309';
-const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
+const UGLY_CONTRACT   = '0x9492505633d74451bdf3079c09ccc979588bc309';
+const MONSTER_CONTRACT= '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
 const SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 
 // ===== CHARM DROPS =====
@@ -450,20 +451,17 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await interaction.deferReply();
 
-    // Metadata from Alchemy (no ownership check)
-    const meta = await getNftMetadataAlchemy(tokenId);
+    // Get traits (Alchemy → on-chain fallback)
+    const { nameFromMeta, traits } = await getTraitsForSquig(tokenId);
+    console.log('Traits debug:', { tokenId, count: traits.length, sample: traits.slice(0, 3) });
 
-    // robust extraction
-    const rawTraits = extractTraits(meta);
-    console.log('Traits debug:', { tokenId, rawTraitsCount: rawTraits.length, sample: rawTraits.slice(0, 3) });
-
-    const displayName = getNameFromMeta(meta) || customName || `Squig #${tokenId}`;
+    const displayName = customName || nameFromMeta || `Squig #${tokenId}`;
     const traitCounts = loadTraitCountsSafe();
-    const cardTraits = buildCardTraits(rawTraits, traitCounts);
-    const rarity = simpleRarityLabel(rawTraits);
+    const cardTraits = buildCardTraits(traits, traitCounts);
+    const rarity = simpleRarityLabel(traits);
 
     const buffer = await renderSquigCard({
-      name: customName || displayName,
+      name: displayName,
       rarity,
       tokenId,
       imageUrl: `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`,
@@ -471,7 +469,7 @@ client.on('interactionCreate', async (interaction) => {
     });
 
     const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
-    await interaction.editReply({ content: `🪪 **${customName || displayName}**`, files: [file] });
+    await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
   } catch (err) {
     console.error('❌ /card error:', err);
     if (interaction.deferred) {
@@ -486,12 +484,49 @@ client.on('interactionCreate', async (interaction) => {
 client.login(DISCORD_TOKEN);
 
 // ===== Helpers (metadata, traits, canvas) =====
+async function getTraitsForSquig(tokenId) {
+  // 1) Try Alchemy REST
+  try {
+    const meta = await getNftMetadataAlchemy(tokenId);
+    const traits = extractTraits(meta);
+    const nameFromMeta = getNameFromMeta(meta);
+    if (traits.length) return { nameFromMeta, traits };
+  } catch (e) {
+    console.warn('Alchemy getNFTMetadata failed, will try on-chain:', e.message);
+  }
+
+  // 2) On-chain fallback: tokenURI → IPFS JSON
+  try {
+    const provider = new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`);
+    const abi = ["function tokenURI(uint256) view returns (string)"];
+    const contract = new ethers.Contract(SQUIGS_CONTRACT, abi, provider);
+    const uri = await contract.tokenURI(tokenId);
+    const http = ipfsToHttp(uri);
+    const res = await fetch(http);
+    if (!res.ok) throw new Error(`tokenURI fetch ${res.status}`);
+    const json = await res.json();
+
+    const traits = Array.isArray(json?.attributes) ? json.attributes : [];
+    const nameFromMeta = json?.name || null;
+    return { nameFromMeta, traits };
+  } catch (e) {
+    console.error('On-chain metadata fallback failed:', e.message);
+    return { nameFromMeta: null, traits: [] };
+  }
+}
+
 async function getNftMetadataAlchemy(tokenId) {
   const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
               `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Alchemy metadata error: ${res.status}`);
   return res.json();
+}
+
+function ipfsToHttp(uri) {
+  if (!uri) return uri;
+  // ipfs://Qm... or ipfs://ipfs/Qm...
+  return uri.replace(/^ipfs:\/\//, 'https://ipfs.io/ipfs/').replace('ipfs/ipfs/', 'ipfs/');
 }
 
 // Handle Alchemy shapes (normalized, raw string/object, or openSea-style)
@@ -617,7 +652,7 @@ async function renderSquigCard({ name, rarity, tokenId, imageUrl, cardTraits }) 
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
 
-  // Traits panel (fixed categories, in order)
+  // Traits panel
   const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 60;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff', '#e3e3e3');
 
