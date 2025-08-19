@@ -654,7 +654,8 @@ const PALETTE = {
   traitCardStroke: '#b9dded',
   traitCardShadow: '#0000001A',
 
-  traitHeaderFill:   '#b9dded',
+  // Note: header fill is now dynamic per rarity; stroke remains configurable here
+  traitHeaderFill:   '#b9dded', // (unused for fill; kept for reference)
   traitHeaderStroke: '#b9dded',
 
   traitTitleText: '#222625',
@@ -788,9 +789,11 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     // outer card
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
 
-    // trait type head
-    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, PALETTE.traitHeaderFill);
-    ctx.strokeStyle = PALETTE.traitHeaderStroke; ctx.lineWidth = 1.5; ctx.stroke();
+    // trait type head — use rarity stripe color for fill
+    const traitHeaderFill = headerStripeFill; // matches rarity palette
+    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
+    ctx.strokeStyle = PALETTE.traitHeaderStroke; // keep stroke as configured (set to traitHeaderFill if you want it to match)
+    ctx.lineWidth = 1.5; ctx.stroke();
 
     // title text
     ctx.fillStyle = PALETTE.traitTitleText;
@@ -867,6 +870,7 @@ async function fetchBuffer(url) {
   const ab = await r.arrayBuffer();
   return Buffer.from(ab);
 }
+
 // ===== TRAIT NORMALIZER (add this) =====
 const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
 
@@ -890,6 +894,7 @@ function normalizeTraits(attrs) {
 
   return groups;
 }
+
 // Back-compat alias for older code paths
 function rarityColorFromLabel(label) {
   return stripeFromRarity(label);
