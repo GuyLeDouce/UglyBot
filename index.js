@@ -15,7 +15,7 @@ const {
 } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { ethers } = require('ethers');
 
 // ===== ENV =====
@@ -110,9 +110,9 @@ async function registerSlashCommands() {
     const commands = [
       new SlashCommandBuilder()
         .setName('card')
-        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh in Discord
+        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh
         .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-        .addStringOption(o => o.setName('name').setDescription('Optional display name')) // defaults to "Squig #ID"
+        .addStringOption(o => o.setName('name').setDescription('Optional display name'))
         .toJSON()
     ];
 
@@ -154,7 +154,7 @@ function maybeRewardCharm(userId, username) {
   return null;
 }
 
-// ===== PREFIX COMMANDS (existing ones) =====
+// ===== PREFIX COMMANDS (your existing ones) =====
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith('!') || message.author.bot) return;
 
@@ -169,7 +169,9 @@ client.on('messageCreate', async (message) => {
     }
     walletLinks[message.author.id] = address;
     fs.writeFileSync('walletLinks.json', JSON.stringify(walletLinks, null, 2));
-    try { await message.delete(); } catch (err) { console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message); }
+    try { await message.delete(); } catch (err) {
+      console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message);
+    }
     return message.channel.send({ content: '✅ Wallet linked.', allowedMentions: { repliedUser: false } });
   }
 
@@ -182,11 +184,13 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
         else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
       }
+
       if (owned.size === 0) return message.reply('😢 You don’t own any Charm of the Ugly NFTs.');
 
       const tokenArray = Array.from(owned);
@@ -216,11 +220,13 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
         else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
       }
+
       if (owned.size === 0) return message.reply('😢 You don’t own any Ugly Monster NFTs.');
 
       const tokenArray = Array.from(owned);
@@ -241,7 +247,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !myuglys
+  // !myuglys with pagination
   if (command === 'myuglys') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -250,6 +256,7 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -296,7 +303,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !mymonsters
+  // !mymonsters with pagination
   if (command === 'mymonsters') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -305,6 +312,7 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -360,6 +368,7 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -409,7 +418,7 @@ client.on('messageCreate', async (message) => {
     return message.reply({ embeds: [embed] });
   }
 
-  // !mysquigs
+  // !mysquigs with pagination
   if (command === 'mysquigs') {
     const wallet = walletLinks[message.author.id];
     if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
@@ -418,6 +427,7 @@ client.on('messageCreate', async (message) => {
     try {
       const res = await fetchWithRetry(url);
       const data = await res.json();
+
       const owned = new Set();
       for (const tx of data.result) {
         if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
@@ -491,17 +501,11 @@ client.on('interactionCreate', async (interaction) => {
     const traitCounts = loadTraitCountsSafe();
     const cardTraits = buildCardTraits(traits, traitCounts);
 
-    // === RARITY: try OpenSea rank, else heuristic ===
-    const os = await getOpenSeaRarityRank(tokenId); // { rank } | null
+    // RARITY: try OpenSea rank, else heuristic
+    const os = await getOpenSeaRarityRank(tokenId);
     let rarityText, tier;
-    if (os?.rank) {
-      rarityText = `Rank #${os.rank}`;
-      tier = tierFromRank(os.rank);
-    } else {
-      const heuristic = simpleRarityLabel(traits);   // Mythic/Legendary/Rare/Uncommon/Common
-      rarityText = heuristic;
-      tier = heuristic; // we map same labels in headerColorForTier
-    }
+    if (os?.rank) { rarityText = `Rank #${os.rank}`; tier = tierFromRank(os.rank); }
+    else { const h = simpleRarityLabel(traits); rarityText = h; tier = h; }
 
     const buffer = await renderSquigCard({
       name: displayName,
@@ -538,7 +542,6 @@ async function getTraitsForSquig(tokenId) {
   } catch (e) {
     console.warn('Alchemy getNFTMetadata failed, will try on-chain:', e.message);
   }
-
   // 2) On-chain fallback: tokenURI → IPFS JSON
   try {
     const provider = new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`);
@@ -549,7 +552,6 @@ async function getTraitsForSquig(tokenId) {
     const res = await fetch(http);
     if (!res.ok) throw new Error(`tokenURI fetch ${res.status}`);
     const json = await res.json();
-
     const traits = Array.isArray(json?.attributes) ? json.attributes : [];
     const nameFromMeta = json?.name || null;
     return { nameFromMeta, traits };
@@ -572,16 +574,13 @@ function ipfsToHttp(uri) {
   return uri.replace(/^ipfs:\/\//, 'https://ipfs.io/ipfs/').replace('ipfs/ipfs/', 'ipfs/');
 }
 
-// Alchemy shapes → attributes array
 function extractTraits(meta) {
   if (Array.isArray(meta?.metadata?.attributes)) return meta.metadata.attributes;
-
   let raw = meta?.raw?.metadata;
   if (typeof raw === 'string') {
     try { raw = JSON.parse(raw); } catch { raw = null; }
   }
   if (Array.isArray(raw?.attributes)) return raw.attributes;
-
   const os = meta?.openSea || meta?.open_sea;
   if (os && os.traits && typeof os.traits === 'object') {
     const arr = [];
@@ -589,16 +588,13 @@ function extractTraits(meta) {
     if (arr.length) return arr;
   }
   if (Array.isArray(meta?.attributes)) return meta.attributes;
-
   return [];
 }
 
 function getNameFromMeta(meta) {
   if (meta?.metadata && typeof meta.metadata === 'object' && meta.metadata.name) return meta.metadata.name;
   let raw = meta?.raw?.metadata;
-  if (typeof raw === 'string') {
-    try { raw = JSON.parse(raw); } catch { raw = null; }
-  }
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { raw = null; } }
   if (raw && typeof raw === 'object' && raw.name) return raw.name;
   return null;
 }
@@ -612,7 +608,6 @@ function loadTraitCountsSafe() {
   return {};
 }
 
-// === Rarity helpers ===
 function simpleRarityLabel(attrs) {
   const n = Array.isArray(attrs) ? attrs.length : 0;
   if (n >= 9) return 'Mythic';
@@ -641,8 +636,6 @@ async function getOpenSeaRarityRank(tokenId) {
   return null;
 }
 
-// If we have a rank, bucket into tiers.
-// (Tune thresholds later if you have collection supply.)
 function tierFromRank(rank) {
   if (rank <= 100) return 'Mythic';
   if (rank <= 500) return 'Legendary';
@@ -687,7 +680,7 @@ function buildCardTraits(rawTraits, traitCounts) {
   return out;
 }
 
-/** ===== Card renderer ===== **/
+// ===== Card renderer =====
 function headerColorForTier(tier) {
   switch (tier) {
     case 'Mythic':    return '#FF6B6B'; // red
@@ -715,12 +708,14 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
   // Header (colored by tier)
   const headerColor = headerColorForTier(tier);
   drawRoundRect(ctx, 48, 52, W - 96, 80, 18, headerColor);
+
+  // Title + rarity text
   ctx.fillStyle = '#1c1c1c';
-  ctx.font = 'bold 32px Arial';
   ctx.textBaseline = 'middle';
+  ctx.font = `bold 32px ${FONT_FAMILY_BOLD}`;
   ctx.fillText(name, 64, 92);
 
-  ctx.font = 'bold 28px Arial';
+  ctx.font = `bold 28px ${FONT_FAMILY_BOLD}`;
   const label = rarityText || '—';
   const tw = ctx.measureText(label).width;
   ctx.fillText(label, W - 64 - tw, 92);
@@ -733,7 +728,8 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
     const { dx, dy, dw, dh } = contain(img.width, img.height, AW - 16, AH - 16);
     ctx.drawImage(img, AX + 8 + dx, AY + 8 + dy, dw, dh);
   } catch {
-    ctx.fillStyle = '#bbb'; ctx.font = '26px Arial';
+    ctx.fillStyle = '#bbb';
+    ctx.font = `26px ${FONT_FAMILY_REGULAR}`;
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
 
@@ -741,7 +737,8 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
   const TX = 60, TY = AY + AH + 30, TW = W - 120, TH = H - TY - 60;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff', '#e3e3e3');
 
-  ctx.fillStyle = '#333'; ctx.font = 'bold 26px Arial';
+  ctx.fillStyle = '#333';
+  ctx.font = `bold 26px ${FONT_FAMILY_BOLD}`;
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   ctx.fillText('Traits', TX + 16, TY + 36);
 
@@ -753,22 +750,22 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
   let y = TY + 80;
 
   if (!cardTraits || cardTraits.length === 0) {
-    ctx.font = '20px Arial';
+    ctx.font = `20px ${FONT_FAMILY_REGULAR}`;
     ctx.fillStyle = '#8a8a8a';
     ctx.fillText('No categorized traits found for this token.', TX + 16, y);
   } else {
     (cardTraits || []).forEach(({ label, value, count }) => {
-      ctx.font = 'bold 22px Arial';
+      ctx.font = `bold 22px ${FONT_FAMILY_BOLD}`;
       ctx.fillStyle = '#3a3a3a';
       ctx.fillText(label + ':', TX + 16, y);
 
-      ctx.font = '22px Arial';
+      ctx.font = `22px ${FONT_FAMILY_REGULAR}`;
       ctx.fillStyle = '#141414';
       const valueText = String(value);
       ctx.fillText(valueText, TX + 160, y);
 
       if (typeof count === 'number') {
-        ctx.font = '20px Arial';
+        ctx.font = `20px ${FONT_FAMILY_REGULAR}`;
         ctx.fillStyle = '#6a6a6a';
         const w = ctx.measureText(valueText).width;
         ctx.fillText(`— ${count} in collection`, TX + 160 + w + 12, y);
@@ -778,12 +775,10 @@ async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, card
   }
 
   // footer inside panel
-  ctx.save();
-  ctx.font = '18px Arial';
+  ctx.font = `18px ${FONT_FAMILY_REGULAR}`;
   ctx.fillStyle = '#666';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, TY + TH - 16);
-  ctx.restore();
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
