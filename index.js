@@ -26,35 +26,41 @@ const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
-// ===== FONT REGISTRATION =====
-let FONT_REGULAR = 'Inter-Regular';
-let FONT_BOLD = 'Inter-Bold';
+// ===== FONT REGISTRATION (auto-download if missing) =====
 let FONT_FAMILY_REGULAR = 'Inter';
 let FONT_FAMILY_BOLD = 'Inter';
+const { GlobalFonts } = require('@napi-rs/canvas');
 
-(function registerFonts() {
-  const candidates = [
-    { path: 'fonts/Inter-Regular.ttf', name: FONT_REGULAR, family: 'Inter' },
-    { path: 'fonts/Inter-Bold.ttf',    name: FONT_BOLD,    family: 'Inter' },
-  ];
-  let ok = 0;
-  for (const { path, name, family } of candidates) {
-    if (fs.existsSync(path)) {
-      try {
-        GlobalFonts.registerFromPath(path, name);
-        ok++;
-      } catch (e) {
-        console.warn('⚠️ Failed to register font', path, e.message);
-      }
+async function ensureFonts() {
+  const files = [
+    {
+      url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Regular.ttf',
+      path: 'fonts/Inter-Regular.ttf', name: 'Inter-Regular'
+    },
+    {
+      url: 'https://github.com/rsms/inter/releases/download/v4.1/Inter-Bold.ttf',
+      path: 'fonts/Inter-Bold.ttf', name: 'Inter-Bold'
     }
+  ];
+  fs.mkdirSync('fonts', { recursive: true });
+  for (const f of files) {
+    if (!fs.existsSync(f.path)) {
+      const r = await fetch(f.url);
+      if (!r.ok) throw new Error(`Font download failed: ${r.status}`);
+      fs.writeFileSync(f.path, Buffer.from(await r.arrayBuffer()));
+    }
+    try { GlobalFonts.registerFromPath(f.path, f.name); } catch {}
   }
-  if (ok < candidates.length) {
-    console.warn('⚠️ Fonts not fully registered. Add TTFs in /fonts for text rendering. Using generic fallback.');
-    // Fall back to generic families (may still render nothing on minimal images)
-    FONT_FAMILY_REGULAR = 'sans-serif';
-    FONT_FAMILY_BOLD = 'sans-serif';
-  }
-})();
+  console.log('🖋 Fonts ready:', files.map(f => f.name).join(', '));
+}
+
+// call it immediately (don’t await; it runs before first /card usage)
+ensureFonts().catch(e => {
+  console.warn('⚠️ Could not ensure fonts:', e.message);
+  FONT_FAMILY_REGULAR = 'sans-serif';
+  FONT_FAMILY_BOLD = 'sans-serif';
+});
+
 
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
