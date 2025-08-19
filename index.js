@@ -661,7 +661,7 @@ function normalizeTraits(list) {
   return groups;
 }
 
-// ====== RENDERER (square art, tighter traits, skip "None") ======
+// ====== RENDERER (square art, tighter traits, auto-compress) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -690,14 +690,14 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tw = ctx.measureText(rightText).width;
   ctx.fillText(rightText, W - 64 - tw, 94);
 
-  // === Art window: square, image fills & clips to rounded square ===
-  const AW = 480, AH = 480;
+  // === Art window: square, image fills & clips ===
+  const AW = 420, AH = 420;                           // smaller to free space
   const AX = Math.round((W - AW) / 2);
-  const AY = 156; // slightly higher to free space for traits
+  const AY = 160;
 
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, 22, '#f9fafb'); // backfill
+  drawRoundRect(ctx, AX, AY, AW, AH, 22, '#f9fafb');  // backfill
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
     const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
@@ -711,78 +711,88 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
 
   // === Traits panel — white background ===
-  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 88; // space for footer token line
+  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92; // leave room for footer
   drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
   ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Build trait boxes in desired order; filter out "None"/empty values
-  const PAD = 14;
+  // Build compact boxes in order; filter out "None"/empty
+  const PAD = 12;
   const innerX = TX + PAD, innerY = TY + PAD;
   const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 14, COL_W = (innerW - COL_GAP) / 2;
+  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
   const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
-  const boxes = [];
-  for (const cat of order) {
-    const items = (traits[cat] || []).filter(t => {
-      const v = String(t?.value ?? '').trim();
-      return v && v.toLowerCase() !== 'none';
-    });
-    if (!items.length) continue;
 
-    const lines = items.map(t => `• ${String(t.value)}`);
-    const maxLines = 5;
-    const shown = lines.slice(0, maxLines);
-    const hidden = lines.length - shown.length;
-    if (hidden > 0) shown.push(`+${hidden} more`);
+  function layout(lineH, titleH, blockPad) {
+    const boxes = [];
+    for (const cat of order) {
+      const items = (traits[cat] || []).filter(t => {
+        const v = String(t?.value ?? '').trim();
+        return v && v.toLowerCase() !== 'none';
+      });
+      if (!items.length) continue;
 
-    const titleH = 30;
-    const lineH  = 18;            // slightly smaller rows
-    const blockPad = 8;
-    const rowsH = shown.length * lineH;
-    const boxH = blockPad + titleH + Math.max(rowsH + 12, 36) + blockPad; // ensure min height
+      const lines = items.map(t => `• ${String(t.value)}`);
+      const maxLines = 5;
+      const shown = lines.slice(0, maxLines);
+      const hidden = lines.length - shown.length;
+      if (hidden > 0) shown.push(`+${hidden} more`);
 
-    boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
+      const rowsH = shown.length * lineH;
+      const minRows = 36; // ensure a bit of room
+      const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
+
+      boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
+    }
+
+    // Masonry two columns
+    let yL = innerY, yR = innerY;
+    const placed = [];
+    for (const b of boxes) {
+      const left = yL <= yR;
+      const x = left ? innerX : innerX + COL_W + COL_GAP;
+      const y = left ? yL : yR;
+      placed.push({ ...b, x, y, w: COL_W });
+      if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
+    }
+    const usedH = Math.max(yL, yR) - innerY;
+    return { placed, usedH, lineH, titleH, blockPad };
   }
 
-  // Masonry: place into two columns
-  let yL = innerY, yR = innerY;
-  const placed = [];
-  for (const b of boxes) {
-    const left = yL <= yR;
-    const x = left ? innerX : innerX + COL_W + COL_GAP;
-    const y = left ? yL : yR;
-    placed.push({ ...b, x, y, w: COL_W });
-    if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
+  // Try compact layout; if it overflows, shrink rows once
+  let L = layout(16, 28, 8);
+  if (L.usedH > innerH) {
+    const scale = Math.max(0.75, innerH / L.usedH); // compress but not too tiny
+    const lineH = Math.max(12, Math.floor(16 * scale));
+    const titleH = Math.max(24, Math.floor(28 * scale));
+    L = layout(lineH, titleH, 6);
   }
 
   // Draw mini-cards
-  for (const b of placed) {
+  for (const b of L.placed) {
     // outer card
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb', '#0000001a', 10, 2);
 
     // trait type head — light blue
-    const headH = b.titleH;
-    drawRoundRect(ctx, b.x, b.y, b.w, headH, 12, '#D9ECFF');
+    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, '#D9ECFF');
     ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 1.5; ctx.stroke();
 
     // title text
     ctx.fillStyle = '#0F172A';
-    ctx.font = `20px ${FONT_BOLD_FAMILY}`;
+    ctx.font = `19px ${FONT_BOLD_FAMILY}`;
     ctx.textBaseline = 'alphabetic';
-    ctx.fillText(b.cat, b.x + 12, b.y + 22);
+    ctx.fillText(b.cat, b.x + 12, b.y + Math.min(22, b.titleH - 8));
 
-    // value rows area
-    const rowsY = b.y + headH;
-    drawRect(ctx, b.x, rowsY, b.w, b.boxH - headH, '#ffffff');
+    // rows area (white) + vertically centered rows
+    const rowsY = b.y + b.titleH;
+    drawRect(ctx, b.x, rowsY, b.w, b.boxH - b.titleH, '#ffffff');
 
-    // vertically center rows a bit lower so they feel centered in the white area
-    const avail = (b.boxH - headH);
+    const avail = (b.boxH - b.titleH);
     const rowsH = b.lines.length * b.lineH;
-    let yy = rowsY + Math.max(10, Math.floor((avail - rowsH) / 2) + 2);
+    let yy = rowsY + Math.max(8, Math.floor((avail - rowsH) / 2) + 1);
 
     ctx.fillStyle = '#3B82F6'; // blue-500 text
-    ctx.font = `16px ${FONT_REGULAR_FAMILY}`;
+    ctx.font = `15px ${FONT_REGULAR_FAMILY}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
       ctx.fillText(line, b.x + 12, yy + b.lineH / 2);
@@ -790,7 +800,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer token line — in the border under trait section
+  // Footer token line — outside trait section
   ctx.fillStyle = '#667085';
   ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
   ctx.textBaseline = 'alphabetic';
