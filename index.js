@@ -19,18 +19,20 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { ethers } = require('ethers');
 
 // ===== ENV =====
-const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN; // fallback
+const DISCORD_TOKEN      = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN;
 const DISCORD_CLIENT_ID  = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID           = process.env.GUILD_ID;
 const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
+const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
   hasToken: !!DISCORD_TOKEN,
   clientId: DISCORD_CLIENT_ID,
   guildId: GUILD_ID,
-  hasAlchemy: !!ALCHEMY_API_KEY
+  hasAlchemy: !!ALCHEMY_API_KEY,
+  hasOpenSea: !!OPENSEA_API_KEY
 });
 
 // ===== CONTRACTS =====
@@ -78,9 +80,9 @@ async function registerSlashCommands() {
     const commands = [
       new SlashCommandBuilder()
         .setName('card')
-        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh
+        .setDescription(`Create a Squigs trading card JPEG • ${new Date().toISOString()}`) // force refresh in Discord
         .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-        .addStringOption(o => o.setName('name').setDescription('Optional display name'))
+        .addStringOption(o => o.setName('name').setDescription('Optional display name')) // defaults to "Squig #ID"
         .toJSON()
     ];
 
@@ -451,18 +453,30 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await interaction.deferReply();
 
-    // Get traits (Alchemy → on-chain fallback)
+    // Traits (Alchemy → on-chain fallback)
     const { nameFromMeta, traits } = await getTraitsForSquig(tokenId);
     console.log('Traits debug:', { tokenId, count: traits.length, sample: traits.slice(0, 3) });
 
     const displayName = customName || nameFromMeta || `Squig #${tokenId}`;
     const traitCounts = loadTraitCountsSafe();
     const cardTraits = buildCardTraits(traits, traitCounts);
-    const rarity = simpleRarityLabel(traits);
+
+    // === RARITY: try OpenSea rank, else heuristic ===
+    const os = await getOpenSeaRarityRank(tokenId); // { rank } | null
+    let rarityText, tier;
+    if (os?.rank) {
+      rarityText = `Rank #${os.rank}`;
+      tier = tierFromRank(os.rank);
+    } else {
+      const heuristic = simpleRarityLabel(traits);   // Mythic/Legendary/Rare/Uncommon/Common
+      rarityText = heuristic;
+      tier = heuristic; // we map same labels in headerColorForTier
+    }
 
     const buffer = await renderSquigCard({
       name: displayName,
-      rarity,
+      rarityText,
+      tier,
       tokenId,
       imageUrl: `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`,
       cardTraits
@@ -483,7 +497,7 @@ client.on('interactionCreate', async (interaction) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 
-// ===== Helpers (metadata, traits, canvas) =====
+// ===== Helpers (metadata, traits, rarity, canvas) =====
 async function getTraitsForSquig(tokenId) {
   // 1) Try Alchemy REST
   try {
@@ -525,11 +539,10 @@ async function getNftMetadataAlchemy(tokenId) {
 
 function ipfsToHttp(uri) {
   if (!uri) return uri;
-  // ipfs://Qm... or ipfs://ipfs/Qm...
   return uri.replace(/^ipfs:\/\//, 'https://ipfs.io/ipfs/').replace('ipfs/ipfs/', 'ipfs/');
 }
 
-// Handle Alchemy shapes (normalized, raw string/object, or openSea-style)
+// Alchemy shapes → attributes array
 function extractTraits(meta) {
   if (Array.isArray(meta?.metadata?.attributes)) return meta.metadata.attributes;
 
@@ -569,6 +582,7 @@ function loadTraitCountsSafe() {
   return {};
 }
 
+// === Rarity helpers ===
 function simpleRarityLabel(attrs) {
   const n = Array.isArray(attrs) ? attrs.length : 0;
   if (n >= 9) return 'Mythic';
@@ -578,7 +592,35 @@ function simpleRarityLabel(attrs) {
   return 'Common';
 }
 
-/** ===== Trait canonicalization ===== **/
+async function getOpenSeaRarityRank(tokenId) {
+  if (!OPENSEA_API_KEY) return null;
+  const endpoints = [
+    `https://api.opensea.io/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`,
+    `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`
+  ];
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY } });
+      if (!res.ok) continue;
+      const j = await res.json();
+      const rankAny = j?.nft?.rarity?.rank ?? j?.rarity?.rank ?? j?.nft?.rarity_rank ?? j?.rarity_rank;
+      const rank = typeof rankAny === 'number' ? rankAny : parseInt(rankAny, 10);
+      if (!Number.isNaN(rank)) return { rank };
+    } catch {}
+  }
+  return null;
+}
+
+// If we have a rank, bucket into tiers.
+// (Tune thresholds later if you have collection supply.)
+function tierFromRank(rank) {
+  if (rank <= 100) return 'Mythic';
+  if (rank <= 500) return 'Legendary';
+  if (rank <= 1500) return 'Rare';
+  if (rank <= 3000) return 'Uncommon';
+  return 'Common';
+}
+
 const CANON_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
 const TRAIT_ALIASES = {
   background: 'Background', bg: 'Background', backdrop: 'Background',
@@ -616,7 +658,18 @@ function buildCardTraits(rawTraits, traitCounts) {
 }
 
 /** ===== Card renderer ===== **/
-async function renderSquigCard({ name, rarity, tokenId, imageUrl, cardTraits }) {
+function headerColorForTier(tier) {
+  switch (tier) {
+    case 'Mythic':    return '#FF6B6B'; // red
+    case 'Legendary': return '#E6B325'; // gold
+    case 'Rare':      return '#6C5CE7'; // purple
+    case 'Uncommon':  return '#2ECC71'; // green
+    case 'Common':
+    default:          return '#F2D95C'; // yellow
+  }
+}
+
+async function renderSquigCard({ name, rarityText, tier, tokenId, imageUrl, cardTraits }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
@@ -629,16 +682,18 @@ async function renderSquigCard({ name, rarity, tokenId, imageUrl, cardTraits }) 
   // Frame
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, '#ffffff');
 
-  // Header
-  drawRoundRect(ctx, 48, 52, W - 96, 80, 18, '#F2D95C');
+  // Header (colored by tier)
+  const headerColor = headerColorForTier(tier);
+  drawRoundRect(ctx, 48, 52, W - 96, 80, 18, headerColor);
   ctx.fillStyle = '#1c1c1c';
   ctx.font = 'bold 32px Arial';
   ctx.textBaseline = 'middle';
   ctx.fillText(name, 64, 92);
+
   ctx.font = 'bold 28px Arial';
-  const rareText = rarity || '—';
-  const tw = ctx.measureText(rareText).width;
-  ctx.fillText(rareText, W - 64 - tw, 92);
+  const label = rarityText || '—';
+  const tw = ctx.measureText(label).width;
+  ctx.fillText(label, W - 64 - tw, 92);
 
   // Art window
   const AX = 60, AY = 150, AW = W - 120, AH = 540;
