@@ -4,9 +4,10 @@
   "description": "Ugly Bot + Squig Card renderer",
   "private": true,
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+ "scripts": {
+  "start": "node index.js",
+  "build:traits": "node scripts/buildTraitCounts.js"
+},
   "engines": {
     "node": "20.x"
   },
