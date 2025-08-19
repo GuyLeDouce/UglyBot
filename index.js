@@ -452,17 +452,18 @@ client.on('interactionCreate', async (interaction) => {
 
     // Metadata from Alchemy (no ownership check)
     const meta = await getNftMetadataAlchemy(tokenId);
-    const rawTraits =
-      Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
-      (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
-    const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
 
+    // robust extraction
+    const rawTraits = extractTraits(meta);
+    console.log('Traits debug:', { tokenId, rawTraitsCount: rawTraits.length, sample: rawTraits.slice(0, 3) });
+
+    const displayName = getNameFromMeta(meta) || customName || `Squig #${tokenId}`;
     const traitCounts = loadTraitCountsSafe();
-    const cardTraits = buildCardTraits(rawTraits, traitCounts); // <<< fixed categories in order
+    const cardTraits = buildCardTraits(rawTraits, traitCounts);
     const rarity = simpleRarityLabel(rawTraits);
 
     const buffer = await renderSquigCard({
-      name: displayName,
+      name: customName || displayName,
       rarity,
       tokenId,
       imageUrl: `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`,
@@ -470,7 +471,7 @@ client.on('interactionCreate', async (interaction) => {
     });
 
     const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
-    await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+    await interaction.editReply({ content: `🪪 **${customName || displayName}**`, files: [file] });
   } catch (err) {
     console.error('❌ /card error:', err);
     if (interaction.deferred) {
@@ -491,6 +492,37 @@ async function getNftMetadataAlchemy(tokenId) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Alchemy metadata error: ${res.status}`);
   return res.json();
+}
+
+// Handle Alchemy shapes (normalized, raw string/object, or openSea-style)
+function extractTraits(meta) {
+  if (Array.isArray(meta?.metadata?.attributes)) return meta.metadata.attributes;
+
+  let raw = meta?.raw?.metadata;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { raw = null; }
+  }
+  if (Array.isArray(raw?.attributes)) return raw.attributes;
+
+  const os = meta?.openSea || meta?.open_sea;
+  if (os && os.traits && typeof os.traits === 'object') {
+    const arr = [];
+    for (const [trait_type, value] of Object.entries(os.traits)) arr.push({ trait_type, value });
+    if (arr.length) return arr;
+  }
+  if (Array.isArray(meta?.attributes)) return meta.attributes;
+
+  return [];
+}
+
+function getNameFromMeta(meta) {
+  if (meta?.metadata && typeof meta.metadata === 'object' && meta.metadata.name) return meta.metadata.name;
+  let raw = meta?.raw?.metadata;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { raw = null; }
+  }
+  if (raw && typeof raw === 'object' && raw.name) return raw.name;
+  return null;
 }
 
 function loadTraitCountsSafe() {
@@ -600,28 +632,38 @@ async function renderSquigCard({ name, rarity, tokenId, imageUrl, cardTraits }) 
   const rowH = 38;
   let y = TY + 80;
 
-  (cardTraits || []).forEach(({ label, value, count }) => {
-    ctx.font = 'bold 22px Arial';
-    ctx.fillStyle = '#3a3a3a';
-    ctx.fillText(label + ':', TX + 16, y);
+  if (!cardTraits || cardTraits.length === 0) {
+    ctx.font = '20px Arial';
+    ctx.fillStyle = '#8a8a8a';
+    ctx.fillText('No categorized traits found for this token.', TX + 16, y);
+  } else {
+    (cardTraits || []).forEach(({ label, value, count }) => {
+      ctx.font = 'bold 22px Arial';
+      ctx.fillStyle = '#3a3a3a';
+      ctx.fillText(label + ':', TX + 16, y);
 
-    ctx.font = '22px Arial';
-    ctx.fillStyle = '#141414';
-    const valueText = String(value);
-    ctx.fillText(valueText, TX + 160, y);
+      ctx.font = '22px Arial';
+      ctx.fillStyle = '#141414';
+      const valueText = String(value);
+      ctx.fillText(valueText, TX + 160, y);
 
-    if (typeof count === 'number') {
-      ctx.font = '20px Arial';
-      ctx.fillStyle = '#6a6a6a';
-      const w = ctx.measureText(valueText).width;
-      ctx.fillText(`— ${count} in collection`, TX + 160 + w + 12, y);
-    }
-    y += rowH;
-  });
+      if (typeof count === 'number') {
+        ctx.font = '20px Arial';
+        ctx.fillStyle = '#6a6a6a';
+        const w = ctx.measureText(valueText).width;
+        ctx.fillText(`— ${count} in collection`, TX + 160 + w + 12, y);
+      }
+      y += rowH;
+    });
+  }
 
-  // footer line
-  ctx.font = '18px Arial'; ctx.fillStyle = '#666';
-  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, H - 28);
+  // footer inside panel
+  ctx.save();
+  ctx.font = '18px Arial';
+  ctx.fillStyle = '#666';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`Squigs • Token #${tokenId}`, TX + 16, TY + TH - 16);
+  ctx.restore();
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
