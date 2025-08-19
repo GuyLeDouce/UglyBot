@@ -661,7 +661,7 @@ function normalizeTraits(list) {
   return groups;
 }
 
-// ====== RENDERER (compact layout, color updates) ======
+// ====== RENDERER (square art, tighter traits, skip "None") ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -690,11 +690,14 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tw = ctx.measureText(rightText).width;
   ctx.fillText(rightText, W - 64 - tw, 94);
 
-  // Art window (slightly smaller; image fills/cover & clipped to rounded corners)
-  const AX = 72, AY = 154, AW = W - 144, AH = 420; // smaller than before
-  roundRectPath(ctx, AX, AY, AW, AH, 16);
+  // === Art window: square, image fills & clips to rounded square ===
+  const AW = 480, AH = 480;
+  const AX = Math.round((W - AW) / 2);
+  const AY = 156; // slightly higher to free space for traits
+
+  roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, 16, '#f9fafb'); // backfill
+  drawRoundRect(ctx, AX, AY, AW, AH, 22, '#f9fafb'); // backfill
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
     const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
@@ -704,14 +707,15 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.fillText('Image not available', AX + 20, AY + AH / 2);
   }
   ctx.restore();
-  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; roundRectPath(ctx, AX, AY, AW, AH, 16); ctx.stroke();
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2;
+  roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
 
-  // Traits panel — white background
-  const TX = 60, TY = AY + AH + 22, TW = W - 120, TH = H - TY - 88; // leave space for footer token text
+  // === Traits panel — white background ===
+  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 88; // space for footer token line
   drawRoundRect(ctx, TX, TY, TW, TH, 16, '#ffffff');
   ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Inner grid area (2 columns)
+  // Build trait boxes in desired order; filter out "None"/empty values
   const PAD = 14;
   const innerX = TX + PAD, innerY = TY + PAD;
   const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
@@ -720,25 +724,28 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
   const boxes = [];
   for (const cat of order) {
-    const items = traits[cat] || [];
+    const items = (traits[cat] || []).filter(t => {
+      const v = String(t?.value ?? '').trim();
+      return v && v.toLowerCase() !== 'none';
+    });
     if (!items.length) continue;
 
-    // make rows tighter
-    const lines = items.map(t => `• ${String(t?.value ?? '')}`);
+    const lines = items.map(t => `• ${String(t.value)}`);
     const maxLines = 5;
     const shown = lines.slice(0, maxLines);
     const hidden = lines.length - shown.length;
     if (hidden > 0) shown.push(`+${hidden} more`);
 
-    const titleH = 30;       // header height
-    const lineH  = 18;       // row height (smaller)
-    const blockPad = 8;      // inner padding
-    const boxH = blockPad + titleH + shown.length * lineH + blockPad;
+    const titleH = 30;
+    const lineH  = 18;            // slightly smaller rows
+    const blockPad = 8;
+    const rowsH = shown.length * lineH;
+    const boxH = blockPad + titleH + Math.max(rowsH + 12, 36) + blockPad; // ensure min height
 
-    boxes.push({ cat, lines: shown, boxH });
+    boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
   }
 
-  // Masonry into two columns
+  // Masonry: place into two columns
   let yL = innerY, yR = innerY;
   const placed = [];
   for (const b of boxes) {
@@ -749,13 +756,13 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
   }
 
-  // Draw mini-cards with color spec
+  // Draw mini-cards
   for (const b of placed) {
-    // outer card with soft shadow
+    // outer card
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, '#ffffff', '#e5e7eb', '#0000001a', 10, 2);
 
-    // trait type block — light blue
-    const headH = 30;
+    // trait type head — light blue
+    const headH = b.titleH;
     drawRoundRect(ctx, b.x, b.y, b.w, headH, 12, '#D9ECFF');
     ctx.strokeStyle = '#cfe3ff'; ctx.lineWidth = 1.5; ctx.stroke();
 
@@ -765,23 +772,28 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.textBaseline = 'alphabetic';
     ctx.fillText(b.cat, b.x + 12, b.y + 22);
 
-    // rows background (white)
+    // value rows area
     const rowsY = b.y + headH;
     drawRect(ctx, b.x, rowsY, b.w, b.boxH - headH, '#ffffff');
 
-    // rows text — light blue
-    let yy = rowsY + 8;
-    ctx.fillStyle = '#3B82F6'; // blue-500
+    // vertically center rows a bit lower so they feel centered in the white area
+    const avail = (b.boxH - headH);
+    const rowsH = b.lines.length * b.lineH;
+    let yy = rowsY + Math.max(10, Math.floor((avail - rowsH) / 2) + 2);
+
+    ctx.fillStyle = '#3B82F6'; // blue-500 text
     ctx.font = `16px ${FONT_REGULAR_FAMILY}`;
+    ctx.textBaseline = 'middle';
     for (const line of b.lines) {
-      ctx.fillText(line, b.x + 12, yy);
-      yy += 18;
+      ctx.fillText(line, b.x + 12, yy + b.lineH / 2);
+      yy += b.lineH;
     }
   }
 
   // Footer token line — in the border under trait section
   ctx.fillStyle = '#667085';
   ctx.font = `18px ${FONT_REGULAR_FAMILY}`;
+  ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
