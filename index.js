@@ -1,3 +1,10 @@
+require('dotenv').config();
+console.log('ENV CHECK:', {
+  hasToken: !!DISCORD_TOKEN,
+  clientId: DISCORD_CLIENT_ID,
+  guildId: GUILD_ID,
+  hasAlchemy: !!ALCHEMY_API_KEY
+});
 const {
   Client,
   GatewayIntentBits,
