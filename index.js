@@ -555,41 +555,34 @@ client.on('interactionCreate', async (interaction) => {
   const tokenId = interaction.options.getInteger('token_id');
   const customName = interaction.options.getString('name') || null;
 
- try {
+try {
   await interaction.deferReply();
 
   // Alchemy metadata (no ownership check)
   const meta = await getNftMetadataAlchemy(tokenId);
 
-  // Robust trait fetch (scan Alchemy; fallback to OpenSea if needed)
-  const { attrs: traitsRaw, source: traitSource } = await getTraitsForToken(meta, tokenId);
-
-  // Debug
-  console.log('Traits debug:', {
-    tokenId,
-    source: traitSource,
-    count: traitsRaw?.length ?? 0,
-    sample: (traitsRaw || []).slice(0, 3)
-  });
+  // Robust trait fetch (scan multiple spots in Alchemy JSON)
+  const { attrs: traitsRaw } = await getTraitsForToken(meta, tokenId);
 
   const traits = normalizeTraits(traitsRaw);
   const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
   const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-  // Rank (OpenSea) if API key present; otherwise null
-  const rankInfo = OPENSEA_API_KEY ? await fetchOpenSeaRank(tokenId).catch(() => null) : null;
+  // === NEW: HP calculation from your table ===
+  const hpBreakdown = computeHpFromTraits(traits);
+  const hpTotal = hpBreakdown.total;
 
-  // Heuristic rarity label (kept for header color if rank missing)
+  // Keep your stripe color by heuristic rarity (only for color)
   const rarityLabel = simpleRarityLabel(traitsRaw);
   const headerStripe = stripeFromRarity(rarityLabel);
 
-  // Render card
+  // Render card (renderer will show per-trait HP)
   const buffer = await renderSquigCard({
     name: displayName,
     tokenId,
     imageUrl,
     traits,
-    rankInfo,
+    rankInfo: { hpTotal }, // pass along for header text
     rarityLabel,
     headerStripe
   });
@@ -610,7 +603,7 @@ client.on('interactionCreate', async (interaction) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 
-// ===== Helper funcs (metadata, rarity, canvas, utils) =====
+// ===== Helper funcs (metadata) =====
 async function getNftMetadataAlchemy(tokenId) {
   const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
               `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
@@ -619,320 +612,10 @@ async function getNftMetadataAlchemy(tokenId) {
   return res.json();
 }
 
-// OpenSea v2: Get rarity/rank for a single NFT
-async function fetchOpenSeaRank(tokenId) {
-  if (!OPENSEA_API_KEY) return null;
-  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
-  // tiny built-in retry
-  for (let i = 0; i < 2; i++) {
-    const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY }, timeout: 10000 });
-    if (res.ok) {
-      const data = await res.json();
-      const rarity = data?.rarity || data?.item?.rarity || null;
-      const rank = rarity?.rank ?? rarity?.ranking ?? null;
-      const score = rarity?.score ?? null;
-      const percentile = rarity?.percentile ?? null;
-      const total = rarity?.max_rank ?? rarity?.collection_size ?? null;
-      return rank ? { rank, score, percentile, total } : null;
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  return null;
-}
-
-function simpleRarityLabel(attrs) {
-  const n = Array.isArray(attrs) ? attrs.length : 0;
-  if (n >= 9) return 'Mythic';
-  if (n >= 7) return 'Legendary';
-  if (n >= 5) return 'Rare';
-  if (n >= 3) return 'Uncommon';
-  return 'Common';
-}
-
-// ===== COLORS / THEME (drop-in) =====
-const PALETTE = {
-  cardBg: '#242623',
-  frameFill: '#b9dded',
-  frameStroke: '#CFE3FF',
-  headerText: '#0F172A',
-
-  // rarity → header stripe color
-  rarityStripeByTier: {
-    Mythic:   '#fadf6a',
-    Legendary:'#b5a6e9',
-    Rare:     '#f2d2ea',
-    Uncommon: '#a6fbba',
-    Common:   '#c8dfea',
-  },
-
-  artBackfill: '#b9dded',
-  artStroke:   '#F9FAFB',
-
-  traitsPanelBg:     '#b9dded',
-  traitsPanelStroke: '#000000',
-
-  traitCardFill:   '#FFFFFF',
-  traitCardStroke: '#b9dded',
-  traitCardShadow: '#0000001A',
-
-  // Note: header fill is dynamic per rarity; stroke remains configurable here
-  traitHeaderFill:   '#b9dded', // (unused for fill; kept for reference)
-  traitHeaderStroke: '#b9dded',
-
-  traitTitleText: '#222625',
-  traitValueText: '#775fbb',
-
-  footerText: '#212524',
-};
-
-function stripeFromRarity(label) {
-  return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
-}
-
-// Local font aliases
-const FONT_REG =
-  (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
-  (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
-const FONT_BOLD =
-  (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
-  (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
-
-// ====== RENDERER (square art, tighter traits, auto-compress) ======
-async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
-  const W = 750, H = 1050;
-  const canvas = createCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-
-  // Use palette
-  ctx.fillStyle = PALETTE.cardBg;
-  ctx.fillRect(0, 0, W, H);
-
-  // Outer frame
-  drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
-  ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
-
-  // Header stripe (rarity color)
-  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel);
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
-  ctx.fillStyle = PALETTE.headerText;
-  ctx.textBaseline = 'middle';
-  ctx.font = `36px ${FONT_BOLD}`;
-  ctx.fillText(name, 64, 94);
-
-  // Rank / rarity (right)
-  const rightText = rankInfo?.rank
-    ? (rankInfo?.total ? `OpenSea Rank #${rankInfo.rank}/${rankInfo.total}` : `OpenSea Rank #${rankInfo.rank}`)
-    : (rarityLabel || '');
-  ctx.font = `28px ${FONT_BOLD}`;
-  const tw = ctx.measureText(rightText).width;
-  ctx.fillText(rightText, W - 64 - tw, 94);
-
-  // === Art window: square, image fills & clips ===
-  const AW = 420, AH = 420;
-  const AX = Math.round((W - AW) / 2);
-  const AY = 160;
-
-  roundRectPath(ctx, AX, AY, AW, AH, 22);
-  ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill); // backfill
-  try {
-    const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
-    ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
-  } catch {
-    ctx.fillStyle = '#9CA3AF'; ctx.font = `26px ${FONT_REG}`;
-    ctx.fillText('Image not available', AX + 20, AY + AH / 2);
-  }
-  ctx.restore();
-  ctx.strokeStyle = PALETTE.artStroke; ctx.lineWidth = 2;
-  roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
-
-  // === Traits panel — white/blue theme ===
-  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92; // leave room for footer
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, PALETTE.traitsPanelBg);
-  ctx.strokeStyle = PALETTE.traitsPanelStroke; ctx.lineWidth = 2; ctx.stroke();
-
-  // Build compact boxes in order; filter out "None"/empty
-  const PAD = 12;
-  const innerX = TX + PAD, innerY = TY + PAD;
-  const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
-
-  const order = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
-
-  function layout(lineH, titleH, blockPad) {
-    const boxes = [];
-    for (const cat of order) {
-      const items = (traits[cat] || []).filter(t => {
-        const v = String(t?.value ?? '').trim();
-        return v && v.toLowerCase() !== 'none';
-      });
-      if (!items.length) continue;
-
-      const lines = items.map(t => `• ${String(t.value)}`);
-      const maxLines = 5;
-      const shown = lines.slice(0, maxLines);
-      const hidden = lines.length - shown.length;
-      if (hidden > 0) shown.push(`+${hidden} more`);
-
-      const rowsH = shown.length * lineH;
-      const minRows = 34; // ensure a bit of room
-      const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
-
-      boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
-    }
-
-    // Masonry two columns
-    let yL = innerY, yR = innerY;
-    const placed = [];
-    for (const b of boxes) {
-      const left = yL <= yR;
-      const x = left ? innerX : innerX + COL_W + COL_GAP;
-      const y = left ? yL : yR;
-      placed.push({ ...b, x, y, w: COL_W });
-      if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
-    }
-    const usedH = Math.max(yL, yR) - innerY;
-    return { placed, usedH, lineH, titleH, blockPad };
-  }
-
-  // Try compact layout; if it overflows, shrink rows once
-  let L = layout(16, 28, 8);
-  if (L.usedH > innerH) {
-    const scale = Math.max(0.75, innerH / L.usedH); // compress but not too tiny
-    const lineH = Math.max(12, Math.floor(16 * scale));
-    const titleH = Math.max(24, Math.floor(28 * scale));
-    L = layout(lineH, titleH, 6);
-  }
-
-  // Draw mini-cards
-  for (const b of L.placed) {
-    // outer card
-    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
-
-    // trait type head — use rarity stripe color for fill
-    const traitHeaderFill = headerStripeFill;
-    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
-    ctx.strokeStyle = PALETTE.traitHeaderStroke;
-    ctx.lineWidth = 1.5; ctx.stroke();
-
-    // title text
-    ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `19px ${FONT_BOLD}`;
-    ctx.textBaseline = 'alphabetic';
-    ctx.fillText(b.cat, b.x + 12, b.y + Math.min(22, b.titleH - 8));
-
-    // rows area + vertically centered rows
-    const rowsY = b.y + b.titleH;
-    drawRect(ctx, b.x, rowsY, b.w, b.boxH - b.titleH, PALETTE.traitCardFill);
-
-    const avail = (b.boxH - b.titleH);
-    const rowsH = b.lines.length * b.lineH;
-    let yy = rowsY + Math.max(8, Math.floor((avail - rowsH) / 2) + 1);
-
-    ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `15px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
-    for (const line of b.lines) {
-      ctx.fillText(line, b.x + 12, yy + b.lineH / 2);
-      yy += b.lineH;
-    }
-  }
-
-  // Footer token line — outside trait section
-  ctx.fillStyle = PALETTE.footerText;
-  ctx.font = `18px ${FONT_REG}`;
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
-
-  return canvas.toBuffer('image/jpeg', { quality: 0.95 });
-}
-
-// ---------- drawing helpers ----------
-function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
-
-function roundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-
-function drawRoundRect(ctx, x, y, w, h, r, fill) {
-  roundRectPath(ctx, x, y, w, h, r);
-  ctx.fillStyle = fill; ctx.fill();
-}
-
-function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
-  ctx.save();
-  ctx.shadowColor = shadowColor;
-  ctx.shadowBlur = shadowBlur;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = shadowDy;
-  drawRoundRect(ctx, x, y, w, h, r, fill);
-  ctx.restore();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
-}
-
-// image cover (fills, may crop)
-function cover(sw, sh, mw, mh) {
-  const s = Math.max(mw / sw, mh / sh);
-  const dw = Math.round(sw * s), dh = Math.round(sh * s);
-  return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
-}
-
-async function fetchBuffer(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
-  const ab = await r.arrayBuffer();
-  return Buffer.from(ab);
-}
-
-// ===== TRAIT NORMALIZER & flexible fetch =====
-const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
-
-function normalizeTraits(attrs) {
-  const groups = {};
-  for (const k of TRAIT_ORDER) groups[k] = [];
-
-  for (const t of (Array.isArray(attrs) ? attrs : [])) {
-    const type = String(t?.trait_type ?? '').trim();
-    let val = t?.value;
-    if (!type || val == null) continue;
-
-    const valStr = String(val).trim();
-    if (!valStr || valStr.toLowerCase() === 'none') continue;
-
-    if (!groups.hasOwnProperty(type)) continue; // only our categories
-    groups[type].push({ value: valStr });
-  }
-  return groups;
-}
-
-// Back-compat alias for older code paths
-function rarityColorFromLabel(label) {
-  return stripeFromRarity(label);
-}
-
-// -------- flexible trait extraction + OpenSea fallback --------
+// -------- flexible trait extraction (Alchemy only) --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
   const attrsFromAlchemy = extractAttributesFlexible(alchemyMeta);
-  if (attrsFromAlchemy.length) return { attrs: attrsFromAlchemy, source: 'alchemy' };
-
-  if (OPENSEA_API_KEY) {
-    try {
-      const os = await fetchOpenSeaNFT(SQUIGS_CONTRACT, tokenId);
-      const osAttrs = Array.isArray(os?.nft?.traits) ? os.nft.traits : [];
-      if (osAttrs.length) return { attrs: osAttrs.map(massageTraitKeys), source: 'opensea' };
-    } catch (e) {
-      console.warn('OpenSea traits fallback failed:', e.message);
-    }
-  }
-  return { attrs: [], source: 'none' };
+  return { attrs: attrsFromAlchemy, source: 'alchemy' };
 }
 
 function extractAttributesFlexible(alchemyMeta) {
@@ -979,10 +662,352 @@ function massageTraitKeys(t) {
   return { trait_type, value: t.value };
 }
 
-async function fetchOpenSeaNFT(contract, tokenId) {
-  if (!OPENSEA_API_KEY) throw new Error('No OPENSEA_API_KEY');
-  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contract}/nfts/${tokenId}`;
-  const res = await fetch(url, { headers: { 'X-API-KEY': OPENSEA_API_KEY }, timeout: 10000 });
-  if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
-  return res.json();
+// Heuristic tier (only used for stripe color right now)
+function simpleRarityLabel(attrs) {
+  const n = Array.isArray(attrs) ? attrs.length : 0;
+  if (n >= 9) return 'Mythic';
+  if (n >= 7) return 'Legendary';
+  if (n >= 5) return 'Rare';
+  if (n >= 3) return 'Uncommon';
+  return 'Common';
+}
+
+// ===== COLORS / THEME (unchanged except header text now shows HP) =====
+const PALETTE = {
+  cardBg: '#242623',
+  frameFill: '#b9dded',
+  frameStroke: '#CFE3FF',
+  headerText: '#0F172A',
+  rarityStripeByTier: {
+    Mythic:   '#fadf6a',
+    Legendary:'#b5a6e9',
+    Rare:     '#f2d2ea',
+    Uncommon: '#a6fbba',
+    Common:   '#c8dfea',
+  },
+  artBackfill: '#b9dded',
+  artStroke:   '#F9FAFB',
+  traitsPanelBg:     '#b9dded',
+  traitsPanelStroke: '#000000',
+  traitCardFill:   '#FFFFFF',
+  traitCardStroke: '#b9dded',
+  traitCardShadow: '#0000001A',
+  traitHeaderFill:   '#b9dded', // (fill is overridden per-rarity at draw time)
+  traitHeaderStroke: '#b9dded',
+  traitTitleText: '#222625',
+  traitValueText: '#775fbb',
+  footerText: '#212524',
+};
+function stripeFromRarity(label) {
+  return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
+}
+
+// Local font aliases
+const FONT_REG =
+  (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
+  (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
+const FONT_BOLD =
+  (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
+  (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
+
+// ====== HP SCORE TABLE (your list) + helpers ======
+const HP_TABLE = {
+  Legend: {
+    "Night": 1000, "Purple Yeti": 1000, "Beige Giant Ears": 1000,
+    "Pikachugly": 1000, "Cornhuglyio": 1000,
+  },
+  Type: {
+    "Elf Squigs": 60, "Squigs": 36,
+  },
+  Background: {
+    "Dark Blue Galaxy": 120, "Grey Boom": 118, "Purple Splash": 116, "Green Boom": 114,
+    "Grey Splash": 112, "Yellow Boom": 110, "Yellow Splash": 108, "Dark Blue Boom": 106,
+    "Light Blue Boom": 104, "Purple Boom": 102, "Green Splash": 100, "Light Blue Splash": 98,
+    "Dark Blue Splash": 96, "Blue Splash": 94, "Blue Bloom": 92, "Purple": 90,
+    "Light Blue": 88, "Blue": 86, "Green": 84, "Grey": 82, "Dark Blue": 80, "Yellow": 72,
+  },
+  Body: {
+    "Airplane Life Jacket": 200, "Blue Sexy Bowling Shirt": 199, "Mario Overalls": 197,
+    "Butthead Tee": 195, "Futuristic Armor": 193, "White and Green Jacket": 191,
+    "Cowboy Jacket": 190, "Beavis Tee": 188, "Sexy Bowling Shirt": 186, "Super Ugly": 184,
+    "Yellow Jersey": 182, "Rick Laser": 181, "UGS Jacket": 179, "Ugly Side of the Moon": 177,
+    "Ugly Food Shirt": 175, "Acupuncture": 173, "Prison Tee": 172, "Cheerleader": 170,
+    "Caveman": 168, "Red Cowboy": 166, "Astronaut": 164, "Blue Cowboy": 162, "Red Varsity": 161,
+    "Indian": 159, "Blue Wetsuit": 157, "Suit": 155, "Maple Leafs 1967 Tracksuit": 153,
+    "Astronaut Blue": 152, "Maple Leafs 1967": 150, "Ugly Scene": 148, "Ninja": 146,
+    "White and Blue Jacket": 144, "Hawaiian Shirt": 143, "Basketball Jersey": 141,
+    "Purple Hoodie": 139, "Beige Fisherman Jacket": 137, "Pet Lover Bag": 135,
+    "PAAF White Tee": 134, "Blue Baseball Jersey": 132, "Monster Tee Bag": 130,
+    "Born Ugly Tee Tank": 128, "Tattooed Body": 126, "Black Puffy": 125, "Flame Tee Tank": 123,
+    "Camo Wetsuit": 121, "Grey Fisherman Jacket": 120, "Ugly Army Tank": 120, "Borat": 120,
+    "Sports Bra": 120, "Green Varsity": 120, "Beige Jacket": 120, "Holey Tee": 120,
+    "Yellow Tracksuit": 120, "Long Sleeve Flame Tee": 120, "Bowling Shirt": 120,
+    "Grey Bike Jersey": 120, "Light Green tee": 120, "White Ugly Tank": 120, "420Purple Tracksuit": 120,
+    "Ugly Tank on Pink": 120, "Red BAseball Shirt": 120, "Purple Shirt": 120, "Gardener Overalls": 120,
+    "Grease Tank": 120, "Yellow Puffy": 120, "Pink Jacket": 120, "Blue Overalls": 120,
+    "Green Sweater": 120, "Green Tee": 120, "Born Ugly Tee": 120, "Naked": 120, "Purple Tee": 120,
+    "Black Sweater": 120, "White Tee": 120,
+  },
+  Eyes: {
+    "Bionic": 100, "Sleepy Trio": 96, "Angry Cyclops": 92, "Angry Cyclops Lashes": 88,
+    "Angry Trio": 84, "Angry Trio Lashes": 80, "Bionic Lashes": 76, "Cyclops": 72,
+    "Cyclops Lashes": 68, "Trio Lashes": 64, "Trio": 60,
+  },
+  Head: {
+    "Buoy": 300, "Headphones": 299, "Cape": 298, "Captured Piranha": 296, "Butthead Hair": 295,
+    "Sheriff": 294, "Paper Bag": 292, "Elf Human Air": 291, "Beavis Hair": 290, "Crown": 288,
+    "Hood": 287, "VE Headset": 286, "Tyre": 284, "Hairball Z": 283, "Ski Mask": 282, "Lobster": 280,
+    "Human Air": 279, "Halo": 278, "Ice Cream": 276, "Pot Head": 275, "Slasher": 274,
+    "Acupuncture": 272, "Flower Power": 271, "Basketball": 270, "HeliHat": 268,
+    "Watermelon": 267, "Visor with Hair": 266, "Indian": 264, "Purr Paw": 263, "Long Hair": 262,
+    "Green Mountie": 260, "Trucker": 259, "Baseball": 258, "Imposter Mask": 256, "Blindfold": 255,
+    "Boom Bucket": 254, "Green Visor": 252, "Space Brain": 251, "Diving Mask": 250, "Captain": 248,
+    "Dread Cap": 247, "Zeus Hand": 246, "Elf Hood": 244, "Pirate": 243, "Panda Bike Helmet": 242,
+    "Golfs": 240, "Rainbow": 239, "Night Vision": 238, "UGS Delivery": 236, "3D": 235, "Dinomite": 234,
+    "Fire": 232, "Blonde Fro Comb": 231, "Head Canoe": 230, "Umbrella Hat": 228, "Cowboy": 227,
+    "Bunny": 226, "Proud to be Ugly": 224, "Black Ugly": 223, "Knife": 222, "Green Cap": 220,
+    "Bald": 219, "Cactus": 218, "I Need TP": 216, "Rastalocks": 215, "Beer": 214, "Fro Comb": 212,
+    "Mountie": 211, "Pomade": 210, "Yellow Beanie": 208, "Floral": 207, "90’s Pink": 206,
+    "Lemon Bucket": 204, "Pink Beanie": 203, "Grey Cap": 202, "Honey Pot": 200, "Afro": 199,
+    "Bear Fur Hat": 198, "Bandana": 196, "Rice Dome": 195, "Parted": 194, "Green Ugly": 192,
+    "Brain Bucket": 191, "Twintails": 190, "Notlocks": 188, "Tip Topper": 187, "Cube Cut": 186,
+    "Purple Punk": 184, "90’s Blonde": 183, "Fiesta": 182, "Green Beanie": 180, "Yellow twintails": 180,
+    "Blond Punk": 180,
+  },
+  Skin: {
+    "Cristal": 150, "Cristal Elf": 147, "Purple Elf Space": 144, "Green Camo": 141, "Purple Space": 138,
+    "Green Elf Camo": 135, "Green Elf": 132, "Orange": 129, "Orange Elf": 126, "Purple Elf": 123,
+    "Purple": 120, "Green": 117, "Beige Elf": 114, "Pink": 111, "Dark Brown Elf": 108, "Beige": 105,
+    "Brown": 102, "Pink Elf": 99, "Brown Elf": 96, "Dark Brown": 90,
+  },
+  Special: {
+    "Laser Tits": 70, "Parakeet": 67, "Yellow Laser": 64, "Ugly Necklace": 61, "Weed Necklace": 58,
+    "Dino": 55, "Nouns Glasses": 52, "Green Laser": 49, "Sad Smile Necklace": 46, "Smile Necklace": 43,
+    "Monocle": 40, "Pirhana": 37, "None (Ignore)": 18,
+  },
+};
+
+function hpFor(cat, val) {
+  const group = HP_TABLE[cat];
+  if (!group) return 0;
+  // case-insensitive match
+  const key = Object.keys(group).find(k => k.toLowerCase() === String(val).trim().toLowerCase());
+  return key ? group[key] : 0;
+}
+
+function computeHpFromTraits(groupedTraits) {
+  let total = 0;
+  const per = {}; // { "Category::Value": score }
+  for (const cat of Object.keys(groupedTraits)) {
+    for (const t of groupedTraits[cat]) {
+      const s = hpFor(cat, t.value);
+      total += s;
+      per[`${cat}::${t.value}`] = s;
+    }
+  }
+  return { total, per };
+}
+
+// ===== TRAIT NORMALIZER =====
+const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+
+function normalizeTraits(attrs) {
+  const groups = {};
+  for (const k of TRAIT_ORDER) groups[k] = [];
+
+  for (const t of (Array.isArray(attrs) ? attrs : [])) {
+    const type = String(t?.trait_type ?? '').trim();
+    let val = t?.value;
+    if (!type || val == null) continue;
+
+    const valStr = String(val).trim();
+    if (!valStr || valStr.toLowerCase() === 'none') continue; // drop missing/none
+
+    if (!groups.hasOwnProperty(type)) continue; // only our categories
+
+    groups[type].push({ value: valStr });
+  }
+  return groups;
+}
+
+// Back-compat alias (not used for header text anymore)
+function rarityColorFromLabel(label) { return stripeFromRarity(label); }
+
+// ====== RENDERER (uses HP in header + beside each trait) ======
+async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
+  const W = 750, H = 1050;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  // BG
+  ctx.fillStyle = PALETTE.cardBg; ctx.fillRect(0, 0, W, H);
+
+  // Frame
+  drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
+  ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
+
+  // Header stripe
+  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel);
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
+  ctx.fillStyle = PALETTE.headerText;
+  ctx.textBaseline = 'middle';
+  ctx.font = `36px ${FONT_BOLD}`;
+  ctx.fillText(name, 64, 94);
+
+  // Header right = Total HP
+  const rightText = `${rankInfo?.hpTotal ?? 0} HP`;
+  ctx.font = `28px ${FONT_BOLD}`;
+  const tw = ctx.measureText(rightText).width;
+  ctx.fillText(rightText, W - 64 - tw, 94);
+
+  // Art window
+  const AW = 420, AH = 420;
+  const AX = Math.round((W - AW) / 2), AY = 160;
+  roundRectPath(ctx, AX, AY, AW, AH, 22);
+  ctx.save(); ctx.clip();
+  drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill);
+  try {
+    const img = await loadImage(await fetchBuffer(imageUrl));
+    const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
+    ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
+  } catch {}
+  ctx.restore();
+  ctx.strokeStyle = PALETTE.artStroke; ctx.lineWidth = 2; roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
+
+  // Traits panel
+  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, PALETTE.traitsPanelBg);
+  ctx.strokeStyle = PALETTE.traitsPanelStroke; ctx.lineWidth = 2; ctx.stroke();
+
+  // Layout (2 cols)
+  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
+  const order = TRAIT_ORDER;
+
+  function layout(lineH, titleH, blockPad) {
+    const boxes = [];
+    for (const cat of order) {
+      const items = (traits[cat] || []).filter(t => {
+        const v = String(t?.value ?? '').trim();
+        return v && v.toLowerCase() !== 'none';
+      });
+      if (!items.length) continue;
+
+      // include per-trait HP text
+      const lines = items.map(t => {
+        const hp = hpFor(cat, t.value);
+        return `• ${String(t.value)} (${hp} HP)`;
+      });
+
+      const maxLines = 5;
+      const shown = lines.slice(0, maxLines);
+      const hidden = lines.length - shown.length;
+      if (hidden > 0) shown.push(`+${hidden} more`);
+
+      const rowsH = shown.length * lineH;
+      const minRows = 34;
+      const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
+
+      boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
+    }
+
+    // Masonry two columns
+    let yL = innerY, yR = innerY;
+    const placed = [];
+    for (const b of boxes) {
+      const left = yL <= yR;
+      const x = left ? innerX : innerX + COL_W + COL_GAP;
+      const y = left ? yL : yR;
+      placed.push({ ...b, x, y, w: COL_W });
+      if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
+    }
+    const usedH = Math.max(yL, yR) - innerY;
+    return { placed, usedH, lineH, titleH, blockPad };
+  }
+
+  let L = layout(16, 28, 8);
+  if (L.usedH > innerH) {
+    const scale = Math.max(0.75, innerH / L.usedH);
+    L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
+  }
+
+  // Draw mini-cards
+  for (const b of L.placed) {
+    drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
+    const traitHeaderFill = headerStripeFill; // match rarity stripe color
+    drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
+    ctx.strokeStyle = PALETTE.traitHeaderStroke; ctx.lineWidth = 1.5; ctx.stroke();
+
+    ctx.fillStyle = PALETTE.traitTitleText;
+    ctx.font = `19px ${FONT_BOLD}`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(b.cat, b.x + 12, b.y + Math.min(22, b.titleH - 8));
+
+    const rowsY = b.y + b.titleH;
+    drawRect(ctx, b.x, rowsY, b.w, b.boxH - b.titleH, PALETTE.traitCardFill);
+
+    const avail = (b.boxH - b.titleH);
+    const rowsH = b.lines.length * b.lineH;
+    let yy = rowsY + Math.max(8, Math.floor((avail - rowsH) / 2) + 1);
+
+    ctx.fillStyle = PALETTE.traitValueText;
+    ctx.font = `15px ${FONT_REG}`;
+    ctx.textBaseline = 'middle';
+    for (const line of b.lines) {
+      ctx.fillText(line, b.x + 12, yy + b.lineH / 2);
+      yy += b.lineH;
+    }
+  }
+
+  // Footer
+  ctx.fillStyle = PALETTE.footerText;
+  ctx.font = `18px ${FONT_REG}`;
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
+
+  return canvas.toBuffer('image/jpeg', { quality: 0.95 });
+}
+
+// ---------- drawing helpers ----------
+function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function drawRoundRect(ctx, x, y, w, h, r, fill) {
+  roundRectPath(ctx, x, y, w, h, r);
+  ctx.fillStyle = fill; ctx.fill();
+}
+
+function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
+  ctx.save();
+  ctx.shadowColor = shadowColor;
+  ctx.shadowBlur = shadowBlur;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = shadowDy;
+  drawRoundRect(ctx, x, y, w, h, r, fill);
+  ctx.restore();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
+}
+
+// image cover
+function cover(sw, sh, mw, mh) {
+  const s = Math.max(mw / sw, mh / sh);
+  const dw = Math.round(sw * s), dh = Math.round(sh * s);
+  return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
+}
+
+async function fetchBuffer(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
+  const ab = await r.arrayBuffer();
+  return Buffer.from(ab);
 }
