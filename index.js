@@ -1003,7 +1003,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer (left: token, right: class/tier)
+   // Footer (left: token, right: class/tier)
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
@@ -1013,14 +1013,14 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // left text
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
-  // right text = class/tier (from passed rarityLabel or HP)
-  const tierLabel =
+  // right text = class/tier (from rarityLabel or HP)
+  const tierLabelFooter =
     (rarityLabel && String(rarityLabel)) ||
     hpToTierLabel(rankInfo?.hpTotal || 0);
 
-  const rightText = String(tierLabel);
-  const rightW = ctx.measureText(rightText).width;
-  ctx.fillText(rightText, W - 60 - rightW, footerY);
+  const classText = String(tierLabelFooter);
+  const classW = ctx.measureText(classText).width;
+  ctx.fillText(classText, W - 60 - classW, footerY);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
