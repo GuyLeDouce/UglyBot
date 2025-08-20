@@ -450,21 +450,33 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !squig [tokenId]
-  if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
-    const tokenId = args[0];
-    const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-    const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId}`;
+// !squig [tokenId]
+if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
+  const tokenId = args[0];
 
-    const embed = new EmbedBuilder()
-      .setTitle(`👁️ Squig #${tokenId}`)
-      .setDescription(`[View on OpenSea](${openseaUrl})`)
-      .setImage(imgUrl)
-      .setColor(0xffa500)
-      .setFooter({ text: `Squig #${tokenId} is watching you...` });
-
-    return message.reply({ embeds: [embed] });
+  // Block unminted IDs with a funny message
+  try {
+    const minted = await isSquigMinted(tokenId);
+    if (!minted) {
+      return message.reply(notMintedLine(tokenId));
+    }
+  } catch (e) {
+    console.warn('mint check (prefix) failed:', e.message);
   }
+
+  const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+  const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId}`;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`👁️ Squig #${tokenId}`)
+    .setDescription(`[View on OpenSea](${openseaUrl})`)
+    .setImage(imgUrl)
+    .setColor(0xffa500)
+    .setFooter({ text: `Squig #${tokenId} is watching you...` });
+
+  return message.reply({ embeds: [embed] });
+}
+
 
   // !mysquigs with pagination
   if (command === 'mysquigs') {
@@ -557,6 +569,12 @@ client.on('interactionCreate', async (interaction) => {
 
 try {
   await interaction.deferReply();
+// Block unminted IDs with a funny message
+const minted = await isSquigMinted(tokenId);
+if (!minted) {
+  await interaction.editReply(notMintedLine(tokenId));
+  return;
+}
 
   // --- metadata ---
   const meta = await getNftMetadataAlchemy(tokenId);
@@ -1067,4 +1085,45 @@ async function fetchBuffer(url) {
   if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
   const ab = await r.arrayBuffer();
   return Buffer.from(ab);
+}
+// ===== MINT CHECK (Alchemy owners endpoint + tiny cache) =====
+const MINT_CACHE = new Map();
+
+const NOT_MINTED_MESSAGES = [
+  (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
+  (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
+  (id) => `🌀 Squig #${id} is hiding in the spiral dimension. The portal is **https://squigs.io**`,
+  (id) => `🥚 Squig #${id} is still an egg. Crack it open at **https://squigs.io**`,
+  (id) => `🤫 The Squigs whisper: “#${id}? Not minted.” Try **https://squigs.io**`
+];
+
+function notMintedLine(tokenId) {
+  const pick = NOT_MINTED_MESSAGES[Math.floor(Math.random() * NOT_MINTED_MESSAGES.length)];
+  return pick(tokenId);
+}
+
+/**
+ * Returns true if the token has at least one owner (i.e., minted).
+ * Uses Alchemy v3: getOwnersForNFT
+ */
+async function isSquigMinted(tokenId) {
+  if (MINT_CACHE.has(tokenId)) return MINT_CACHE.get(tokenId);
+  try {
+    const url =
+      `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getOwnersForNFT` +
+      `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}`;
+    const res = await fetchWithRetry(url, 2, 600);
+    const data = await res.json();
+    const owners =
+      (Array.isArray(data?.owners) && data.owners) ||
+      (Array.isArray(data?.ownerAddresses) && data.ownerAddresses) ||
+      [];
+    const minted = owners.length > 0;
+    MINT_CACHE.set(tokenId, minted);
+    return minted;
+  } catch (e) {
+    // If the check fails (network hiccup), don't hard-block:
+    console.warn(`⚠️ Mint check error for #${tokenId}:`, e.message);
+    return true;
+  }
 }
