@@ -739,7 +739,7 @@ const PALETTE = {
     Legendary:'#b5a6e9',
     Rare:     '#f2d2ea',
     Uncommon: '#a6fbba',
-    Common:   '#c8dfea',
+    Common:   '#929394',
   },
   artBackfill: '#b9dded',
   artStroke:   '#F9FAFB',
@@ -1003,11 +1003,24 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer
+  // Footer (left: token, right: class/tier)
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
+
+  const footerY = H - 34;
+
+  // left text
+  ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
+
+  // right text = class/tier (from passed rarityLabel or HP)
+  const tierLabel =
+    (rarityLabel && String(rarityLabel)) ||
+    hpToTierLabel(rankInfo?.hpTotal || 0);
+
+  const rightText = String(tierLabel);
+  const rightW = ctx.measureText(rightText).width;
+  ctx.fillText(rightText, W - 60 - rightW, footerY);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
