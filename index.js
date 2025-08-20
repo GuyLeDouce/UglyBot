@@ -53,9 +53,8 @@ async function ensureFonts() {
       if (!r.ok) throw new Error(`Font download failed: ${r.status} (${f.url})`);
       fs.writeFileSync(f.path, Buffer.from(await r.arrayBuffer()));
     }
-    try { GlobalFonts.registerFromPath(f.path, f.family); } catch (e) {
-      console.warn('Font register error:', e.message);
-    }
+    try { GlobalFonts.registerFromPath(f.path, f.family); }
+    catch (e) { console.warn('Font register error:', e.message); }
   }
   console.log('🖋 Fonts ready:', files.map(f => f.family).join(', '));
 }
@@ -75,9 +74,9 @@ console.log('ENV CHECK:', {
 });
 
 // ===== CONTRACTS =====
-const UGLY_CONTRACT   = '0x9492505633d74451bdf3079c09ccc979588bc309';
-const MONSTER_CONTRACT= '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
-const SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
+const UGLY_CONTRACT    = '0x9492505633d74451bdf3079c09ccc979588bc309';
+const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
+const SQUIGS_CONTRACT  = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 
 // ===== CHARM DROPS =====
 const CHARM_REWARD_CHANCE = 100; // 1 in 200
@@ -170,7 +169,7 @@ function maybeRewardCharm(userId, username) {
   return null;
 }
 
-// ===== PREFIX COMMANDS (existing ones) =====
+// ===== PREFIX COMMANDS =====
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith('!') || message.author.bot) return;
 
@@ -450,34 +449,31 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-// !squig [tokenId]
-// !squig [tokenId]
-if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
-  const tokenId = args[0];
+  // !squig [tokenId]
+  if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
+    const tokenId = args[0];
 
-  // Strict mint gate
-  const minted = await isSquigMintedStrict(tokenId);
-  if (minted !== true) {
-    if (minted === 'UNVERIFIED') {
-      return message.reply(`⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`);
+    // Strict mint gate
+    const minted = await isSquigMintedStrict(tokenId);
+    if (minted !== true) {
+      if (minted === 'UNVERIFIED') {
+        return message.reply(`⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`);
+      }
+      return message.reply(notMintedLine(tokenId));
     }
-    return message.reply(notMintedLine(tokenId));
+
+    const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+    const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId}`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`👁️ Squig #${tokenId}`)
+      .setDescription(`[View on OpenSea](${openseaUrl})`)
+      .setImage(imgUrl)
+      .setColor(0xffa500)
+      .setFooter({ text: `Squig #${tokenId} is watching you...` });
+
+    return message.reply({ embeds: [embed] });
   }
-
-  const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-  const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId}`;
-
-  const embed = new EmbedBuilder()
-    .setTitle(`👁️ Squig #${tokenId}`)
-    .setDescription(`[View on OpenSea](${openseaUrl})`)
-    .setImage(imgUrl)
-    .setColor(0xffa500)
-    .setFooter({ text: `Squig #${tokenId} is watching you...` });
-
-  return message.reply({ embeds: [embed] });
-}
-
-
 
   // !mysquigs with pagination
   if (command === 'mysquigs') {
@@ -568,62 +564,61 @@ client.on('interactionCreate', async (interaction) => {
   const tokenId = interaction.options.getInteger('token_id');
   const customName = interaction.options.getString('name') || null;
 
-try {
-  await interaction.deferReply();
-// Block unminted IDs — strict
-const minted = await isSquigMintedStrict(tokenId);
-if (minted !== true) {
-  const msg = minted === 'UNVERIFIED'
-    ? `⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`
-    : notMintedLine(tokenId);
-  await interaction.editReply(msg);
-  return;
-}
+  try {
+    await interaction.deferReply();
 
+    // Strict mint gate for /card
+    const minted = await isSquigMintedStrict(tokenId);
+    if (minted !== true) {
+      const msg = minted === 'UNVERIFIED'
+        ? `⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`
+        : notMintedLine(tokenId);
+      await interaction.editReply(msg);
+      return;
+    }
 
-  // --- metadata ---
-  const meta = await getNftMetadataAlchemy(tokenId);
+    // --- metadata ---
+    const meta = await getNftMetadataAlchemy(tokenId);
 
-  // --- traits (Alchemy first, OpenSea fallback) ---
-  const { attrs, source } = await getTraitsForToken(meta, tokenId);
-  const traits = normalizeTraits(attrs);
+    // --- traits (Alchemy first, OpenSea fallback) ---
+    const { attrs, source } = await getTraitsForToken(meta, tokenId);
+    const traits = normalizeTraits(attrs);
 
-  // helpful log for debugging in Railway
-  console.log(`Traits debug #${tokenId}: { source: ${source}, count: ${attrs.length}, sample: ${JSON.stringify(attrs.slice(0,3))} }`);
+    // debug on Railway
+    console.log(`Traits debug #${tokenId}: { source: ${source}, count: ${attrs.length}, sample: ${JSON.stringify(attrs.slice(0,3))} }`);
 
-  // --- naming / image ---
-  const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
-  const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+    // --- naming / image ---
+    const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
+    const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-  // --- HP scoring & stripe color from total ---
-  const hpAgg   = computeHpFromTraits(traits);        // { total, per }
-  const hpTotal = hpAgg.total || 0;
-  const tier    = hpToTierLabel(hpTotal);             // Common..Mythic
-  const stripe  = hpToStripe(hpTotal);                // color for header/trait-headers
+    // --- HP scoring & stripe color from total ---
+    const hpAgg   = computeHpFromTraits(traits);        // { total, per }
+    const hpTotal = hpAgg.total || 0;
+    const tier    = hpToTierLabel(hpTotal);             // Common..Mythic
+    const stripe  = hpToStripe(hpTotal);                // color for header/trait-headers
 
-  // --- render ---
-  const buffer = await renderSquigCard({
-    name: displayName,
-    tokenId,
-    imageUrl,
-    traits,
-    rankInfo: { hpTotal, per: hpAgg.per }, // shows HP in header; per-trait HP in rows
-    rarityLabel: tier,                     // kept for renderer fallback
-    headerStripe: stripe                   // actual fill color used
-  });
+    // --- render ---
+    const buffer = await renderSquigCard({
+      name: displayName,
+      tokenId,
+      imageUrl,
+      traits,
+      rankInfo: { hpTotal, per: hpAgg.per }, // shows HP in header; per-trait HP in rows
+      rarityLabel: tier,                     // kept for renderer fallback
+      headerStripe: stripe                   // actual fill color used
+    });
 
-  const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
-  await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+    const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
+    await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
 
-} catch (err) {
-  console.error('❌ /card error:', err);
-  if (interaction.deferred) {
-    await interaction.editReply('⚠️ Something went wrong building that card.');
-  } else {
-    await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
+  } catch (err) {
+    console.error('❌ /card error:', err);
+    if (interaction.deferred) {
+      await interaction.editReply('⚠️ Something went wrong building that card.');
+    } else {
+      await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
+    }
   }
-}
-
 });
 
 // ===== LOGIN =====
@@ -637,29 +632,28 @@ async function getNftMetadataAlchemy(tokenId) {
   const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
   return res.json();
 }
-// ===== STRICT MINT CHECK (dedup-safe: no duplicate const/let) =====
-const ALCHEMY_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 
-// re-use singletons if this file gets hot-reloaded / double-imported
+// ===== STRICT MINT CHECK (hot-reload safe singletons) =====
+const ALCHEMY_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 globalThis.__SQUIGS_PROVIDER   ||= new ethers.JsonRpcProvider(ALCHEMY_RPC_URL);
 globalThis.__SQUIGS_ERC721_ABI ||= ['function ownerOf(uint256 tokenId) view returns (address)'];
 globalThis.__SQUIGS_ERC721     ||= new ethers.Contract(SQUIGS_CONTRACT, globalThis.__SQUIGS_ERC721_ABI, globalThis.__SQUIGS_PROVIDER);
 globalThis.__SQUIGS_MINT_CACHE ||= new Map();
+const squigsErc721 = globalThis.__SQUIGS_ERC721;
 
-const squigsProvider = globalThis.__SQUIGS_PROVIDER;
-const squigsErc721   = globalThis.__SQUIGS_ERC721;
-
-// fun lines for unminted
-const NOT_MINTED_MESSAGES = [
-  (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
-  (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
-  (id) => `🌀 Squig #${id} is hiding in the spiral dimension. The portal is **https://squigs.io**`,
-  (id) => `🥚 Squig #${id} is still an egg. Crack it open at **https://squigs.io**`,
-  (id) => `🤫 The Squigs whisper: “#${id}? Not minted.” Try **https://squigs.io**`
-];
-
+// Not-minted messages (dedup-safe)
+if (!globalThis.__SQUIGS_NOT_MINTED_MESSAGES) {
+  globalThis.__SQUIGS_NOT_MINTED_MESSAGES = [
+    (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
+    (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
+    (id) => `🌀 Squig #${id} is hiding in the spiral dimension. The portal is **https://squigs.io**`,
+    (id) => `🥚 Squig #${id} is still an egg. Crack it open at **https://squigs.io**`,
+    (id) => `🤫 The Squigs whisper: “#${id}? Not minted.” Try **https://squigs.io**`,
+  ];
+}
 function notMintedLine(tokenId) {
-  const pick = NOT_MINTED_MESSAGES[Math.floor(Math.random() * NOT_MINTED_MESSAGES.length)];
+  const list = globalThis.__SQUIGS_NOT_MINTED_MESSAGES;
+  const pick = list[Math.floor(Math.random() * list.length)];
   return pick(tokenId);
 }
 
@@ -667,7 +661,7 @@ function notMintedLine(tokenId) {
  * Strict mint check:
  *  1) ownerOf(tokenId): if it returns an address, it's minted; if it REVERTS, it's not minted.
  *  2) Fallback: Alchemy getOwnersForNFT.
- *  3) If both are unavailable, treat as UNVERIFIED (we block rendering with a gentle message).
+ *  3) If both are unavailable, return 'UNVERIFIED' (we block rendering with a gentle message).
  */
 async function isSquigMintedStrict(tokenId) {
   const cache = globalThis.__SQUIGS_MINT_CACHE;
@@ -680,7 +674,6 @@ async function isSquigMintedStrict(tokenId) {
     cache.set(tokenId, minted);
     return minted;
   } catch (e) {
-    // "execution reverted" / CALL_EXCEPTION => token doesn't exist (not minted)
     const msg = String(e?.shortMessage || e?.message || '');
     if (e?.code === 'CALL_EXCEPTION' || /execution reverted/i.test(msg)) {
       cache.set(tokenId, false);
@@ -704,11 +697,9 @@ async function isSquigMintedStrict(tokenId) {
     return minted;
   } catch (e2) {
     console.warn(`⚠️ Mint check unavailable for #${tokenId}:`, e2.message);
-    // 3) both checks not available — block render
     return 'UNVERIFIED';
   }
 }
-
 
 // -------- flexible trait extraction with OpenSea fallback --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
@@ -781,7 +772,6 @@ function validAttrFilter(t) {
   const v = String(t?.value ?? '').trim();
   if (!v) return false;
   const low = v.toLowerCase();
-  // skip empty/none variants
   return !(low === 'none' || low === 'none (ignore)');
 }
 
@@ -808,7 +798,7 @@ async function fetchOpenSeaTraits(tokenId) {
   return [];
 }
 
-// ===== HP-BASED TIERS (replace the old heuristic rarity) =====
+// ===== HP-BASED TIERS =====
 // Score domain: 595 (lowest/common) .. 1000 (highest/mythic)
 const HP_MIN = 595;
 const HP_MAX = 1000;
@@ -822,7 +812,7 @@ function hpToTierLabel(hp) {
   return 'Common';
 }
 
-// ===== COLORS / THEME (unchanged except header shows HP) =====
+// ===== COLORS / THEME =====
 const PALETTE = {
   cardBg: '#242623',
   frameFill: '#b9dded',
@@ -842,14 +832,12 @@ const PALETTE = {
   traitCardFill:   '#FFFFFF',
   traitCardStroke: '#b9dded',
   traitCardShadow: '#0000001A',
-  // (fill is overridden per-rarity at draw time)
-  traitHeaderFill:   '#b9dded',
+  traitHeaderFill:   '#b9dded', // (actual fill is overridden per-rarity at draw time)
   traitHeaderStroke: '#b9dded',
   traitTitleText: '#222625',
   traitValueText: '#775fbb',
   footerText: '#212524',
 };
-
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
@@ -863,7 +851,7 @@ const FONT_BOLD =
   (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
   (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
 
-// ====== HP SCORE TABLE (your list) + helpers ======
+// ====== HP SCORE TABLE + helpers ======
 const HP_TABLE = {
   Legend: {
     "Night": 1000, "Purple Yeti": 1000, "Beige Giant Ears": 1000,
@@ -944,7 +932,6 @@ function hpFor(cat, val) {
   const key = Object.keys(group).find(k => k.toLowerCase() === String(val).trim().toLowerCase());
   return key ? group[key] : 0;
 }
-
 function computeHpFromTraits(groupedTraits) {
   let total = 0;
   const per = {};
@@ -960,7 +947,6 @@ function computeHpFromTraits(groupedTraits) {
 
 // ===== TRAIT NORMALIZER =====
 const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
-
 function normalizeTraits(attrs) {
   const groups = {};
   for (const k of TRAIT_ORDER) groups[k] = [];
@@ -970,16 +956,16 @@ function normalizeTraits(attrs) {
     const valStr = String(t?.value ?? '').trim();
     if (!type || !valStr) continue;
     if (valStr.toLowerCase() === 'none' || valStr.toLowerCase() === 'none (ignore)') continue;
-    if (!groups.hasOwnProperty(type)) continue;
+    if (!Object.prototype.hasOwnProperty.call(groups, type)) continue;
     groups[type].push({ value: valStr });
   }
   return groups;
 }
 
-// Back-compat alias
+// Back-compat alias (kept if something still calls it)
 function rarityColorFromLabel(label) { return stripeFromRarity(label); }
 
-// ====== RENDERER (uses HP in header + per-trait HP) ======
+// ====== RENDERER (HP header + per-trait HP + class in footer) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -993,7 +979,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
 
   // Header stripe
-  // Prefer explicit headerStripe; otherwise derive from rarityLabel (still supported)
   const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
   ctx.fillStyle = PALETTE.headerText;
@@ -1002,12 +987,12 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.fillText(name, 64, 94);
 
   // Header right = Total HP
-  const rightText = `${rankInfo?.hpTotal ?? 0} HP`;
+  const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
   ctx.font = `28px ${FONT_BOLD}`;
-  const tw = ctx.measureText(rightText).width;
-  ctx.fillText(rightText, W - 64 - tw, 94);
+  const hpW = ctx.measureText(hpText).width;
+  ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // Art window
+  // Art window (square)
   const AW = 420, AH = 420;
   const AX = Math.round((W - AW) / 2), AY = 160;
   roundRectPath(ctx, AX, AY, AW, AH, 22);
@@ -1064,8 +1049,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   }
 
   let L = layout(16, 28, 8);
-  if (L.usedH > (TH - 24)) {
-    const scale = Math.max(0.75, (TH - 24) / L.usedH);
+  if (L.usedH > (innerH - 12)) {
+    const scale = Math.max(0.75, (innerH - 12) / L.usedH);
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
@@ -1097,7 +1082,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-   // Footer (left: token, right: class/tier)
+  // Footer (left: token, right: class/tier)
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
@@ -1107,7 +1092,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // left text
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
-  // right text = class/tier (from rarityLabel or HP)
+  // right text = class/tier
   const tierLabelFooter =
     (rarityLabel && String(rarityLabel)) ||
     hpToTierLabel(rankInfo?.hpTotal || 0);
@@ -1161,19 +1146,4 @@ async function fetchBuffer(url) {
   if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
   const ab = await r.arrayBuffer();
   return Buffer.from(ab);
-}
-// ===== MINT CHECK (Alchemy owners endpoint + tiny cache) =====
-const MINT_CACHE = new Map();
-
-const NOT_MINTED_MESSAGES = [
-  (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
-  (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
-  (id) => `🌀 Squig #${id} is hiding in the spiral dimension. The portal is **https://squigs.io**`,
-  (id) => `🥚 Squig #${id} is still an egg. Crack it open at **https://squigs.io**`,
-  (id) => `🤫 The Squigs whisper: “#${id}? Not minted.” Try **https://squigs.io**`
-];
-
-function notMintedLine(tokenId) {
-  const pick = NOT_MINTED_MESSAGES[Math.floor(Math.random() * NOT_MINTED_MESSAGES.length)];
-  return pick(tokenId);
 }
