@@ -837,6 +837,8 @@ const PALETTE = {
   traitTitleText: '#222625',
   traitValueText: '#775fbb',
   footerText: '#212524',
+  headerStripeStroke: '#000000',
+  traitHeaderStroke:  '#000000',
 };
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
@@ -1191,9 +1193,10 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
   ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
 
-  // Header stripe
+  // Header stripe (with black outline)
   const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
+  const headerStroke = PALETTE.headerStripeStroke || '#000000';
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, headerStroke);
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
   ctx.font = `36px ${FONT_BOLD}`;
@@ -1267,60 +1270,55 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-// Draw mini-cards (rounded title bubble + comfy inner padding)
-const BUBBLE_R = 14;          // corner radius for the title bubble
-const BUBBLE_OVERLAP = 14;    // how far the bubble extends into the rows area
-const INNER_INSET = 8;        // inset for the white rows area (visual padding to the card edge)
-const ROW_PAD_X = 16;         // left/right text padding inside rows area
-const ROW_PAD_Y = 10;         // top padding for first row
+  // Draw mini-cards (rounded title bubble + comfy inner padding)
+  const BUBBLE_R = 14;          // corner radius for the title bubble
+  const BUBBLE_OVERLAP = 14;    // how far the bubble extends into the rows area
+  const INNER_INSET = 8;        // inset for the white rows area
+  const ROW_PAD_X = 16;         // left/right padding inside rows area
+  const ROW_PAD_Y = 10;         // top padding for first row
 
-for (const b of L.placed) {
-  // Outer mini-card
-  drawRoundRectShadow(
-    ctx, b.x, b.y, b.w, b.boxH, 12,
-    PALETTE.traitCardFill,
-    PALETTE.traitCardStroke,
-    PALETTE.traitCardShadow, 10, 2
-  );
+  for (const b of L.placed) {
+    // Outer mini-card
+    drawRoundRectShadow(
+      ctx, b.x, b.y, b.w, b.boxH, 12,
+      PALETTE.traitCardFill,
+      PALETTE.traitCardStroke,
+      PALETTE.traitCardShadow, 10, 2
+    );
 
-  // Title bubble (rounded on the bottom by extending its height)
-  const bubbleH = b.titleH + BUBBLE_OVERLAP;
-  drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+    // Title bubble (rounded on the bottom; with black outline)
+    const bubbleH = b.titleH + BUBBLE_OVERLAP;
+    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+    ctx.strokeStyle = PALETTE.traitHeaderStroke || '#000000';
+    ctx.lineWidth = 1.5;
+    roundRectPath(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R);
+    ctx.stroke();
 
-  // Bubble outline
-  ctx.strokeStyle = PALETTE.traitHeaderStroke;
-  ctx.lineWidth = 1.5;
-  roundRectPath(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R);
-  ctx.stroke();
+    // Title text
+    ctx.fillStyle = PALETTE.traitTitleText;
+    ctx.font = `19px ${FONT_BOLD}`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-  // Title text (centered in the original title band)
-  ctx.fillStyle = PALETTE.traitTitleText;
-  ctx.font = `19px ${FONT_BOLD}`;
-  ctx.textBaseline = 'middle';
-  ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
+    // Inset rows container
+    const rowsY = b.y + bubbleH;
+    const rowsH = b.boxH - bubbleH;
+    const contentX = b.x + INNER_INSET;
+    const contentY = rowsY + INNER_INSET;
+    const contentW = b.w - INNER_INSET * 2;
+    const contentH = rowsH - INNER_INSET * 2;
+    drawRoundRect(ctx, contentX, contentY, contentW, contentH, 10, PALETTE.traitCardFill);
 
-  // Inset rows container (white area with internal margin)
-  const rowsY = b.y + bubbleH;
-  const rowsH = b.boxH - bubbleH;
-  const contentX = b.x + INNER_INSET;
-  const contentY = rowsY + INNER_INSET;
-  const contentW = b.w - INNER_INSET * 2;
-  const contentH = rowsH - INNER_INSET * 2;
-
-  drawRoundRect(ctx, contentX, contentY, contentW, contentH, 10, PALETTE.traitCardFill);
-
-  // Rows text with padding and gentle vertical spacing
-  let yy = contentY + ROW_PAD_Y;
-  ctx.fillStyle = PALETTE.traitValueText;
-  ctx.font = `15px ${FONT_REG}`;
-  ctx.textBaseline = 'middle';
-
-  for (const line of b.lines) {
-    ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
-    yy += b.lineH;
+    // Rows text
+    let yy = contentY + ROW_PAD_Y;
+    ctx.fillStyle = PALETTE.traitValueText;
+    ctx.font = `15px ${FONT_REG}`;
+    ctx.textBaseline = 'middle';
+    for (const line of b.lines) {
+      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
+      yy += b.lineH;
+    }
   }
-}
-
 
   // Footer (left: token, right: class/tier)
   ctx.fillStyle = PALETTE.footerText;
@@ -1328,11 +1326,8 @@ for (const b of L.placed) {
   ctx.textBaseline = 'alphabetic';
 
   const footerY = H - 34;
-
-  // left text
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
-  // right text = class/tier
   const tierLabelFooter =
     (rarityLabel && String(rarityLabel)) ||
     hpToTierLabel(rankInfo?.hpTotal || 0);
