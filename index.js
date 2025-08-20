@@ -561,28 +561,28 @@ try {
   // Alchemy metadata (no ownership check)
   const meta = await getNftMetadataAlchemy(tokenId);
 
-  // Robust trait fetch (scan multiple spots in Alchemy JSON)
-  const { attrs: traitsRaw } = await getTraitsForToken(meta, tokenId);
+  // Robust trait fetch: try Alchemy, then fall back to OpenSea if needed
+  const { attrs: traitsRaw, source: traitSource } = await getTraitsForToken(meta, tokenId);
 
   const traits = normalizeTraits(traitsRaw);
   const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
   const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-  // === NEW: HP calculation from your table ===
+  // === HP calculation from your table ===
   const hpBreakdown = computeHpFromTraits(traits);
   const hpTotal = hpBreakdown.total;
 
-  // Keep your stripe color by heuristic rarity (only for color)
+  // Stripe color still uses our simple heuristic by trait count
   const rarityLabel = simpleRarityLabel(traitsRaw);
   const headerStripe = stripeFromRarity(rarityLabel);
 
-  // Render card (renderer will show per-trait HP)
+  // Render (renderer shows Total HP in header and (HP) next to each value)
   const buffer = await renderSquigCard({
     name: displayName,
     tokenId,
     imageUrl,
     traits,
-    rankInfo: { hpTotal }, // pass along for header text
+    rankInfo: { hpTotal, traitSource }, // pass HP + where traits came from
     rarityLabel,
     headerStripe
   });
@@ -612,10 +612,28 @@ async function getNftMetadataAlchemy(tokenId) {
   return res.json();
 }
 
-// -------- flexible trait extraction (Alchemy only) --------
+// -------- flexible trait extraction with OpenSea fallback --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
-  const attrsFromAlchemy = extractAttributesFlexible(alchemyMeta);
-  return { attrs: attrsFromAlchemy, source: 'alchemy' };
+  // 1) Try Alchemy
+  const attrsA = extractAttributesFlexible(alchemyMeta);
+  if (attrsA.length > 0) {
+    return { attrs: attrsA, source: 'alchemy' };
+  }
+
+  // 2) Fallback to OpenSea if we have an API key
+  if (OPENSEA_API_KEY) {
+    try {
+      const attrsB = await fetchOpenSeaTraits(tokenId);
+      if (attrsB.length > 0) {
+        console.log(`ℹ️ Traits from OpenSea fallback for #${tokenId}: ${attrsB.length}`);
+        return { attrs: attrsB, source: 'opensea' };
+      }
+    } catch (e) {
+      console.warn('⚠️ OpenSea trait fallback failed:', e.message);
+    }
+  }
+
+  return { attrs: [], source: 'none' };
 }
 
 function extractAttributesFlexible(alchemyMeta) {
@@ -625,6 +643,7 @@ function extractAttributesFlexible(alchemyMeta) {
     if (Array.isArray(arr) && arr.length && looksLikeAttributeArray(arr)) candidates.push(arr);
   };
 
+  // common Alchemy spots
   addIfAttrArray(alchemyMeta?.metadata?.attributes);
   addIfAttrArray(alchemyMeta?.raw?.metadata?.attributes);
   addIfAttrArray(alchemyMeta?.metadata?.traits);
@@ -632,6 +651,7 @@ function extractAttributesFlexible(alchemyMeta) {
   addIfAttrArray(alchemyMeta?.metadata?.properties?.attributes);
   addIfAttrArray(alchemyMeta?.raw?.metadata?.properties?.attributes);
 
+  // sometimes raw JSON is a string
   const tryParse = (maybeStr) => {
     try {
       if (typeof maybeStr === 'string' && maybeStr.trim().startsWith('{')) {
@@ -646,10 +666,7 @@ function extractAttributesFlexible(alchemyMeta) {
   tryParse(alchemyMeta?.metadata);
 
   const first = candidates.find(Boolean) || [];
-  return first.map(massageTraitKeys).filter(t => {
-    const v = String(t.value ?? '').trim().toLowerCase();
-    return v && v !== 'none';
-  });
+  return first.map(massageTraitKeys).filter(validAttrFilter);
 }
 
 function looksLikeAttributeArray(arr) {
@@ -662,7 +679,38 @@ function massageTraitKeys(t) {
   return { trait_type, value: t.value };
 }
 
-// Heuristic tier (only used for stripe color right now)
+function validAttrFilter(t) {
+  const v = String(t?.value ?? '').trim();
+  if (!v) return false;
+  const low = v.toLowerCase();
+  // skip empty/none variants
+  return !(low === 'none' || low === 'none (ignore)');
+}
+
+// OpenSea v2: fallback trait fetch (with headers + small retry)
+async function fetchOpenSeaTraits(tokenId) {
+  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
+  const headers = { 'X-API-KEY': OPENSEA_API_KEY };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, { headers, timeout: 10000 });
+      if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
+      const data = await res.json();
+      const arr =
+        (Array.isArray(data?.nft?.traits) && data.nft.traits) ||
+        (Array.isArray(data?.traits) && data.traits) ||
+        (Array.isArray(data?.item?.traits) && data.item.traits) ||
+        [];
+      return arr.map(massageTraitKeys).filter(validAttrFilter);
+    } catch (e) {
+      if (attempt === 2) throw e;
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  return [];
+}
+
+// Heuristic tier (only used for stripe color)
 function simpleRarityLabel(attrs) {
   const n = Array.isArray(attrs) ? attrs.length : 0;
   if (n >= 9) return 'Mythic';
@@ -716,9 +764,7 @@ const HP_TABLE = {
     "Night": 1000, "Purple Yeti": 1000, "Beige Giant Ears": 1000,
     "Pikachugly": 1000, "Cornhuglyio": 1000,
   },
-  Type: {
-    "Elf Squigs": 60, "Squigs": 36,
-  },
+  Type: { "Elf Squigs": 60, "Squigs": 36 },
   Background: {
     "Dark Blue Galaxy": 120, "Grey Boom": 118, "Purple Splash": 116, "Green Boom": 114,
     "Grey Splash": 112, "Yellow Boom": 110, "Yellow Splash": 108, "Dark Blue Boom": 106,
@@ -758,12 +804,12 @@ const HP_TABLE = {
     "Sheriff": 294, "Paper Bag": 292, "Elf Human Air": 291, "Beavis Hair": 290, "Crown": 288,
     "Hood": 287, "VE Headset": 286, "Tyre": 284, "Hairball Z": 283, "Ski Mask": 282, "Lobster": 280,
     "Human Air": 279, "Halo": 278, "Ice Cream": 276, "Pot Head": 275, "Slasher": 274,
-    "Acupuncture": 272, "Flower Power": 271, "Basketball": 270, "HeliHat": 268,
-    "Watermelon": 267, "Visor with Hair": 266, "Indian": 264, "Purr Paw": 263, "Long Hair": 262,
-    "Green Mountie": 260, "Trucker": 259, "Baseball": 258, "Imposter Mask": 256, "Blindfold": 255,
-    "Boom Bucket": 254, "Green Visor": 252, "Space Brain": 251, "Diving Mask": 250, "Captain": 248,
-    "Dread Cap": 247, "Zeus Hand": 246, "Elf Hood": 244, "Pirate": 243, "Panda Bike Helmet": 242,
-    "Golfs": 240, "Rainbow": 239, "Night Vision": 238, "UGS Delivery": 236, "3D": 235, "Dinomite": 234,
+    "Acupuncture": 272, "Flower Power": 271, "Basketball": 270, "HeliHat": 268, "Watermelon": 267,
+    "Visor with Hair": 266, "Indian": 264, "Purr Paw": 263, "Long Hair": 262, "Green Mountie": 260,
+    "Trucker": 259, "Baseball": 258, "Imposter Mask": 256, "Blindfold": 255, "Boom Bucket": 254,
+    "Green Visor": 252, "Space Brain": 251, "Diving Mask": 250, "Captain": 248, "Dread Cap": 247,
+    "Zeus Hand": 246, "Elf Hood": 244, "Pirate": 243, "Panda Bike Helmet": 242, "Golfs": 240,
+    "Rainbow": 239, "Night Vision": 238, "UGS Delivery": 236, "3D": 235, "Dinomite": 234,
     "Fire": 232, "Blonde Fro Comb": 231, "Head Canoe": 230, "Umbrella Hat": 228, "Cowboy": 227,
     "Bunny": 226, "Proud to be Ugly": 224, "Black Ugly": 223, "Knife": 222, "Green Cap": 220,
     "Bald": 219, "Cactus": 218, "I Need TP": 216, "Rastalocks": 215, "Beer": 214, "Fro Comb": 212,
@@ -790,14 +836,13 @@ const HP_TABLE = {
 function hpFor(cat, val) {
   const group = HP_TABLE[cat];
   if (!group) return 0;
-  // case-insensitive match
   const key = Object.keys(group).find(k => k.toLowerCase() === String(val).trim().toLowerCase());
   return key ? group[key] : 0;
 }
 
 function computeHpFromTraits(groupedTraits) {
   let total = 0;
-  const per = {}; // { "Category::Value": score }
+  const per = {};
   for (const cat of Object.keys(groupedTraits)) {
     for (const t of groupedTraits[cat]) {
       const s = hpFor(cat, t.value);
@@ -809,7 +854,7 @@ function computeHpFromTraits(groupedTraits) {
 }
 
 // ===== TRAIT NORMALIZER =====
-const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
+const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
 
 function normalizeTraits(attrs) {
   const groups = {};
@@ -817,23 +862,19 @@ function normalizeTraits(attrs) {
 
   for (const t of (Array.isArray(attrs) ? attrs : [])) {
     const type = String(t?.trait_type ?? '').trim();
-    let val = t?.value;
-    if (!type || val == null) continue;
-
-    const valStr = String(val).trim();
-    if (!valStr || valStr.toLowerCase() === 'none') continue; // drop missing/none
-
-    if (!groups.hasOwnProperty(type)) continue; // only our categories
-
+    const valStr = String(t?.value ?? '').trim();
+    if (!type || !valStr) continue;
+    if (valStr.toLowerCase() === 'none' || valStr.toLowerCase() === 'none (ignore)') continue;
+    if (!groups.hasOwnProperty(type)) continue;
     groups[type].push({ value: valStr });
   }
   return groups;
 }
 
-// Back-compat alias (not used for header text anymore)
+// Back-compat alias
 function rarityColorFromLabel(label) { return stripeFromRarity(label); }
 
-// ====== RENDERER (uses HP in header + beside each trait) ======
+// ====== RENDERER (uses HP in header + per-trait HP) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -882,23 +923,14 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Layout (2 cols)
   const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
   const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
-  const order = TRAIT_ORDER;
 
   function layout(lineH, titleH, blockPad) {
     const boxes = [];
-    for (const cat of order) {
-      const items = (traits[cat] || []).filter(t => {
-        const v = String(t?.value ?? '').trim();
-        return v && v.toLowerCase() !== 'none';
-      });
+    for (const cat of TRAIT_ORDER) {
+      const items = (traits[cat] || []);
       if (!items.length) continue;
 
-      // include per-trait HP text
-      const lines = items.map(t => {
-        const hp = hpFor(cat, t.value);
-        return `• ${String(t.value)} (${hp} HP)`;
-      });
-
+      const lines = items.map(t => `• ${String(t.value)} (${hpFor(cat, t.value)} HP)`);
       const maxLines = 5;
       const shown = lines.slice(0, maxLines);
       const hidden = lines.length - shown.length;
@@ -926,15 +958,15 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   }
 
   let L = layout(16, 28, 8);
-  if (L.usedH > innerH) {
-    const scale = Math.max(0.75, innerH / L.usedH);
+  if (L.usedH > (TH - 24)) {
+    const scale = Math.max(0.75, (TH - 24) / L.usedH);
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
   // Draw mini-cards
   for (const b of L.placed) {
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
-    const traitHeaderFill = headerStripeFill; // match rarity stripe color
+    const traitHeaderFill = headerStripeFill;
     drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
     ctx.strokeStyle = PALETTE.traitHeaderStroke; ctx.lineWidth = 1.5; ctx.stroke();
 
