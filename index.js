@@ -830,7 +830,7 @@ const PALETTE = {
   traitsPanelBg:     '#b9dded',
   traitsPanelStroke: '#000000',
   traitCardFill:   '#FFFFFF',
-  traitCardStroke: '#b9dded',
+  traitCardStroke: '#000000',
   traitCardShadow: '#0000001A',
   traitHeaderFill:   '#b9dded', // (actual fill is overridden per-rarity at draw time)
   traitHeaderStroke: '#b9dded',
@@ -1193,10 +1193,9 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
   ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
 
-  // Header stripe (with black outline)
+  // Header stripe + black outline
   const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
-  const headerStroke = PALETTE.headerStripeStroke || '#000000';
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, headerStroke);
+  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, '#000000');
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
   ctx.font = `36px ${FONT_BOLD}`;
@@ -1208,7 +1207,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // Art window (square)
+  // Art window
   const AW = 420, AH = 420;
   const AX = Math.round((W - AW) / 2), AY = 160;
   roundRectPath(ctx, AX, AY, AW, AH, 22);
@@ -1225,7 +1224,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Traits panel
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, PALETTE.traitsPanelBg);
-  ctx.strokeStyle = PALETTE.traitsPanelStroke; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = '#000000'; ctx.lineWidth = 2; ctx.stroke();
 
   // Layout (2 cols)
   const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
@@ -1270,29 +1269,25 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // Draw mini-cards (rounded title bubble + comfy inner padding)
-  const BUBBLE_R = 14;          // corner radius for the title bubble
-  const BUBBLE_OVERLAP = 14;    // how far the bubble extends into the rows area
-  const INNER_INSET = 8;        // inset for the white rows area
-  const ROW_PAD_X = 16;         // left/right padding inside rows area
-  const ROW_PAD_Y = 10;         // top padding for first row
+  // Mini-cards: single black outline around header + rows, and tighter content
+  const BUBBLE_R = 14;
+  const BUBBLE_OVERLAP = 12;   // extend header into rows a bit
+  const INNER_INSET_X = 8;     // left/right inset for rows area
+  const INNER_INSET_TOP = 4;   // smaller top inset so first line sits higher
+  const INNER_INSET_BOTTOM = 8;
+  const ROW_PAD_X = 16;
+  const ROW_PAD_Y = 6;
 
   for (const b of L.placed) {
-    // Outer mini-card
+    // One outer stroke (black) around the whole mini-card
     drawRoundRectShadow(
-      ctx, b.x, b.y, b.w, b.boxH, 12,
-      PALETTE.traitCardFill,
-      PALETTE.traitCardStroke,
-      PALETTE.traitCardShadow, 10, 2
+      ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R,
+      PALETTE.traitCardFill, '#000000', PALETTE.traitCardShadow, 10, 2
     );
 
-    // Title bubble (rounded on the bottom; with black outline)
+    // Header bubble fill (no extra stroke—outer stroke already surrounds both)
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
-    ctx.strokeStyle = PALETTE.traitHeaderStroke || '#000000';
-    ctx.lineWidth = 1.5;
-    roundRectPath(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R);
-    ctx.stroke();
 
     // Title text
     ctx.fillStyle = PALETTE.traitTitleText;
@@ -1300,13 +1295,13 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.textBaseline = 'middle';
     ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-    // Inset rows container
+    // Rows area (inset white)
     const rowsY = b.y + bubbleH;
     const rowsH = b.boxH - bubbleH;
-    const contentX = b.x + INNER_INSET;
-    const contentY = rowsY + INNER_INSET;
-    const contentW = b.w - INNER_INSET * 2;
-    const contentH = rowsH - INNER_INSET * 2;
+    const contentX = b.x + INNER_INSET_X;
+    const contentY = rowsY + INNER_INSET_TOP;
+    const contentW = b.w - INNER_INSET_X * 2;
+    const contentH = rowsH - (INNER_INSET_TOP + INNER_INSET_BOTTOM);
     drawRoundRect(ctx, contentX, contentY, contentW, contentH, 10, PALETTE.traitCardFill);
 
     // Rows text
@@ -1320,18 +1315,16 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer (left: token, right: class/tier)
+  // Footer
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
-
   const footerY = H - 34;
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
   const tierLabelFooter =
     (rarityLabel && String(rarityLabel)) ||
     hpToTierLabel(rankInfo?.hpTotal || 0);
-
   const classText = String(tierLabelFooter);
   const classW = ctx.measureText(classText).width;
   ctx.fillText(classText, W - 60 - classW, footerY);
@@ -1341,7 +1334,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
-
 function roundRectPath(ctx, x, y, w, h, r) {
   const rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
@@ -1352,12 +1344,10 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
 }
-
 function drawRoundRect(ctx, x, y, w, h, r, fill) {
   roundRectPath(ctx, x, y, w, h, r);
   ctx.fillStyle = fill; ctx.fill();
 }
-
 function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
   ctx.save();
   ctx.shadowColor = shadowColor;
@@ -1368,14 +1358,11 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   ctx.restore();
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
 }
-
-// image cover
 function cover(sw, sh, mw, mh) {
   const s = Math.max(mw / sw, mh / sh);
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
   return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
 }
-
 async function fetchBuffer(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
