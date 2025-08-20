@@ -814,43 +814,32 @@ function hpToTierLabel(hp) {
 
 // ===== COLORS / THEME =====
 const PALETTE = {
-  // Fallback fill (only used if bg image can't load)
-  cardBg: '#242623',
-
-  // Header text
+  cardBg: '#242623',           // kept for fallback
+  frameFill: '#b9dded',        // kept for fallback
+  frameStroke: '#CFE3FF',      // kept for fallback
   headerText: '#0F172A',
-
-  // Rarity stripe palette (used for header stripe + trait headers)
   rarityStripeByTier: {
-    Mythic:    '#fadf6a',
-    Legendary: '#b5a6e9',
-    Rare:      '#f2d2ea',
-    Uncommon:  '#a6fbba',
-    Common:    '#929394',
+    Mythic:   '#fadf6a',
+    Legendary:'#b5a6e9',
+    Rare:     '#f2d2ea',
+    Uncommon: '#a6fbba',
+    Common:   '#929394',
   },
-
-  // Art window
-  artBackfill: '#22313b',
-  artStroke:   '#000000',
-
-  // Traits panel shell
-  traitsPanelBg:     '#cfe3ff',
+  artBackfill: '#b9dded',
+  artStroke:   '#F9FAFB',
+  traitsPanelBg:     '#b9dded',   // used as base, rendered with alpha
   traitsPanelStroke: '#000000',
-
-  // Mini trait cards (rows area)
-  traitCardFill:   '#FFFFFF',
-  traitCardStroke: '#000000',
-  traitCardShadow: '#0000001A',
-
-  // Trait header (title bubble) text
-  traitTitleText: '#222625',
-  // Trait row text
-  traitValueText: '#4b4f7a',
-
-  // Footer text
-  footerText: '#212524',
+  traitCardFill:     '#FFFFFF',
+  traitCardStroke:   '#000000',
+  traitCardShadow:   '#0000001A',
+  traitHeaderFill:   '#b9dded',   // (actual header bubble uses rarity color)
+  traitTitleText:    '#222625',
+  traitValueText:    '#775fbb',
+  footerText:        '#212524',
+  headerStripeStroke:'#000000',
 };
 
+// Map tier to color
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
@@ -1188,68 +1177,76 @@ function normalizeTraits(attrs) {
   return groups;
 }
 
-// Back-compat alias (kept if something still calls it)
+// Back-compat alias
 function rarityColorFromLabel(label) { return stripeFromRarity(label); }
 
-// ===== Vince background image (cached) =====
-const CARD_BG_IMAGE_URL =
-  process.env.CARD_BG_IMAGE_URL || 'https://i.imgur.com/ke3fUab.png';
+// --- Background images by tier ---
+const CARD_BG_MYTHIC_URL  = 'https://i.imgur.com/9mCxyky.png';
+const CARD_BG_DEFAULT_URL = 'https://i.imgur.com/ke3fUab.png';
 
-globalThis.__CARD_BG_IMG ||= null;
-async function getCardBackground() {
-  if (globalThis.__CARD_BG_IMG) return globalThis.__CARD_BG_IMG;
-  try {
-    const buf = await fetchBuffer(CARD_BG_IMAGE_URL);
-    globalThis.__CARD_BG_IMG = await loadImage(buf);
-  } catch (e) {
-    console.warn('⚠️ Card BG load failed:', e.message);
-    globalThis.__CARD_BG_IMG = null;
-  }
-  return globalThis.__CARD_BG_IMG;
+// simple in-memory image cache
+globalThis.__CARD_BG_CACHE ||= {};
+async function loadImageCached(url) {
+  if (globalThis.__CARD_BG_CACHE[url]) return globalThis.__CARD_BG_CACHE[url];
+  const buf = await fetchBuffer(url);
+  const img = await loadImage(buf);
+  globalThis.__CARD_BG_CACHE[url] = img;
+  return img;
+}
+function hexToRgba(hex, a=1) {
+  const h = hex.replace('#','');
+  const v = h.length===3 ? h.split('').map(c=>c+c).join('') : h;
+  const bigint = parseInt(v, 16);
+  const r = (bigint>>16)&255, g=(bigint>>8)&255, b=bigint&255;
+  return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER (HP header + per-trait HP + class in footer) ======
+// ====== RENDERER (BG image, semi-transparent traits panel, rarity pill) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // === BG (image clipped to rounded card) + outer black outline ===
+  // Decide tier/stripe once
+  const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
+  const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
+
+  // === Background: draw Imgur image clipped to the card frame ===
   const OUT_X = 24, OUT_Y = 24, OUT_W = W - 48, OUT_H = H - 48, OUT_R = 28;
+  const bgUrl = tierLabel === 'Mythic' ? CARD_BG_MYTHIC_URL : CARD_BG_DEFAULT_URL;
 
   roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
   ctx.save(); ctx.clip();
-  const bgImg = await getCardBackground();
-  if (bgImg) {
+  try {
+    const bgImg = await loadImageCached(bgUrl);
     const fit = cover(bgImg.width, bgImg.height, OUT_W, OUT_H);
     ctx.drawImage(bgImg, OUT_X + fit.dx, OUT_Y + fit.dy, fit.dw, fit.dh);
-  } else {
+  } catch {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(OUT_X, OUT_Y, OUT_W, OUT_H);
   }
   ctx.restore();
 
+  // Clean outer stroke so the card edge stays crisp
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = 3;
   roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
   ctx.stroke();
 
-  // Header stripe + crisp black outline
-  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
+  // === Header stripe + outline ===
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, '#000000');
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
   ctx.font = `36px ${FONT_BOLD}`;
   ctx.fillText(name, 64, 94);
 
-  // Header right = Total HP
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
   ctx.font = `28px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // Art window (square)
-  const AW = 450, AH = 450; // a touch larger, closer to concept
+  // === Art window ===
+  const AW = 420, AH = 420;
   const AX = Math.round((W - AW) / 2), AY = 160;
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
@@ -1265,17 +1262,17 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.stroke();
 
-  // Traits panel
-  const TX = 50, TY = AY + AH + 24, TW = W - 100, TH = H - TY - 110;
-  drawRoundRect(ctx, TX, TY, TW, TH, 18, PALETTE.traitsPanelBg);
+  // === Traits panel (semi-transparent) ===
+  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.78));
   ctx.strokeStyle = PALETTE.traitsPanelStroke;
-  ctx.lineWidth = 3;
-  roundRectPath(ctx, TX, TY, TW, TH, 18);
+  ctx.lineWidth = 2.5;
+  roundRectPath(ctx, TX, TY, TW, TH, 16);
   ctx.stroke();
 
-  // Layout (2 columns)
-  const PAD = 16, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 16, COL_W = (innerW - COL_GAP) / 2;
+  // === Layout (2 cols) ===
+  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
   function layout(lineH, titleH, blockPad) {
     const boxes = [];
@@ -1292,11 +1289,9 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       const rowsH = shown.length * lineH;
       const minRows = 34;
       const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
-
       boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
     }
 
-    // Masonry two columns
     let yL = innerY, yR = innerY;
     const placed = [];
     for (const b of boxes) {
@@ -1307,43 +1302,40 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
     }
     const usedH = Math.max(yL, yR) - innerY;
-    return { placed, usedH, lineH, titleH, blockPad };
+    return { placed, usedH };
   }
 
-  let L = layout(16, 30, 10);
+  let L = layout(16, 28, 8);
   if (L.usedH > (innerH - 12)) {
     const scale = Math.max(0.75, (innerH - 12) / L.usedH);
-    L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(30 * scale)), 8);
+    L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // Mini-cards: single outer black outline; header bubble sits inside it
+  // === Mini-cards: single black outline around header+rows ===
   const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 12;      // header overlaps rows slightly
-  const INNER_INSET_X = 10;       // rows area inset (L/R)
-  const INNER_INSET_TOP = 6;      // rows area inset top
-  const INNER_INSET_BOTTOM = 10;  // rows area inset bottom
-  const ROW_PAD_X = 16;
-  const ROW_PAD_Y = 6;
+  const BUBBLE_OVERLAP = 12;
+  const INNER_INSET_X = 10, INNER_INSET_TOP = 6, INNER_INSET_BOTTOM = 10;
+  const ROW_PAD_X = 16, ROW_PAD_Y = 6;
 
   for (const b of L.placed) {
-    // Outer rounded card with stroke (surrounds header + rows)
+    // outer card with black outline
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
     ctx.strokeStyle = PALETTE.traitCardStroke;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 2.5;
     roundRectPath(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R);
     ctx.stroke();
 
-    // Header bubble fill (no extra stroke so it "fits" inside the outline)
+    // header bubble (fill only; sits inside outline)
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title text
+    // title text
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'middle';
     ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-    // Rows container (inset white panel)
+    // rows area (inset)
     const rowsY = b.y + bubbleH;
     const rowsH = b.boxH - bubbleH;
     const contentX = b.x + INNER_INSET_X;
@@ -1352,30 +1344,42 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const contentH = rowsH - (INNER_INSET_TOP + INNER_INSET_BOTTOM);
     drawRoundRect(ctx, contentX, contentY, contentW, contentH, 12, PALETTE.traitCardFill);
 
-    // Rows text
+    // rows text
     let yy = contentY + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
-      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
-      yy += b.lineH;
+      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(16 / 2));
+      yy += 16;
     }
   }
 
-  // Footer
+  // === Footer left ===
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
   const footerY = H - 34;
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
-  const tierLabelFooter =
-    (rarityLabel && String(rarityLabel)) ||
-    hpToTierLabel(rankInfo?.hpTotal || 0);
-  const classText = String(tierLabelFooter);
-  const classW = ctx.measureText(classText).width;
-  ctx.fillText(classText, W - 60 - classW, footerY);
+  // === Rarity pill (bottom-right) ===
+  const pillText = tierLabel;
+  ctx.font = `22px ${FONT_BOLD}`;
+  const tW = ctx.measureText(pillText).width;
+  const PILL_PAD_X = 18, PILL_H = 46, PILL_R = 22;
+  const pillW = tW + PILL_PAD_X * 2;
+  const pillX = W - 48 - pillW;
+  const pillY = H - 56 - PILL_H;
+
+  drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, PILL_R, headerStripeFill);
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = 2.5;
+  roundRectPath(ctx, pillX, pillY, pillW, PILL_H, PILL_R);
+  ctx.stroke();
+
+  ctx.fillStyle = '#000000';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
 }
@@ -1404,7 +1408,7 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   ctx.shadowOffsetY = shadowDy;
   drawRoundRect(ctx, x, y, w, h, r, fill);
   ctx.restore();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
 }
 function cover(sw, sh, mw, mh) {
   const s = Math.max(mw / sw, mh / sh);
