@@ -717,10 +717,10 @@ const HP_MAX = 1000;
 
 function hpToTierLabel(hp) {
   const n = Math.max(0, Math.min(1, (hp - HP_MIN) / (HP_MAX - HP_MIN))); // clamp 0..1
-  if (n >= 0.80) return 'Mythic';
-  if (n >= 0.60) return 'Legendary';
-  if (n >= 0.40) return 'Rare';
-  if (n >= 0.20) return 'Uncommon';
+  if (n >= 0.95) return 'Mythic';
+  if (n >= 0.75) return 'Legendary';
+  if (n >= 0.50) return 'Rare';
+  if (n >= 0.25) return 'Uncommon';
   return 'Common';
 }
 
