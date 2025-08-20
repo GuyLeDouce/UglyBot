@@ -710,17 +710,21 @@ async function fetchOpenSeaTraits(tokenId) {
   return [];
 }
 
-// Heuristic tier (only used for stripe color)
-function simpleRarityLabel(attrs) {
-  const n = Array.isArray(attrs) ? attrs.length : 0;
-  if (n >= 9) return 'Mythic';
-  if (n >= 7) return 'Legendary';
-  if (n >= 5) return 'Rare';
-  if (n >= 3) return 'Uncommon';
+// ===== HP-BASED TIERS (replace the old heuristic rarity) =====
+// Score domain: 595 (lowest/common) .. 1000 (highest/mythic)
+const HP_MIN = 595;
+const HP_MAX = 1000;
+
+function hpToTierLabel(hp) {
+  const n = Math.max(0, Math.min(1, (hp - HP_MIN) / (HP_MAX - HP_MIN))); // clamp 0..1
+  if (n >= 0.80) return 'Mythic';
+  if (n >= 0.60) return 'Legendary';
+  if (n >= 0.40) return 'Rare';
+  if (n >= 0.20) return 'Uncommon';
   return 'Common';
 }
 
-// ===== COLORS / THEME (unchanged except header text now shows HP) =====
+// ===== COLORS / THEME (unchanged except header shows HP) =====
 const PALETTE = {
   cardBg: '#242623',
   frameFill: '#b9dded',
@@ -740,15 +744,18 @@ const PALETTE = {
   traitCardFill:   '#FFFFFF',
   traitCardStroke: '#b9dded',
   traitCardShadow: '#0000001A',
-  traitHeaderFill:   '#b9dded', // (fill is overridden per-rarity at draw time)
+  // (fill is overridden per-rarity at draw time)
+  traitHeaderFill:   '#b9dded',
   traitHeaderStroke: '#b9dded',
   traitTitleText: '#222625',
   traitValueText: '#775fbb',
   footerText: '#212524',
 };
+
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
+function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
 
 // Local font aliases
 const FONT_REG =
@@ -854,7 +861,7 @@ function computeHpFromTraits(groupedTraits) {
 }
 
 // ===== TRAIT NORMALIZER =====
-const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
 
 function normalizeTraits(attrs) {
   const groups = {};
@@ -888,7 +895,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
 
   // Header stripe
-  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel);
+  // Prefer explicit headerStripe; otherwise derive from rarityLabel (still supported)
+  const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
@@ -966,7 +974,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Draw mini-cards
   for (const b of L.placed) {
     drawRoundRectShadow(ctx, b.x, b.y, b.w, b.boxH, 12, PALETTE.traitCardFill, PALETTE.traitCardStroke, PALETTE.traitCardShadow, 10, 2);
-    const traitHeaderFill = headerStripeFill;
+    const traitHeaderFill = headerStripeFill; // match rarity/HP color
     drawRoundRect(ctx, b.x, b.y, b.w, b.titleH, 12, traitHeaderFill);
     ctx.strokeStyle = PALETTE.traitHeaderStroke; ctx.lineWidth = 1.5; ctx.stroke();
 
