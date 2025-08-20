@@ -814,32 +814,43 @@ function hpToTierLabel(hp) {
 
 // ===== COLORS / THEME =====
 const PALETTE = {
+  // Fallback fill (only used if bg image can't load)
   cardBg: '#242623',
-  frameFill: '#b9dded',
-  frameStroke: '#CFE3FF',
+
+  // Header text
   headerText: '#0F172A',
+
+  // Rarity stripe palette (used for header stripe + trait headers)
   rarityStripeByTier: {
-    Mythic:   '#fadf6a',
-    Legendary:'#b5a6e9',
-    Rare:     '#f2d2ea',
-    Uncommon: '#a6fbba',
-    Common:   '#929394',
+    Mythic:    '#fadf6a',
+    Legendary: '#b5a6e9',
+    Rare:      '#f2d2ea',
+    Uncommon:  '#a6fbba',
+    Common:    '#929394',
   },
-  artBackfill: '#b9dded',
+
+  // Art window
+  artBackfill: '#22313b',
   artStroke:   '#000000',
-  traitsPanelBg:     '#b9dded',
+
+  // Traits panel shell
+  traitsPanelBg:     '#cfe3ff',
   traitsPanelStroke: '#000000',
+
+  // Mini trait cards (rows area)
   traitCardFill:   '#FFFFFF',
   traitCardStroke: '#000000',
   traitCardShadow: '#0000001A',
-  traitHeaderFill:   '#b9dded', // (actual fill is overridden per-rarity at draw time)
-  traitHeaderStroke: '#b9dded',
+
+  // Trait header (title bubble) text
   traitTitleText: '#222625',
-  traitValueText: '#775fbb',
+  // Trait row text
+  traitValueText: '#4b4f7a',
+
+  // Footer text
   footerText: '#212524',
-  headerStripeStroke: '#000000',
-  traitHeaderStroke:  '#000000',
 };
+
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
@@ -1180,20 +1191,50 @@ function normalizeTraits(attrs) {
 // Back-compat alias (kept if something still calls it)
 function rarityColorFromLabel(label) { return stripeFromRarity(label); }
 
+// ===== Vince background image (cached) =====
+const CARD_BG_IMAGE_URL =
+  process.env.CARD_BG_IMAGE_URL || 'https://i.imgur.com/ke3fUab.png';
+
+globalThis.__CARD_BG_IMG ||= null;
+async function getCardBackground() {
+  if (globalThis.__CARD_BG_IMG) return globalThis.__CARD_BG_IMG;
+  try {
+    const buf = await fetchBuffer(CARD_BG_IMAGE_URL);
+    globalThis.__CARD_BG_IMG = await loadImage(buf);
+  } catch (e) {
+    console.warn('⚠️ Card BG load failed:', e.message);
+    globalThis.__CARD_BG_IMG = null;
+  }
+  return globalThis.__CARD_BG_IMG;
+}
+
 // ====== RENDERER (HP header + per-trait HP + class in footer) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // BG
-  ctx.fillStyle = PALETTE.cardBg; ctx.fillRect(0, 0, W, H);
+  // === BG (image clipped to rounded card) + outer black outline ===
+  const OUT_X = 24, OUT_Y = 24, OUT_W = W - 48, OUT_H = H - 48, OUT_R = 28;
 
-  // Frame
-  drawRoundRect(ctx, 24, 24, W - 48, H - 48, 28, PALETTE.frameFill);
-  ctx.strokeStyle = PALETTE.frameStroke; ctx.lineWidth = 2; ctx.stroke();
+  roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
+  ctx.save(); ctx.clip();
+  const bgImg = await getCardBackground();
+  if (bgImg) {
+    const fit = cover(bgImg.width, bgImg.height, OUT_W, OUT_H);
+    ctx.drawImage(bgImg, OUT_X + fit.dx, OUT_Y + fit.dy, fit.dw, fit.dh);
+  } else {
+    ctx.fillStyle = PALETTE.cardBg;
+    ctx.fillRect(OUT_X, OUT_Y, OUT_W, OUT_H);
+  }
+  ctx.restore();
 
-  // Header stripe + black outline
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = 3;
+  roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
+  ctx.stroke();
+
+  // Header stripe + crisp black outline
   const headerStripeFill = headerStripe || stripeFromRarity(rarityLabel || 'Common');
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, '#000000');
   ctx.fillStyle = PALETTE.headerText;
@@ -1207,8 +1248,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // Art window
-  const AW = 420, AH = 420;
+  // Art window (square)
+  const AW = 450, AH = 450; // a touch larger, closer to concept
   const AX = Math.round((W - AW) / 2), AY = 160;
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
@@ -1219,16 +1260,22 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   } catch {}
   ctx.restore();
-  ctx.strokeStyle = PALETTE.artStroke; ctx.lineWidth = 2; roundRectPath(ctx, AX, AY, AW, AH, 22); ctx.stroke();
+  ctx.strokeStyle = PALETTE.artStroke;
+  ctx.lineWidth = 3;
+  roundRectPath(ctx, AX, AY, AW, AH, 22);
+  ctx.stroke();
 
   // Traits panel
-  const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, PALETTE.traitsPanelBg);
-  ctx.strokeStyle = '#000000'; ctx.lineWidth = 2; ctx.stroke();
+  const TX = 50, TY = AY + AH + 24, TW = W - 100, TH = H - TY - 110;
+  drawRoundRect(ctx, TX, TY, TW, TH, 18, PALETTE.traitsPanelBg);
+  ctx.strokeStyle = PALETTE.traitsPanelStroke;
+  ctx.lineWidth = 3;
+  roundRectPath(ctx, TX, TY, TW, TH, 18);
+  ctx.stroke();
 
-  // Layout (2 cols)
-  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
+  // Layout (2 columns)
+  const PAD = 16, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  const COL_GAP = 16, COL_W = (innerW - COL_GAP) / 2;
 
   function layout(lineH, titleH, blockPad) {
     const boxes = [];
@@ -1263,49 +1310,58 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     return { placed, usedH, lineH, titleH, blockPad };
   }
 
-  let L = layout(16, 28, 8);
+  let L = layout(16, 30, 10);
   if (L.usedH > (innerH - 12)) {
     const scale = Math.max(0.75, (innerH - 12) / L.usedH);
-    L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
+    L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(30 * scale)), 8);
   }
 
-// Mini-cards: single black outline around header + rows, tighter spacing
-const BUBBLE_R = 14;
-const BUBBLE_OVERLAP = 14;  // how far the header bubble dips into the rows
-const SIDE_PAD = 16;        // left/right margin for row text
-const TOP_PAD = 6;          // top padding for first row
-const LINE_H = 16;          // row line height (syncs with layout lineH above)
+  // Mini-cards: single outer black outline; header bubble sits inside it
+  const BUBBLE_R = 16;
+  const BUBBLE_OVERLAP = 12;      // header overlaps rows slightly
+  const INNER_INSET_X = 10;       // rows area inset (L/R)
+  const INNER_INSET_TOP = 6;      // rows area inset top
+  const INNER_INSET_BOTTOM = 10;  // rows area inset bottom
+  const ROW_PAD_X = 16;
+  const ROW_PAD_Y = 6;
 
-for (const b of L.placed) {
-  // Outer mini-card (white) + single black outline (no inner boxes)
-  drawRoundRectShadow(
-    ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R,
-    PALETTE.traitCardFill, '#000000', PALETTE.traitCardShadow, 8, 2
-  );
+  for (const b of L.placed) {
+    // Outer rounded card with stroke (surrounds header + rows)
+    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+    ctx.strokeStyle = PALETTE.traitCardStroke;
+    ctx.lineWidth = 3;
+    roundRectPath(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R);
+    ctx.stroke();
 
-  // Header bubble (fills top area and rounds *bottom* so it feels like a tab)
-  const bubbleH = b.titleH + BUBBLE_OVERLAP;
-  drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+    // Header bubble fill (no extra stroke so it "fits" inside the outline)
+    const bubbleH = b.titleH + BUBBLE_OVERLAP;
+    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-  // Title text
-  ctx.fillStyle = PALETTE.traitTitleText;
-  ctx.font = `19px ${FONT_BOLD}`;
-  ctx.textBaseline = 'middle';
-  ctx.fillText(b.cat, b.x + SIDE_PAD, b.y + Math.floor(b.titleH / 2));
+    // Title text
+    ctx.fillStyle = PALETTE.traitTitleText;
+    ctx.font = `19px ${FONT_BOLD}`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-  // Rows text — draw directly on the white card, with comfy margins
-  const rowsY = b.y + bubbleH;
-  let yy = rowsY + TOP_PAD;
-  ctx.fillStyle = PALETTE.traitValueText;
-  ctx.font = `15px ${FONT_REG}`;
-  ctx.textBaseline = 'middle';
+    // Rows container (inset white panel)
+    const rowsY = b.y + bubbleH;
+    const rowsH = b.boxH - bubbleH;
+    const contentX = b.x + INNER_INSET_X;
+    const contentY = rowsY + INNER_INSET_TOP;
+    const contentW = b.w - INNER_INSET_X * 2;
+    const contentH = rowsH - (INNER_INSET_TOP + INNER_INSET_BOTTOM);
+    drawRoundRect(ctx, contentX, contentY, contentW, contentH, 12, PALETTE.traitCardFill);
 
-  for (const line of b.lines) {
-    ctx.fillText(line, b.x + SIDE_PAD, yy + Math.floor(LINE_H / 2));
-    yy += LINE_H;
+    // Rows text
+    let yy = contentY + ROW_PAD_Y;
+    ctx.fillStyle = PALETTE.traitValueText;
+    ctx.font = `15px ${FONT_REG}`;
+    ctx.textBaseline = 'middle';
+    for (const line of b.lines) {
+      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
+      yy += b.lineH;
+    }
   }
-}
-
 
   // Footer
   ctx.fillStyle = PALETTE.footerText;
@@ -1348,7 +1404,7 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   ctx.shadowOffsetY = shadowDy;
   drawRoundRect(ctx, x, y, w, h, r, fill);
   ctx.restore();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
 }
 function cover(sw, sh, mw, mh) {
   const s = Math.max(mw / sw, mh / sh);
