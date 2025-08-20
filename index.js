@@ -558,21 +558,25 @@ client.on('interactionCreate', async (interaction) => {
 try {
   await interaction.deferReply();
 
-  // --- metadata + traits ---
+  // --- metadata ---
   const meta = await getNftMetadataAlchemy(tokenId);
-  const traitsRaw =
-    Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
-    (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
-  const traits = normalizeTraits(traitsRaw);
 
+  // --- traits (Alchemy first, OpenSea fallback) ---
+  const { attrs, source } = await getTraitsForToken(meta, tokenId);
+  const traits = normalizeTraits(attrs);
+
+  // helpful log for debugging in Railway
+  console.log(`Traits debug #${tokenId}: { source: ${source}, count: ${attrs.length}, sample: ${JSON.stringify(attrs.slice(0,3))} }`);
+
+  // --- naming / image ---
   const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
   const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-  // --- HP scoring & tier color ---
-  const hpAgg    = computeHpFromTraits(traits);           // { total, per }
-  const hpTotal  = hpAgg.total || 0;                      // shown in header
-  const tier     = hpToTierLabel(hpTotal);                // Common..Mythic
-  const stripe   = hpToStripe(hpTotal);                   // color from palette
+  // --- HP scoring & stripe color from total ---
+  const hpAgg   = computeHpFromTraits(traits);        // { total, per }
+  const hpTotal = hpAgg.total || 0;
+  const tier    = hpToTierLabel(hpTotal);             // Common..Mythic
+  const stripe  = hpToStripe(hpTotal);                // color for header/trait-headers
 
   // --- render ---
   const buffer = await renderSquigCard({
@@ -580,9 +584,9 @@ try {
     tokenId,
     imageUrl,
     traits,
-    rankInfo: { hpTotal, per: hpAgg.per }, // used for header & per-trait HP
-    rarityLabel: tier,                      // fallback inside renderer
-    headerStripe: stripe                    // actual stripe color
+    rankInfo: { hpTotal, per: hpAgg.per }, // shows HP in header; per-trait HP in rows
+    rarityLabel: tier,                     // kept for renderer fallback
+    headerStripe: stripe                   // actual fill color used
   });
 
   const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
@@ -604,12 +608,13 @@ client.login(DISCORD_TOKEN);
 
 // ===== Helper funcs (metadata) =====
 async function getNftMetadataAlchemy(tokenId) {
-  const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
-              `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
-  const res = await fetch(url, { timeout: 10000 });
-  if (!res.ok) throw new Error(`Alchemy HTTP ${res.status}`);
+  const url =
+    `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
+    `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
+  const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
   return res.json();
 }
+
 
 // -------- flexible trait extraction with OpenSea fallback --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
