@@ -826,7 +826,7 @@ const PALETTE = {
     Common:   '#929394',
   },
   artBackfill: '#b9dded',
-  artStroke:   '#F9FAFB',
+  artStroke:   '#000000',
   traitsPanelBg:     '#b9dded',
   traitsPanelStroke: '#000000',
   traitCardFill:   '#FFFFFF',
@@ -1269,51 +1269,43 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // Mini-cards: single black outline around header + rows, and tighter content
-  const BUBBLE_R = 14;
-  const BUBBLE_OVERLAP = 12;   // extend header into rows a bit
-  const INNER_INSET_X = 8;     // left/right inset for rows area
-  const INNER_INSET_TOP = 4;   // smaller top inset so first line sits higher
-  const INNER_INSET_BOTTOM = 8;
-  const ROW_PAD_X = 16;
-  const ROW_PAD_Y = 6;
+// Mini-cards: single black outline around header + rows, tighter spacing
+const BUBBLE_R = 14;
+const BUBBLE_OVERLAP = 14;  // how far the header bubble dips into the rows
+const SIDE_PAD = 16;        // left/right margin for row text
+const TOP_PAD = 6;          // top padding for first row
+const LINE_H = 16;          // row line height (syncs with layout lineH above)
 
-  for (const b of L.placed) {
-    // One outer stroke (black) around the whole mini-card
-    drawRoundRectShadow(
-      ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R,
-      PALETTE.traitCardFill, '#000000', PALETTE.traitCardShadow, 10, 2
-    );
+for (const b of L.placed) {
+  // Outer mini-card (white) + single black outline (no inner boxes)
+  drawRoundRectShadow(
+    ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R,
+    PALETTE.traitCardFill, '#000000', PALETTE.traitCardShadow, 8, 2
+  );
 
-    // Header bubble fill (no extra stroke—outer stroke already surrounds both)
-    const bubbleH = b.titleH + BUBBLE_OVERLAP;
-    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+  // Header bubble (fills top area and rounds *bottom* so it feels like a tab)
+  const bubbleH = b.titleH + BUBBLE_OVERLAP;
+  drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title text
-    ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `19px ${FONT_BOLD}`;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
+  // Title text
+  ctx.fillStyle = PALETTE.traitTitleText;
+  ctx.font = `19px ${FONT_BOLD}`;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(b.cat, b.x + SIDE_PAD, b.y + Math.floor(b.titleH / 2));
 
-    // Rows area (inset white)
-    const rowsY = b.y + bubbleH;
-    const rowsH = b.boxH - bubbleH;
-    const contentX = b.x + INNER_INSET_X;
-    const contentY = rowsY + INNER_INSET_TOP;
-    const contentW = b.w - INNER_INSET_X * 2;
-    const contentH = rowsH - (INNER_INSET_TOP + INNER_INSET_BOTTOM);
-    drawRoundRect(ctx, contentX, contentY, contentW, contentH, 10, PALETTE.traitCardFill);
+  // Rows text — draw directly on the white card, with comfy margins
+  const rowsY = b.y + bubbleH;
+  let yy = rowsY + TOP_PAD;
+  ctx.fillStyle = PALETTE.traitValueText;
+  ctx.font = `15px ${FONT_REG}`;
+  ctx.textBaseline = 'middle';
 
-    // Rows text
-    let yy = contentY + ROW_PAD_Y;
-    ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `15px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
-    for (const line of b.lines) {
-      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
-      yy += b.lineH;
-    }
+  for (const line of b.lines) {
+    ctx.fillText(line, b.x + SIDE_PAD, yy + Math.floor(LINE_H / 2));
+    yy += LINE_H;
   }
+}
+
 
   // Footer
   ctx.fillStyle = PALETTE.footerText;
