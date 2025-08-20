@@ -1267,7 +1267,54 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-// Draw mini-cards
+// Draw mini-cards (rounded header bubble + internal padding)
+const BUBBLE_R = 12;        // corner radius for the title bubble
+const BUBBLE_OVERLAP = 10;  // bubble extends into rows area so bottom corners are rounded
+const ROW_PAD_X = 16;       // left/right padding for trait rows
+const ROW_PAD_Y = 10;       // top/bottom padding for trait rows
+
+for (const b of L.placed) {
+  // outer card with shadow/border
+  drawRoundRectShadow(
+    ctx, b.x, b.y, b.w, b.boxH, 12,
+    PALETTE.traitCardFill,
+    PALETTE.traitCardStroke,
+    PALETTE.traitCardShadow, 10, 2
+  );
+
+  // rounded title bubble (rounded on the bottom via extra height/overlap)
+  const bubbleH = b.titleH + BUBBLE_OVERLAP;
+  drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+  ctx.strokeStyle = PALETTE.traitHeaderStroke;
+  ctx.lineWidth = 1.5;
+  roundRectPath(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R);
+  ctx.stroke();
+
+  // title text (vertically centered in original title height)
+  ctx.fillStyle = PALETTE.traitTitleText;
+  ctx.font = `19px ${FONT_BOLD}`;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
+
+  // rows area under the bubble
+  const rowsY = b.y + bubbleH;
+  drawRect(ctx, b.x, rowsY, b.w, b.boxH - bubbleH, PALETTE.traitCardFill);
+
+  // lay out lines with internal padding & gentle vertical centering
+  const avail = b.boxH - bubbleH;
+  const rowsH = b.lines.length * b.lineH;
+  let yy = rowsY + Math.max(ROW_PAD_Y, Math.floor((avail - rowsH) / 2));
+
+  ctx.fillStyle = PALETTE.traitValueText;
+  ctx.font = `15px ${FONT_REG}`;
+  ctx.textBaseline = 'middle';
+
+  for (const line of b.lines) {
+    ctx.fillText(line, b.x + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
+    yy += b.lineH;
+  }
+}
+
 
   // Footer (left: token, right: class/tier)
   ctx.fillStyle = PALETTE.footerText;
