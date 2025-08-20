@@ -809,7 +809,7 @@ function computeHpFromTraits(groupedTraits) {
 }
 
 // ===== TRAIT NORMALIZER =====
-const TRAIT_ORDER = ['Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special', 'Type'];
+const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
 
 function normalizeTraits(attrs) {
   const groups = {};
