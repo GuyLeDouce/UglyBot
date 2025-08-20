@@ -558,33 +558,31 @@ client.on('interactionCreate', async (interaction) => {
 try {
   await interaction.deferReply();
 
-  // Alchemy metadata (no ownership check)
+  // --- metadata + traits ---
   const meta = await getNftMetadataAlchemy(tokenId);
-
-  // Robust trait fetch: try Alchemy, then fall back to OpenSea if needed
-  const { attrs: traitsRaw, source: traitSource } = await getTraitsForToken(meta, tokenId);
-
+  const traitsRaw =
+    Array.isArray(meta?.metadata?.attributes) ? meta.metadata.attributes :
+    (Array.isArray(meta?.raw?.metadata?.attributes) ? meta.raw.metadata.attributes : []);
   const traits = normalizeTraits(traitsRaw);
+
   const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
   const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
 
-  // === HP calculation from your table ===
-  const hpBreakdown = computeHpFromTraits(traits);
-  const hpTotal = hpBreakdown.total;
+  // --- HP scoring & tier color ---
+  const hpAgg    = computeHpFromTraits(traits);           // { total, per }
+  const hpTotal  = hpAgg.total || 0;                      // shown in header
+  const tier     = hpToTierLabel(hpTotal);                // Common..Mythic
+  const stripe   = hpToStripe(hpTotal);                   // color from palette
 
-  // Stripe color still uses our simple heuristic by trait count
-  const rarityLabel = simpleRarityLabel(traitsRaw);
-  const headerStripe = stripeFromRarity(rarityLabel);
-
-  // Render (renderer shows Total HP in header and (HP) next to each value)
+  // --- render ---
   const buffer = await renderSquigCard({
     name: displayName,
     tokenId,
     imageUrl,
     traits,
-    rankInfo: { hpTotal, traitSource }, // pass HP + where traits came from
-    rarityLabel,
-    headerStripe
+    rankInfo: { hpTotal, per: hpAgg.per }, // used for header & per-trait HP
+    rarityLabel: tier,                      // fallback inside renderer
+    headerStripe: stripe                    // actual stripe color
   });
 
   const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
@@ -598,6 +596,7 @@ try {
     await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
   }
 }
+
 });
 
 // ===== LOGIN =====
