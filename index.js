@@ -451,17 +451,17 @@ client.on('messageCreate', async (message) => {
   }
 
 // !squig [tokenId]
+// !squig [tokenId]
 if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
   const tokenId = args[0];
 
-  // Block unminted IDs with a funny message
-  try {
-    const minted = await isSquigMinted(tokenId);
-    if (!minted) {
-      return message.reply(notMintedLine(tokenId));
+  // Strict mint gate
+  const minted = await isSquigMintedStrict(tokenId);
+  if (minted !== true) {
+    if (minted === 'UNVERIFIED') {
+      return message.reply(`⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`);
     }
-  } catch (e) {
-    console.warn('mint check (prefix) failed:', e.message);
+    return message.reply(notMintedLine(tokenId));
   }
 
   const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
@@ -476,6 +476,7 @@ if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
 
   return message.reply({ embeds: [embed] });
 }
+
 
 
   // !mysquigs with pagination
@@ -569,12 +570,16 @@ client.on('interactionCreate', async (interaction) => {
 
 try {
   await interaction.deferReply();
-// Block unminted IDs with a funny message
-const minted = await isSquigMinted(tokenId);
-if (!minted) {
-  await interaction.editReply(notMintedLine(tokenId));
+// Block unminted IDs — strict
+const minted = await isSquigMintedStrict(tokenId);
+if (minted !== true) {
+  const msg = minted === 'UNVERIFIED'
+    ? `⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`
+    : notMintedLine(tokenId);
+  await interaction.editReply(msg);
   return;
 }
+
 
   // --- metadata ---
   const meta = await getNftMetadataAlchemy(tokenId);
@@ -632,7 +637,77 @@ async function getNftMetadataAlchemy(tokenId) {
   const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
   return res.json();
 }
+// ===== STRICT MINT CHECK (ethers ownerOf + Alchemy fallback) =====
+const ALCHEMY_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
+const provider = new ethers.JsonRpcProvider(ALCHEMY_RPC_URL);
 
+const ERC721_ABI = [
+  'function ownerOf(uint256 tokenId) view returns (address)'
+];
+
+const erc721Squigs = new ethers.Contract(SQUIGS_CONTRACT, ERC721_ABI, provider);
+
+const MINT_CACHE = new Map();
+
+const NOT_MINTED_MESSAGES = [
+  (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
+  (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
+  (id) => `🌀 Squig #${id} is hiding in the spiral dimension. The portal is **https://squigs.io**`,
+  (id) => `🥚 Squig #${id} is still an egg. Crack it open at **https://squigs.io**`,
+  (id) => `🤫 The Squigs whisper: “#${id}? Not minted.” Try **https://squigs.io**`
+];
+
+function notMintedLine(tokenId) {
+  const pick = NOT_MINTED_MESSAGES[Math.floor(Math.random() * NOT_MINTED_MESSAGES.length)];
+  return pick(tokenId);
+}
+
+/**
+ * Strict mint check:
+ *  1) Try ERC721 ownerOf(tokenId) — if it returns a non-zero address, it's minted.
+ *     - If it REVERTS (CALL_EXCEPTION), it's not minted.
+ *  2) If ownerOf fails due to network, fallback to Alchemy getOwnersForNFT.
+ *  3) If both fail (network issues), we treat it as "cannot verify" and block with a different message.
+ */
+async function isSquigMintedStrict(tokenId) {
+  if (MINT_CACHE.has(tokenId)) return MINT_CACHE.get(tokenId);
+
+  // 1) ownerOf via ethers
+  try {
+    const owner = await erc721Squigs.ownerOf(tokenId);
+    const minted = !!owner && owner !== '0x0000000000000000000000000000000000000000';
+    MINT_CACHE.set(tokenId, minted);
+    return minted;
+  } catch (e) {
+    // If it's a call exception (token does not exist), it's not minted.
+    if (e?.code === 'CALL_EXCEPTION' || /execution reverted/i.test(String(e?.shortMessage || e?.message || ''))) {
+      MINT_CACHE.set(tokenId, false);
+      return false;
+    }
+    // Otherwise we’ll try fallback…
+  }
+
+  // 2) Fallback — Alchemy owners endpoint
+  try {
+    const url =
+      `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getOwnersForNFT` +
+      `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}`;
+    const res = await fetchWithRetry(url, 2, 600);
+    const data = await res.json();
+    const owners =
+      (Array.isArray(data?.owners) && data.owners) ||
+      (Array.isArray(data?.ownerAddresses) && data.ownerAddresses) ||
+      [];
+    const minted = owners.length > 0;
+    MINT_CACHE.set(tokenId, minted);
+    return minted;
+  } catch (e2) {
+    // 3) Both checks unavailable — block rendering (treat as not verified)
+    console.warn(`⚠️ Mint check unavailable for #${tokenId}:`, e2.message);
+    // We *block* rather than fail-open:
+    return 'UNVERIFIED'; // special sentinel
+  }
+}
 
 // -------- flexible trait extraction with OpenSea fallback --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
@@ -1100,30 +1175,4 @@ const NOT_MINTED_MESSAGES = [
 function notMintedLine(tokenId) {
   const pick = NOT_MINTED_MESSAGES[Math.floor(Math.random() * NOT_MINTED_MESSAGES.length)];
   return pick(tokenId);
-}
-
-/**
- * Returns true if the token has at least one owner (i.e., minted).
- * Uses Alchemy v3: getOwnersForNFT
- */
-async function isSquigMinted(tokenId) {
-  if (MINT_CACHE.has(tokenId)) return MINT_CACHE.get(tokenId);
-  try {
-    const url =
-      `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getOwnersForNFT` +
-      `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}`;
-    const res = await fetchWithRetry(url, 2, 600);
-    const data = await res.json();
-    const owners =
-      (Array.isArray(data?.owners) && data.owners) ||
-      (Array.isArray(data?.ownerAddresses) && data.ownerAddresses) ||
-      [];
-    const minted = owners.length > 0;
-    MINT_CACHE.set(tokenId, minted);
-    return minted;
-  } catch (e) {
-    // If the check fails (network hiccup), don't hard-block:
-    console.warn(`⚠️ Mint check error for #${tokenId}:`, e.message);
-    return true;
-  }
 }
