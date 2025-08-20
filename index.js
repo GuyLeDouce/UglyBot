@@ -637,18 +637,19 @@ async function getNftMetadataAlchemy(tokenId) {
   const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
   return res.json();
 }
-// ===== STRICT MINT CHECK (ethers ownerOf + Alchemy fallback) =====
+// ===== STRICT MINT CHECK (dedup-safe: no duplicate const/let) =====
 const ALCHEMY_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-const provider = new ethers.JsonRpcProvider(ALCHEMY_RPC_URL);
 
-const ERC721_ABI = [
-  'function ownerOf(uint256 tokenId) view returns (address)'
-];
+// re-use singletons if this file gets hot-reloaded / double-imported
+globalThis.__SQUIGS_PROVIDER   ||= new ethers.JsonRpcProvider(ALCHEMY_RPC_URL);
+globalThis.__SQUIGS_ERC721_ABI ||= ['function ownerOf(uint256 tokenId) view returns (address)'];
+globalThis.__SQUIGS_ERC721     ||= new ethers.Contract(SQUIGS_CONTRACT, globalThis.__SQUIGS_ERC721_ABI, globalThis.__SQUIGS_PROVIDER);
+globalThis.__SQUIGS_MINT_CACHE ||= new Map();
 
-const erc721Squigs = new ethers.Contract(SQUIGS_CONTRACT, ERC721_ABI, provider);
+const squigsProvider = globalThis.__SQUIGS_PROVIDER;
+const squigsErc721   = globalThis.__SQUIGS_ERC721;
 
-const MINT_CACHE = new Map();
-
+// fun lines for unminted
 const NOT_MINTED_MESSAGES = [
   (id) => `👀 Squig #${id} hasn’t crawled out of the mint swamp yet.\nGo hatch one at **https://squigs.io**`,
   (id) => `🫥 Squig #${id} is still a rumor. Mint your destiny at **https://squigs.io**`,
@@ -664,34 +665,34 @@ function notMintedLine(tokenId) {
 
 /**
  * Strict mint check:
- *  1) Try ERC721 ownerOf(tokenId) — if it returns a non-zero address, it's minted.
- *     - If it REVERTS (CALL_EXCEPTION), it's not minted.
- *  2) If ownerOf fails due to network, fallback to Alchemy getOwnersForNFT.
- *  3) If both fail (network issues), we treat it as "cannot verify" and block with a different message.
+ *  1) ownerOf(tokenId): if it returns an address, it's minted; if it REVERTS, it's not minted.
+ *  2) Fallback: Alchemy getOwnersForNFT.
+ *  3) If both are unavailable, treat as UNVERIFIED (we block rendering with a gentle message).
  */
 async function isSquigMintedStrict(tokenId) {
-  if (MINT_CACHE.has(tokenId)) return MINT_CACHE.get(tokenId);
+  const cache = globalThis.__SQUIGS_MINT_CACHE;
+  if (cache.has(tokenId)) return cache.get(tokenId);
 
-  // 1) ownerOf via ethers
+  // 1) ERC-721 ownerOf via ethers
   try {
-    const owner = await erc721Squigs.ownerOf(tokenId);
+    const owner = await squigsErc721.ownerOf(tokenId);
     const minted = !!owner && owner !== '0x0000000000000000000000000000000000000000';
-    MINT_CACHE.set(tokenId, minted);
+    cache.set(tokenId, minted);
     return minted;
   } catch (e) {
-    // If it's a call exception (token does not exist), it's not minted.
-    if (e?.code === 'CALL_EXCEPTION' || /execution reverted/i.test(String(e?.shortMessage || e?.message || ''))) {
-      MINT_CACHE.set(tokenId, false);
+    // "execution reverted" / CALL_EXCEPTION => token doesn't exist (not minted)
+    const msg = String(e?.shortMessage || e?.message || '');
+    if (e?.code === 'CALL_EXCEPTION' || /execution reverted/i.test(msg)) {
+      cache.set(tokenId, false);
       return false;
     }
-    // Otherwise we’ll try fallback…
+    // other errors: continue to fallback
   }
 
-  // 2) Fallback — Alchemy owners endpoint
+  // 2) Alchemy owners fallback
   try {
-    const url =
-      `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getOwnersForNFT` +
-      `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}`;
+    const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getOwnersForNFT` +
+                `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}`;
     const res = await fetchWithRetry(url, 2, 600);
     const data = await res.json();
     const owners =
@@ -699,15 +700,15 @@ async function isSquigMintedStrict(tokenId) {
       (Array.isArray(data?.ownerAddresses) && data.ownerAddresses) ||
       [];
     const minted = owners.length > 0;
-    MINT_CACHE.set(tokenId, minted);
+    cache.set(tokenId, minted);
     return minted;
   } catch (e2) {
-    // 3) Both checks unavailable — block rendering (treat as not verified)
     console.warn(`⚠️ Mint check unavailable for #${tokenId}:`, e2.message);
-    // We *block* rather than fail-open:
-    return 'UNVERIFIED'; // special sentinel
+    // 3) both checks not available — block render
+    return 'UNVERIFIED';
   }
 }
+
 
 // -------- flexible trait extraction with OpenSea fallback --------
 async function getTraitsForToken(alchemyMeta, tokenId) {
