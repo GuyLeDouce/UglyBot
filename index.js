@@ -1175,9 +1175,12 @@ const HP_TABLE = {
 function hpFor(cat, val) {
   const group = HP_TABLE[cat];
   if (!group) return 0;
-  const key = Object.keys(group).find(k => k.toLowerCase() === String(val).trim().toLowerCase());
+  const key = Object.keys(group).find(
+    k => k.toLowerCase() === String(val).trim().toLowerCase()
+  );
   return key ? group[key] : 0;
 }
+
 function computeHpFromTraits(groupedTraits) {
   let total = 0;
   const per = {};
@@ -1231,22 +1234,23 @@ async function loadBgByTier(tier) {
   }
   return null;
 }
-function hexToRgba(hex, a=1) {
-  const h = hex.replace('#','');
-  const v = h.length===3 ? h.split('').map(c=>c+c).join('') : h;
+function hexToRgba(hex, a = 1) {
+  const h = hex.replace('#', '');
+  const v = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
   const n = parseInt(v, 16);
-  const r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: centered text, extra header top padding, no black outlines ======
+// ====== RENDERER: centered text, extra header top padding, no black outlines, squared-bottom tabs ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
+  const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
 
-  // Hi-DPI canvas for sharper output (requires const RENDER_SCALE above)
-  const canvas = createCanvas(W * RENDER_SCALE, H * RENDER_SCALE);
+  // Hi-DPI canvas for sharper output
+  const canvas = createCanvas(W * SCALE, H * SCALE);
   const ctx = canvas.getContext('2d');
-  ctx.scale(RENDER_SCALE, RENDER_SCALE);
+  ctx.scale(SCALE, SCALE);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
@@ -1255,9 +1259,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
   // === Background image (GitHub fallbacks) ===
-  const list = (CARD_BG_URLS[tierLabel] || CARD_BG_URLS.Common);
-  let bg = null;
-  for (const url of list) { try { bg = await loadImageCached(url); break; } catch {} }
+  const bg = await loadBgByTier(tierLabel);
   if (bg) {
     const fit = cover(bg.width, bg.height, W, H);
     ctx.drawImage(bg, fit.dx, fit.dy, fit.dw, fit.dh);
@@ -1279,7 +1281,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // === Art window (keeps white stroke) ===
+  // === Art window (keep white stroke) ===
   const AW = 420, AH = 420;
   const AX = Math.round((W - AW) / 2), AY = 160;
   roundRectPath(ctx, AX, AY, AW, AH, 22);
@@ -1300,7 +1302,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-  // === Layout (2 cols) — bullets removed here ===
+  // === Layout (2 cols) — bullets removed ===
   const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
   const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
@@ -1310,7 +1312,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       const items = (traits[cat] || []);
       if (!items.length) continue;
 
-      // No bullet; value + HP
       const lines = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
       const maxLines = 5;
       const shown = lines.slice(0, maxLines);
@@ -1343,22 +1344,22 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // === Mini-cards (no outlines, centered text, extra top padding for header text) ===
+  // === Mini-cards (no outlines, centered text, extra top padding) ===
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 12;
-  const HEADER_PAD_TOP = 4;     // <- extra margin on top of the category title
-  const HEADER_PAD_BOTTOM = 4;  // keep symmetry
+  const HEADER_PAD_TOP = 4;     // symmetrical padding for category title
+  const HEADER_PAD_BOTTOM = 4;
   const ROW_PAD_Y = 8;
 
   for (const b of L.placed) {
     // Base white card (no stroke)
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored header overlay (no stroke)
+    // Colored header tab — rounded top, squared bottom
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
-    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+    drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title (centered horizontally, padded vertically to balance top/bottom)
+    // Title (centered; padded vertically)
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'middle';
@@ -1403,7 +1404,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
 
-
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
 function roundRectPath(ctx, x, y, w, h, r) {
@@ -1429,6 +1429,20 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   drawRoundRect(ctx, x, y, w, h, r, fill);
   ctx.restore();
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
+}
+// Top-rounded, flat-bottom rectangle (for the category tab)
+function drawTopRoundedRect(ctx, x, y, w, h, r, fill) {
+  const rr = Math.min(r, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + rr, rr); // top-right
+  ctx.lineTo(x + w, y + h);                // right edge (square bottom)
+  ctx.lineTo(x,     y + h);                // bottom edge (flat)
+  ctx.lineTo(x,     y + rr);               // left edge
+  ctx.arcTo(x, y, x + rr, y, rr);          // top-left
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
 }
 // image cover
 function cover(sw, sh, mw, mh) {
