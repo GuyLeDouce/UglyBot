@@ -1369,7 +1369,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 6;      // keeps the tab higher (less intrusion into rows)
   const ROW_PAD_Y = 10;          // a bit more breathing room
-  const TITLE_Y_TWEAK = 0;       // fine-tune if needed later
+  const TITLE_Y_TWEAK = -2;       // fine-tune if needed later
 
   for (const b of L.placed) {
     // Base white card
