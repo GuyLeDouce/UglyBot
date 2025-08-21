@@ -1235,7 +1235,7 @@ function hexToRgba(hex, a=1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER (BG image, semi-transparent traits panel, rarity pill) ======
+// ====== RENDERER (BG image, centered trait text, rarity pill; NO card outline) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const canvas = createCanvas(W, H);
@@ -1245,28 +1245,28 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
-  // === Background image fills the card (GitHub-hosted, with fallbacks) ===
-  let bg = null;
-  try { bg = await loadBgByTier(tierLabel); } catch {}
-  if (bg) {
+  // === Background image fills the card ===
+  const bgUrl = (typeof chooseTierBgUrl === 'function')
+    ? chooseTierBgUrl(tierLabel)
+    : (CARD_BG_URLS[tierLabel]?.[0] || CARD_BG_URLS.Common[0]);
+
+  try {
+    const bg = await loadImageCached(bgUrl);
     const fit = cover(bg.width, bg.height, W, H);
     ctx.drawImage(bg, fit.dx, fit.dy, fit.dw, fit.dh);
-  } else {
+  } catch {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
   }
 
-  // === Inner outline (image shows through) ===
-  const OUT_X = 24, OUT_Y = 24, OUT_W = W - 48, OUT_H = H - 48, OUT_R = 28;
-  ctx.strokeStyle = PALETTE.frameStroke;
-  ctx.lineWidth = 3;
-  roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
-  ctx.stroke();
+  // === (Removed) inner frame outline ===
+  // (Intentionally no stroke around the full card now)
 
   // === Header stripe + black outline ===
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, '#000000');
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
   ctx.font = `36px ${FONT_BOLD}`;
   ctx.fillText(name, 64, 94);
 
@@ -1294,7 +1294,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // === Traits panel (semi-transparent so bg shows through) ===
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.62));
   ctx.strokeStyle = PALETTE.traitsPanelStroke;
   ctx.lineWidth = 2.5;
   roundRectPath(ctx, TX, TY, TW, TH, 16);
@@ -1338,16 +1338,16 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // === Mini-cards (single outline; colored header visible) ===
+  // === Mini-cards (single outline; colored header visible; CENTERED TEXT) ===
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 12;
-  const ROW_PAD_X = 16, ROW_PAD_Y = 8;
+  const ROW_PAD_Y = 8;
 
   for (const b of L.placed) {
-    // Base white card (full area)
+    // Base white card
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored header overlay (draw AFTER the base so it stays visible)
+    // Colored header overlay
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
@@ -1357,27 +1357,30 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     roundRectPath(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R);
     ctx.stroke();
 
-    // Title text
+    // --- Centered title ---
+    ctx.save();
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'middle';
-    ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
+    ctx.textAlign = 'center';
+    ctx.fillText(b.cat, b.x + b.w / 2, b.y + Math.floor(b.titleH / 2));
 
-    // Rows (no inner inset box — cleaner)
+    // --- Centered rows ---
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
     for (const line of b.lines) {
-      ctx.fillText(line, b.x + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
+      ctx.fillText(line, b.x + b.w / 2, yy + Math.floor(b.lineH / 2));
       yy += b.lineH;
     }
+    ctx.restore();
   }
 
   // === Footer left (collection + token) ===
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
   const footerY = H - 34;
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 
@@ -1398,6 +1401,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   ctx.fillStyle = '#000000';
   ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left'; // use left with pad to keep text centered visually within pill
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.95 });
