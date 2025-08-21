@@ -814,9 +814,9 @@ function hpToTierLabel(hp) {
 
 // ===== COLORS / THEME =====
 const PALETTE = {
-  cardBg: '#242623',           // fallback if images fail
-  frameFill: '#b9dded',        // (unused now; we render the bg image instead)
-  frameStroke: '#000000',      // outline stroke color
+  // Frame colors are not filled anymore (bg image covers card); we keep a black outline.
+  cardBg: '#242623',
+  frameStroke: '#000000',
   headerText: '#0F172A',
   rarityStripeByTier: {
     Mythic:   '#fadf6a',
@@ -827,17 +827,19 @@ const PALETTE = {
   },
   artBackfill: '#b9dded',
   artStroke:   '#F9FAFB',
-  traitsPanelBg:     '#b9dded',   // base color; rendered with alpha below
+  traitsPanelBg:     '#b9dded', // drawn with alpha for transparency
   traitsPanelStroke: '#000000',
   traitCardFill:     '#FFFFFF',
   traitCardStroke:   '#000000',
   traitCardShadow:   '#0000001A',
-  traitHeaderFill:   '#b9dded',   // header bubble uses rarity color at draw time
   traitTitleText:    '#222625',
   traitValueText:    '#775fbb',
   footerText:        '#212524',
-  headerStripeStroke:'#000000',
 };
+
+// Background images by tier
+const CARD_BG_MYTHIC_URL  = 'https://i.imgur.com/9mCxyky.png';
+const CARD_BG_DEFAULT_URL = 'https://i.imgur.com/ke3fUab.png';
 
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
@@ -1179,17 +1181,13 @@ function normalizeTraits(attrs) {
 // Back-compat alias
 function rarityColorFromLabel(label) { return stripeFromRarity(label); }
 
-// --- Background images by tier ---
-const CARD_BG_MYTHIC_URL  = 'https://i.imgur.com/9mCxyky.png';
-const CARD_BG_DEFAULT_URL = 'https://i.imgur.com/ke3fUab.png';
-
-// Simple in-memory image cache
-globalThis.__CARD_BG_CACHE ||= {};
+// ---------- image helpers / cache ----------
+globalThis.__CARD_IMG_CACHE ||= {};
 async function loadImageCached(url) {
-  if (globalThis.__CARD_BG_CACHE[url]) return globalThis.__CARD_BG_CACHE[url];
+  if (globalThis.__CARD_IMG_CACHE[url]) return globalThis.__CARD_IMG_CACHE[url];
   const buf = await fetchBuffer(url);
   const img = await loadImage(buf);
-  globalThis.__CARD_BG_CACHE[url] = img;
+  globalThis.__CARD_IMG_CACHE[url] = img;
   return img;
 }
 function hexToRgba(hex, a=1) {
@@ -1210,25 +1208,25 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
-  // === Draw the background image across the whole card ===
-  const bgUrl = tierLabel === 'Mythic' ? CARD_BG_MYTHIC_URL : CARD_BG_DEFAULT_URL;
+  // === Background image fills the card ===
+  const bgUrl = (tierLabel === 'Mythic') ? CARD_BG_MYTHIC_URL : CARD_BG_DEFAULT_URL;
   try {
-    const bgImg = await loadImageCached(bgUrl);
-    const fit = cover(bgImg.width, bgImg.height, W, H);
-    ctx.drawImage(bgImg, fit.dx, fit.dy, fit.dw, fit.dh);
+    const bg = await loadImageCached(bgUrl);
+    const fit = cover(bg.width, bg.height, W, H);
+    ctx.drawImage(bg, fit.dx, fit.dy, fit.dw, fit.dh);
   } catch {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
   }
 
-  // === Inner rounded "frame" outline only (image shows through) ===
+  // === Inner outline (image shows through) ===
   const OUT_X = 24, OUT_Y = 24, OUT_W = W - 48, OUT_H = H - 48, OUT_R = 28;
   ctx.strokeStyle = PALETTE.frameStroke;
   ctx.lineWidth = 3;
   roundRectPath(ctx, OUT_X, OUT_Y, OUT_W, OUT_H, OUT_R);
   ctx.stroke();
 
-  // === Header stripe + outline ===
+  // === Header stripe + black outline ===
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill, '#000000');
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
@@ -1259,7 +1257,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // === Traits panel (semi-transparent so bg shows through) ===
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.6));
+  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
   ctx.strokeStyle = PALETTE.traitsPanelStroke;
   ctx.lineWidth = 2.5;
   roundRectPath(ctx, TX, TY, TW, TH, 16);
@@ -1303,31 +1301,33 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // === Mini-cards ===
+  // === Mini-cards (one black outline around header+rows) ===
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 12;
   const INNER_INSET_X = 10, INNER_INSET_TOP = 6, INNER_INSET_BOTTOM = 10;
   const ROW_PAD_X = 16, ROW_PAD_Y = 6;
 
   for (const b of L.placed) {
-    // outer card with black outline
+    // Draw header bubble fill first
+    const bubbleH = b.titleH + BUBBLE_OVERLAP;
+    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+
+    // Full card white fill (so rows have solid background)
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+
+    // Outer stroke to surround both header + rows
     ctx.strokeStyle = PALETTE.traitCardStroke;
     ctx.lineWidth = 2.5;
     roundRectPath(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R);
     ctx.stroke();
 
-    // header bubble (fill only)
-    const bubbleH = b.titleH + BUBBLE_OVERLAP;
-    drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
-
-    // title text
+    // Title text
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'middle';
     ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-    // rows area (inset)
+    // Rows area (inset)
     const rowsY = b.y + bubbleH;
     const rowsH = b.boxH - bubbleH;
     const contentX = b.x + INNER_INSET_X;
@@ -1346,7 +1346,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // === Footer left ===
+  // === Footer left (collection + token) ===
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
@@ -1401,6 +1401,7 @@ function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#0
   ctx.restore();
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
 }
+// image cover
 function cover(sw, sh, mw, mh) {
   const s = Math.max(mw / sw, mh / sh);
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
