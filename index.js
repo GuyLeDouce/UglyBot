@@ -1269,7 +1269,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: shared width for Header, NFT Image, and Traits ======
+// ====== RENDERER: shared width + shorter Pokémon-style title band ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1281,44 +1281,48 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // Colors / tier
+  // Tier / colors
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
   // Background (cropped to remove baked border)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
-  // ---- Shared width + positions (all three sections use these) ----
-  const CONTENT_W = 460;                         // <— unified width
+  // ---- Shared width so header, art and traits line up ----
+  const CONTENT_W = 460;
   const CONTENT_X = Math.round((W - CONTENT_W) / 2);
 
   // --- Art window (square) ---
   const AW = CONTENT_W;
   const AH = CONTENT_W;
-  const AY = 150;                                // top of art
+  const AY = 150;
   const AX = CONTENT_X;
 
-  // --- Header stripe (centered vertically between top and art) ---
-  const HEADER_H = 84;
-  const HEADER_X = CONTENT_X;
+  // --- Pokémon-style title band (shorter, comfy padding) ---
   const HEADER_W = CONTENT_W;
-  const headerY  = Math.max(16, Math.round((AY - HEADER_H) / 2)); // centered to top/AY
+  const HEADER_X = CONTENT_X;
+  const HEADER_H = 64;          // shorter than before
+  const HEADER_R = 16;
+  const HEADER_SIDE_PAD = 14;   // inside text padding
 
-  // Draw header
-  drawRoundRectShadow(ctx, HEADER_X, headerY, HEADER_W, HEADER_H, 18, headerStripeFill);
+  // Center between card top and top of art
+  const headerY = Math.max(14, Math.round((AY - HEADER_H) / 2));
+  drawRoundRectShadow(ctx, HEADER_X, headerY, HEADER_W, HEADER_H, HEADER_R, headerStripeFill);
+
+  // Title + HP
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  const headerMidY = headerY + HEADER_H / 2;
+  const midY = headerY + HEADER_H / 2;
 
-  ctx.font = `36px ${FONT_BOLD}`;
-  ctx.fillText(name, HEADER_X + 16, headerMidY);
+  ctx.font = `32px ${FONT_BOLD}`;          // slightly smaller to fit the shorter bar
+  ctx.fillText(name, HEADER_X + HEADER_SIDE_PAD, midY);
 
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
-  ctx.font = `28px ${FONT_BOLD}`;
+  ctx.font = `26px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
-  ctx.fillText(hpText, HEADER_X + HEADER_W - 16 - hpW, headerMidY);
+  ctx.fillText(hpText, HEADER_X + HEADER_W - HEADER_SIDE_PAD - hpW, midY);
 
-  // Draw art (keep white stroke)
+  // --- Art (keep white stroke) ---
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
   drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill);
@@ -1349,10 +1353,12 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     for (const cat of TRAIT_ORDER) {
       const items = (traits[cat] || []);
       if (!items.length) continue;
+
       const lines = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
       const shown = lines.slice(0, 5);
       const hidden = lines.length - shown.length;
       if (hidden > 0) shown.push(`+${hidden} more`);
+
       const rowsH = shown.length * lineH;
       const minRows = 34;
       const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
@@ -1387,7 +1393,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Centered title using text metrics
+    // centered title
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
@@ -1396,7 +1402,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const titleY = b.y + (bubbleH - textH) / 2 + (m.actualBoundingBoxAscent || 0);
     ctx.fillText(b.cat, b.x + (b.w - m.width) / 2, titleY);
 
-    // Rows centered
+    // rows
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
@@ -1408,7 +1414,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer + rarity pill (unchanged)
+  // Footer + rarity pill
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
@@ -1428,8 +1434,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
-
-
 
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
