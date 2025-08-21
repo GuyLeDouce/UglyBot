@@ -1301,21 +1301,20 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // === Mini-cards (one black outline around header+rows) ===
+  // === Mini-cards (single outline; colored header visible) ===
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 12;
-  const INNER_INSET_X = 10, INNER_INSET_TOP = 6, INNER_INSET_BOTTOM = 10;
-  const ROW_PAD_X = 16, ROW_PAD_Y = 6;
+  const ROW_PAD_X = 16, ROW_PAD_Y = 8;
 
   for (const b of L.placed) {
-    // Draw header bubble fill first
+    // Base white card (full area)
+    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+
+    // Colored header overlay (draw AFTER the base so it stays visible)
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawRoundRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Full card white fill (so rows have solid background)
-    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
-
-    // Outer stroke to surround both header + rows
+    // One outer stroke surrounds both header and rows
     ctx.strokeStyle = PALETTE.traitCardStroke;
     ctx.lineWidth = 2.5;
     roundRectPath(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R);
@@ -1327,22 +1326,14 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.textBaseline = 'middle';
     ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-    // Rows area (inset)
-    const rowsY = b.y + bubbleH;
-    const rowsH = b.boxH - bubbleH;
-    const contentX = b.x + INNER_INSET_X;
-    const contentY = rowsY + INNER_INSET_TOP;
-    const contentW = b.w - INNER_INSET_X * 2;
-    const contentH = rowsH - (INNER_INSET_TOP + INNER_INSET_BOTTOM);
-    drawRoundRect(ctx, contentX, contentY, contentW, contentH, 12, PALETTE.traitCardFill);
-
-    let yy = contentY + ROW_PAD_Y;
+    // Rows (no inner inset box — cleaner + matches mock)
+    let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
-      ctx.fillText(line, contentX + ROW_PAD_X, yy + Math.floor(16 / 2));
-      yy += 16;
+      ctx.fillText(line, b.x + ROW_PAD_X, yy + Math.floor(b.lineH / 2));
+      yy += b.lineH;
     }
   }
 
