@@ -1344,41 +1344,40 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-  // === Mini-cards (no outlines, centered text, extra top padding) ===
-  const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 12;
-  const HEADER_PAD_TOP = 4;     // symmetrical padding for category title
-  const HEADER_PAD_BOTTOM = 4;
-  const ROW_PAD_Y = 8;
+// === Mini-cards (no outlines, centered text) ===
+const BUBBLE_R = 16;
+const BUBBLE_OVERLAP = 12;
+const ROW_PAD_Y = 8;
+const TITLE_Y_NUDGE = 1.5; // ↓ positive moves text down a touch
 
-  for (const b of L.placed) {
-    // Base white card (no stroke)
-    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+for (const b of L.placed) {
+  // Base white card (no stroke)
+  drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored header tab — rounded top, squared bottom
-    const bubbleH = b.titleH + BUBBLE_OVERLAP;
-    drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+  // Colored header tab — rounded top, squared bottom
+  const bubbleH = b.titleH + BUBBLE_OVERLAP;
+  drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title (centered; padded vertically)
-    ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `19px ${FONT_BOLD}`;
-    ctx.textBaseline = 'middle';
-    const titleW = ctx.measureText(b.cat).width;
-    const titleBandH = b.titleH - HEADER_PAD_TOP - HEADER_PAD_BOTTOM;
-    const titleY = b.y + HEADER_PAD_TOP + titleBandH / 2;
-    ctx.fillText(b.cat, b.x + (b.w - titleW) / 2, titleY);
+  // Title — center within the ENTIRE colored tab (slightly lower via nudge)
+  ctx.fillStyle = PALETTE.traitTitleText;
+  ctx.font = `19px ${FONT_BOLD}`;
+  ctx.textBaseline = 'middle';
+  const titleW = ctx.measureText(b.cat).width;
+  const titleY = b.y + (bubbleH / 2) + TITLE_Y_NUDGE;
+  ctx.fillText(b.cat, b.x + (b.w - titleW) / 2, titleY);
 
-    // Rows (centered; no inner inset box)
-    let yy = b.y + bubbleH + ROW_PAD_Y;
-    ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `15px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
-    for (const line of b.lines) {
-      const lw = ctx.measureText(line).width;
-      ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
-      yy += b.lineH;
-    }
+  // Rows (centered; no inner inset box)
+  let yy = b.y + bubbleH + ROW_PAD_Y;
+  ctx.fillStyle = PALETTE.traitValueText;
+  ctx.font = `15px ${FONT_REG}`;
+  ctx.textBaseline = 'middle';
+  for (const line of b.lines) {
+    const lw = ctx.measureText(line).width;
+    ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
+    yy += b.lineH;
   }
+}
+
 
   // Footer (kept)
   ctx.fillStyle = PALETTE.footerText;
