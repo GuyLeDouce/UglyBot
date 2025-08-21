@@ -25,6 +25,9 @@ const GUILD_ID           = process.env.GUILD_ID;
 const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
+// Put this near your other consts (top of file is fine)
+const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if file size is fine.
+
 
 // ===== FONT REGISTRATION (auto-download if missing) =====
 let FONT_REGULAR_FAMILY = 'PlaypenSans-Regular';
@@ -1238,8 +1241,12 @@ function hexToRgba(hex, a=1) {
 // ====== RENDERER (BG image, centered trait text, rarity pill; NO card outline) ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
-  const canvas = createCanvas(W, H);
+  const canvas = createCanvas(W * RENDER_SCALE, H * RENDER_SCALE);
   const ctx = canvas.getContext('2d');
+  ctx.scale(RENDER_SCALE, RENDER_SCALE);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
 
   // Decide tier/stripe once
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
@@ -1404,7 +1411,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.textAlign = 'left'; // use left with pad to keep text centered visually within pill
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
-  return canvas.toBuffer('image/jpeg', { quality: 0.95 });
+ return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
+
 }
 
 // ---------- drawing helpers ----------
