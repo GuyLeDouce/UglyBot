@@ -1269,8 +1269,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: larger art, title bubble sits higher ======
-// ====== RENDERER: precise title centering + cleaner spacing ======
+// ====== RENDERER: header centered between top and NFT image ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1289,22 +1288,33 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Background (cropped to remove baked border)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
-  // Header stripe
-  drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill);
+  // --- Art window (same larger size + higher position) ---
+  const AW = 440, AH = 440;
+  const AX = Math.round((W - AW) / 2), AY = 145;
+
+  // We need AY to center the header, so compute header metrics now
+  const HEADER_X = 48;
+  const HEADER_W = W - 96;
+  const HEADER_H = 84;
+  const headerY = Math.max(16, Math.round((AY - HEADER_H) / 2)); // center between top (0) and AY
+
+  // Header stripe (draw after bg, before art)
+  drawRoundRectShadow(ctx, HEADER_X, headerY, HEADER_W, HEADER_H, 18, headerStripeFill);
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  ctx.font = `36px ${FONT_BOLD}`;
-  ctx.fillText(name, 64, 94);
 
-  // HP (right)
+  // Header text positions (centered within the stripe)
+  const headerMidY = headerY + HEADER_H / 2;
+
+  ctx.font = `36px ${FONT_BOLD}`;
+  ctx.fillText(name, HEADER_X + 16, headerMidY);
+
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
   ctx.font = `28px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
-  ctx.fillText(hpText, W - 64 - hpW, 94);
+  ctx.fillText(hpText, HEADER_X + HEADER_W - 16 - hpW, headerMidY);
 
-  // Art window (larger + higher)
-  const AW = 440, AH = 440;
-  const AX = Math.round((W - AW) / 2), AY = 145;
+  // --- Draw the art window (keeps white stroke) ---
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
   drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill);
@@ -1319,7 +1329,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.stroke();
 
-  // Traits panel (semi-transparent)
+  // --- Traits panel (semi-transparent) ---
   const TX = 60, TY = AY + AH + 20, TW = W - 120, TH = H - TY - 92;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
@@ -1367,9 +1377,9 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // Mini-cards
   const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 6;      // keeps the tab higher (less intrusion into rows)
-  const ROW_PAD_Y = 10;          // a bit more breathing room
-  const TITLE_Y_TWEAK = -2;       // fine-tune if needed later
+  const BUBBLE_OVERLAP = 6;
+  const ROW_PAD_Y = 10;
+  const TITLE_Y_TWEAK = 0;
 
   for (const b of L.placed) {
     // Base white card
@@ -1379,7 +1389,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title — **metric-based vertical centering** inside the tab
+    // Title centered via metrics
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
@@ -1390,7 +1400,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const titleW = m.width;
     ctx.fillText(title, b.x + (b.w - titleW) / 2, titleY);
 
-    // Rows (centered; consistent line spacing)
+    // Rows centered
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
