@@ -1193,9 +1193,9 @@ function computeHpFromTraits(groupedTraits) {
   }
   return { total, per };
 }
+
 // --- Trimmed background drawing (cuts off the baked black border) ---
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
-  // load the bg for this tier (your existing function)
   const bg = await loadBgByTier(tierLabel);
   if (!bg) {
     ctx.fillStyle = PALETTE.cardBg;
@@ -1203,22 +1203,19 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
     return;
   }
 
-  // Trim amounts as a % of the source image size.
-  // Tuned for ~750x1050 assets (≈24px left/right, ≈28–32px top/bottom).
-  const TRIM_X = Math.round(bg.width  * 0.032);  // ~24px of 750
-  const TRIM_Y = Math.round(bg.height * 0.028);  // ~29px of 1050
+  // Trim a little from each edge of the source image (tweak if any halo remains)
+  const TRIM_X = Math.round(bg.width  * 0.032);
+  const TRIM_Y = Math.round(bg.height * 0.028);
 
   const sx = TRIM_X;
   const sy = TRIM_Y;
   const sw = bg.width  - TRIM_X * 2;
   const sh = bg.height - TRIM_Y * 2;
 
-  // Optional: soft clip so outer corners are perfectly clean
+  // Clip to rounded outer card so corners stay clean
   ctx.save();
   roundRectPath(ctx, 0, 0, W, H, 30);
   ctx.clip();
-
-  // Draw the cropped region scaled to the full card
   ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
   ctx.restore();
 }
@@ -1287,31 +1284,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
-// === Background (crop to remove baked black border) ===
-const bg = await loadBgByTier(tierLabel);
-if (bg) {
-  // Trim a little from each edge of the source image
-  const TRIM_X = Math.round(bg.width  * 0.032); // tweak 0.030–0.036 if needed
-  const TRIM_Y = Math.round(bg.height * 0.028); // tweak 0.026–0.032 if needed
-
-  const sx = TRIM_X;
-  const sy = TRIM_Y;
-  const sw = bg.width  - TRIM_X * 2;
-  const sh = bg.height - TRIM_Y * 2;
-
-  // Clip so outer corners stay clean
-  ctx.save();
-  roundRectPath(ctx, 0, 0, W, H, 30);
-  ctx.clip();
-
-  // Draw the cropped region scaled to the full card
-  ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
-  ctx.restore();
-} else {
-  ctx.fillStyle = PALETTE.cardBg;
-  ctx.fillRect(0, 0, W, H);
-}
-
+  // === Background (crop to remove baked black border) ===
+  await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
   // === Header stripe (no outline) ===
   drawRoundRectShadow(ctx, 48, 52, W - 96, 84, 18, headerStripeFill /* no stroke */);
@@ -1389,40 +1363,39 @@ if (bg) {
     L = layout(Math.max(12, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
-// === Mini-cards (no outlines, centered text) ===
-const BUBBLE_R = 16;
-const BUBBLE_OVERLAP = 12;
-const ROW_PAD_Y = 8;
-const TITLE_Y_NUDGE = 1.5; // ↓ positive moves text down a touch
+  // === Mini-cards (no outlines, centered text) ===
+  const BUBBLE_R = 16;
+  const BUBBLE_OVERLAP = 12;
+  const ROW_PAD_Y = 8;
+  const TITLE_Y_NUDGE = 1.5; // ↓ positive moves text down a touch
 
-for (const b of L.placed) {
-  // Base white card (no stroke)
-  drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+  for (const b of L.placed) {
+    // Base white card (no stroke)
+    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-  // Colored header tab — rounded top, squared bottom
-  const bubbleH = b.titleH + BUBBLE_OVERLAP;
-  drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
+    // Colored header tab — rounded top, squared bottom
+    const bubbleH = b.titleH + BUBBLE_OVERLAP;
+    drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-  // Title — center within the ENTIRE colored tab (slightly lower via nudge)
-  ctx.fillStyle = PALETTE.traitTitleText;
-  ctx.font = `19px ${FONT_BOLD}`;
-  ctx.textBaseline = 'middle';
-  const titleW = ctx.measureText(b.cat).width;
-  const titleY = b.y + (bubbleH / 2) + TITLE_Y_NUDGE;
-  ctx.fillText(b.cat, b.x + (b.w - titleW) / 2, titleY);
+    // Title — center within the ENTIRE colored tab (slightly lower via nudge)
+    ctx.fillStyle = PALETTE.traitTitleText;
+    ctx.font = `19px ${FONT_BOLD}`;
+    ctx.textBaseline = 'middle';
+    const titleW = ctx.measureText(b.cat).width;
+    const titleY = b.y + (bubbleH / 2) + TITLE_Y_NUDGE;
+    ctx.fillText(b.cat, b.x + (b.w - titleW) / 2, titleY);
 
-  // Rows (centered; no inner inset box)
-  let yy = b.y + bubbleH + ROW_PAD_Y;
-  ctx.fillStyle = PALETTE.traitValueText;
-  ctx.font = `15px ${FONT_REG}`;
-  ctx.textBaseline = 'middle';
-  for (const line of b.lines) {
-    const lw = ctx.measureText(line).width;
-    ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
-    yy += b.lineH;
+    // Rows (centered; no inner inset box)
+    let yy = b.y + bubbleH + ROW_PAD_Y;
+    ctx.fillStyle = PALETTE.traitValueText;
+    ctx.font = `15px ${FONT_REG}`;
+    ctx.textBaseline = 'middle';
+    for (const line of b.lines) {
+      const lw = ctx.measureText(line).width;
+      ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
+      yy += b.lineH;
+    }
   }
-}
-
 
   // Footer (kept)
   ctx.fillStyle = PALETTE.footerText;
