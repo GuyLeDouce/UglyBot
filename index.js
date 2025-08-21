@@ -837,9 +837,35 @@ const PALETTE = {
   footerText:        '#212524',
 };
 
-// Background images by tier
-const CARD_BG_MYTHIC_URL  = 'https://i.imgur.com/9mCxyky.png';
-const CARD_BG_DEFAULT_URL = 'https://i.imgur.com/ke3fUab.png';
+// --- Background images by tier (GitHub-hosted) ---
+const CARD_BG_URLS = {
+  // You said Mythic uses the “legendary” art asset
+  Mythic: [
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card_legendary.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card_legendary.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card_legendary.png',
+  ],
+  Legendary: [
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+  ],
+  Rare: [
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+  ],
+  Uncommon: [
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+  ],
+  Common: [
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+  ],
+};
 
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
@@ -1190,6 +1216,17 @@ async function loadImageCached(url) {
   globalThis.__CARD_IMG_CACHE[url] = img;
   return img;
 }
+async function loadBgByTier(tier) {
+  const list = CARD_BG_URLS[tier] || CARD_BG_URLS.Common;
+  for (const url of list) {
+    try {
+      return await loadImageCached(url);
+    } catch (e) {
+      console.warn('BG load failed:', url, e.message);
+    }
+  }
+  return null;
+}
 function hexToRgba(hex, a=1) {
   const h = hex.replace('#','');
   const v = h.length===3 ? h.split('').map(c=>c+c).join('') : h;
@@ -1208,13 +1245,13 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
-  // === Background image fills the card ===
-  const bgUrl = (tierLabel === 'Mythic') ? CARD_BG_MYTHIC_URL : CARD_BG_DEFAULT_URL;
-  try {
-    const bg = await loadImageCached(bgUrl);
+  // === Background image fills the card (GitHub-hosted, with fallbacks) ===
+  let bg = null;
+  try { bg = await loadBgByTier(tierLabel); } catch {}
+  if (bg) {
     const fit = cover(bg.width, bg.height, W, H);
     ctx.drawImage(bg, fit.dx, fit.dy, fit.dw, fit.dh);
-  } catch {
+  } else {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
   }
@@ -1326,7 +1363,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     ctx.textBaseline = 'middle';
     ctx.fillText(b.cat, b.x + ROW_PAD_X, b.y + Math.floor(b.titleH / 2));
 
-    // Rows (no inner inset box — cleaner + matches mock)
+    // Rows (no inner inset box — cleaner)
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `15px ${FONT_REG}`;
