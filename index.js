@@ -1197,27 +1197,28 @@ function computeHpFromTraits(groupedTraits) {
 // --- Trimmed background drawing (cuts off the baked black border) ---
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
-  if (!bg) {
+  if (bg) {
+    // Trim a little from each edge of the *source* image to remove the black frame
+    const TRIM_X = Math.round(bg.width  * 0.032); // adjust 0.030–0.036 if needed
+    const TRIM_Y = Math.round(bg.height * 0.028); // adjust 0.026–0.032 if needed
+
+    const sx = TRIM_X;
+    const sy = TRIM_Y;
+    const sw = bg.width  - TRIM_X * 2;
+    const sh = bg.height - TRIM_Y * 2;
+
+    // Clip card outer corners so the bg respects rounded edges
+    ctx.save();
+    roundRectPath(ctx, 0, 0, W, H, 30);
+    ctx.clip();
+
+    // Draw the cropped region scaled to the full card
+    ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
+    ctx.restore();
+  } else {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
-    return;
   }
-
-  // Trim a little from each edge of the source image (tweak if any halo remains)
-  const TRIM_X = Math.round(bg.width  * 0.032);
-  const TRIM_Y = Math.round(bg.height * 0.028);
-
-  const sx = TRIM_X;
-  const sy = TRIM_Y;
-  const sw = bg.width  - TRIM_X * 2;
-  const sh = bg.height - TRIM_Y * 2;
-
-  // Clip to rounded outer card so corners stay clean
-  ctx.save();
-  roundRectPath(ctx, 0, 0, W, H, 30);
-  ctx.clip();
-  ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
-  ctx.restore();
 }
 
 // ===== TRAIT NORMALIZER =====
@@ -1377,7 +1378,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // Title — center within the ENTIRE colored tab (slightly lower via nudge)
+    // Title — centered in colored tab
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `19px ${FONT_BOLD}`;
     ctx.textBaseline = 'middle';
