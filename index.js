@@ -1269,7 +1269,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: centered text, extra header top padding, no black outlines, squared-bottom tabs ======
+// ====== RENDERER: larger art, title bubble sits higher ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1301,9 +1301,10 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, W - 64 - hpW, 94);
 
-  // === Art window (keep white stroke) ===
-  const AW = 420, AH = 420;
-  const AX = Math.round((W - AW) / 2), AY = 160;
+  // === Art window (slightly larger & a bit higher) ===
+  const AW = 440, AH = 440;                 // was 420 x 420
+  const AX = Math.round((W - AW) / 2);
+  const AY = 145;                           // was 160; nudge up so traits keep space
   roundRectPath(ctx, AX, AY, AW, AH, 22);
   ctx.save(); ctx.clip();
   drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill);
@@ -1366,15 +1367,15 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // === Mini-cards (no outlines, centered text) ===
   const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 12;
+  const BUBBLE_OVERLAP = 6;     // was 12 → "move the bubble up" (less overlap into rows)
   const ROW_PAD_Y = 8;
-  const TITLE_Y_NUDGE = 1.5; // ↓ positive moves text down a touch
+  const TITLE_Y_NUDGE = 1.5;    // slight lower bias for optical centering
 
   for (const b of L.placed) {
     // Base white card (no stroke)
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored header tab — rounded top, squared bottom
+    // Colored header tab — rounded top, squared bottom, sits higher now
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
@@ -1421,6 +1422,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
+
 
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
