@@ -27,8 +27,6 @@ const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 // Put this near your other consts (top of file is fine)
 const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if file size is fine.
-// Shared corner radii + tiny over-mask to eat edge fringes
-const RADIUS   = { card: 38, art: 26, traits: 18, header: 16, pill: 22, traitCard: 16 };
 const MASK_EPS = 0.75; // pixels
 
 
