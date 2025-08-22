@@ -1394,44 +1394,49 @@ let M = measureTraits();
 let TH_wanted = M.usedH + PAD * 2;
 
 // If the panel + min art + two gaps won't fit, scale text inside the panel down a bit.
-const traitsBudget = Math.max(
-  80,
-  regionHeight - MIN_ART_H - 2 * MIN_EDGE_GAP
-);
-if (TH_wanted > traitsBudget) {
-  const s = Math.max(0.78, traitsBudget / TH_wanted);
-  M = measureTraits(
-    Math.max(14, Math.floor(16 * s)),
-    Math.max(22, Math.floor(24 * s)),
-    Math.max(5,  Math.floor(6  * s))
-  );
-  TH_wanted = M.usedH + PAD * 2;
-}
-const TH = Math.max(210, Math.min(regionHeight - 2 * MIN_EDGE_GAP, TH_wanted));
+// ——— Traits panel bottom = rarity pill center; art gets equal gaps above/below ———
+const TRAITS_W     = HEADER_W;
+const headerBottom = HEADER_Y + HEADER_H;
+const pillCenterY  = pillY + PILL_H / 2;
+const traitsBottom = pillCenterY;            // <-- anchor panel to pill center
 
-// ——— Art sizing: make it as large as possible given equal gaps ———
-const midWidthRoom  = W - 2 * (headerX - 20);
-let ART_W = Math.min(ART_W_MAX, midWidthRoom);
-let ART_H = ART_W;
-
-// With equal gaps g, we have: 2*g + ART_H + TH = regionHeight  →  g = (regionHeight - ART_H - TH)/2.
-// Ensure g >= MIN_EDGE_GAP; if not, shrink art until it is (but never below MIN_ART_H).
-let g = Math.floor((regionHeight - ART_H - TH) / 2);
-if (g < MIN_EDGE_GAP) {
-  ART_H = Math.max(MIN_ART_H, regionHeight - TH - 2 * MIN_EDGE_GAP);
-  ART_W = ART_H;
-  g = Math.floor((regionHeight - ART_H - TH) / 2);
-}
-
-// Final positions
-const AX = Math.round((W - ART_W) / 2);
-const AY = Math.round(headerBottom + g);
+// Initial panel height guess (auto-shrinks text later if needed)
+let TH = Math.round((traitsBottom - headerBottom) * 0.36);
+TH = Math.max(210, TH);
 
 const TX = Math.round((W - TRAITS_W) / 2);
-const TY = AY + ART_H;                 // panel starts right after the art
+const TY = traitsBottom - TH;
 const TW = TRAITS_W;
 
-// ——— Draw Art (no white stroke; soft BR shadow) ———
+// Region between title and traits top
+const midRegion = TY - headerBottom;
+
+// Make the art big, but keep **equal** gaps above/below it and add more breathing room.
+const MIN_ART_H      = 380;
+const GAP_TARGET     = 28;   // ↑ more space than before
+const GAP_MIN        = 16;
+
+let ART_W = Math.min(ART_W_MAX, W - 2 * (headerX - 20));
+let ART_H = ART_W; // square art
+
+// Start with our target gap on both sides of the art
+let G = GAP_TARGET;
+let maxArtH = midRegion - 2 * G;
+
+// If that leaves too little room for the art, reduce the gap down to GAP_MIN
+if (maxArtH < MIN_ART_H) {
+  G = Math.max(GAP_MIN, Math.floor((midRegion - MIN_ART_H) / 2));
+  maxArtH = midRegion - 2 * G;
+}
+
+// Final art height (keep square; equal gaps)
+ART_H = Math.min(ART_H, Math.max(100, maxArtH));
+ART_W = ART_H;
+
+const AX = Math.round((W - ART_W) / 2);
+const AY = Math.round(headerBottom + G);
+
+// Draw art (no white stroke; soft BR shadow)
 drawRoundRectShadow(
   ctx, AX, AY, ART_W, ART_H, RADIUS.art,
   PALETTE.artBackfill, null, 'rgba(0,0,0,0.14)', 14, 3
@@ -1446,15 +1451,30 @@ try {
 } catch {}
 ctx.restore();
 
-// ——— Traits panel bg ———
+// Traits panel (bottom anchored to pill center)
 drawRoundRect(ctx, TX, TY, TW, TH, RADIUS.traitsPanel, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-// ——— Top-aligned trait layout inside the panel (unchanged) ———
-const innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-const COL_W  = (innerW - COL_GAP) / 2;
+// ——— Top-aligned trait layout inside the panel ———
+const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
-function layout(lineH = M.lineH, titleH = M.titleH, blockPad = M.blockPad) {
-  const boxes = M.boxes; // already measured with the same metrics
+function layout(lineH = 16, titleH = 24, blockPad = 6) {
+  const boxes = [];
+  for (const cat of TRAIT_ORDER) {
+    const items = (traits[cat] || []);
+    if (!items.length) continue;
+
+    const lines  = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
+    const shown  = lines.slice(0, 5);
+    const hidden = lines.length - shown.length;
+    if (hidden > 0) shown.push(`+${hidden} more`);
+
+    const rowsH = shown.length * lineH;
+    const minRows = 32;
+    const boxH = blockPad + titleH + Math.max(rowsH + 8, minRows) + blockPad;
+    boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
+  }
+
   let yL = innerY, yR = innerY;
   const placed = [];
   for (const b of boxes) {
@@ -1464,10 +1484,22 @@ function layout(lineH = M.lineH, titleH = M.titleH, blockPad = M.blockPad) {
     placed.push({ ...b, x, y, w: COL_W });
     if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
   }
+  const usedH = Math.max(yL, yR) - innerY;
+
+  // If we overflow, shrink typography/padding proportionally
+  if (usedH > innerH) {
+    const scale = Math.max(0.82, innerH / usedH);
+    return layout(
+      Math.max(14, Math.floor(16 * scale)),
+      Math.max(22, Math.floor(24 * scale)),
+      Math.max(5,  Math.floor(6  * scale))
+    );
+  }
   return placed;
 }
 
 const placed = layout();
+
 
 
   // ——— Trait mini-cards (shadow, bigger value text) ———
