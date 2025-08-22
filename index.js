@@ -848,35 +848,36 @@ const PALETTE = {
   footerText:        '#212524',
 };
 
-// --- Background images by tier (GitHub-hosted) ---
+// --- Background images by tier ---
+// Mythic uses the special (LEGENDARY BG) art; all other tiers use Stock BG.
 const CARD_BG_URLS = {
-  // You said Mythic uses the “legendary” art asset
   Mythic: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card_legendary.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card_legendary.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card_legendary.png',
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/LEGENDARY%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/LEGENDARY%20BG.png',
   ],
   Legendary: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
   ],
   Rare: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
   ],
   Uncommon: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
   ],
   Common: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/bg_card.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/bg_card.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/bg_card.png',
+    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
+    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
   ],
 };
+
 
 function stripeFromRarity(label) {
   return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
