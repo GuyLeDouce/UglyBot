@@ -1349,17 +1349,18 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, headerX + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
 
- // ——— NFT art + Traits panel geometry (panel centered between art-bottom and footer) ———
+// ——— NFT art + Traits panel geometry with equal top/bottom gaps ———
 const TRAITS_W     = HEADER_W;
 const headerBottom = HEADER_Y + HEADER_H;
 
-// Region between the title block and the footer/pill area
-const FOOTER_BASELINE = H - 34;   // your footer text baseline
-const FOOTER_MARGIN   = 26;       // breathing room above footer
-const regionBottom    = Math.min(FOOTER_BASELINE - FOOTER_MARGIN, pillY - 12);
+// Footer baseline (where your "Squigs • Token #..." sits)
+const FOOTER_BASELINE = H - 34;
+const MIN_EDGE_GAP    = 12;      // minimum breathing room above/below the panel
+const MIN_ART_H       = 380;     // never shrink art below this
+const regionBottom    = Math.min(FOOTER_BASELINE - MIN_EDGE_GAP, pillY - 8); // avoid the pill
 const regionHeight    = Math.max(140, regionBottom - headerBottom);
 
-// We’ll measure trait pill height first so we can size art to fit above it.
+// ——— Measure trait content so we know how tall the panel wants to be ———
 const PAD = 12, COL_GAP = 12;
 function measureTraits(lineH = 16, titleH = 24, blockPad = 6) {
   const boxes = [];
@@ -1378,7 +1379,7 @@ function measureTraits(lineH = 16, titleH = 24, blockPad = 6) {
     boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
   }
 
-  // Two-column top-aligned packing from y=0 (measure only)
+  // two-column top-aligned packing (measure only)
   let yL = 0, yR = 0;
   for (const b of boxes) {
     if (yL <= yR) yL += b.boxH + COL_GAP;
@@ -1388,43 +1389,49 @@ function measureTraits(lineH = 16, titleH = 24, blockPad = 6) {
   return { boxes, usedH, lineH, titleH, blockPad };
 }
 
-// Measure once; scale down if it can’t fit with minimum art height
+// First pass: how tall would the panel be?
 let M = measureTraits();
-const minArtH       = 380;
-const traitsBudget  = Math.max(80, regionHeight - minArtH - GAP_ART_TRAITS);
-if (M.usedH + PAD * 2 > traitsBudget) {
-  const s = Math.max(0.78, traitsBudget / (M.usedH + PAD * 2));
+let TH_wanted = M.usedH + PAD * 2;
+
+// If the panel + min art + two gaps won't fit, scale text inside the panel down a bit.
+const traitsBudget = Math.max(
+  80,
+  regionHeight - MIN_ART_H - 2 * MIN_EDGE_GAP
+);
+if (TH_wanted > traitsBudget) {
+  const s = Math.max(0.78, traitsBudget / TH_wanted);
   M = measureTraits(
     Math.max(14, Math.floor(16 * s)),
     Math.max(22, Math.floor(24 * s)),
     Math.max(5,  Math.floor(6  * s))
   );
+  TH_wanted = M.usedH + PAD * 2;
 }
-const TH = Math.max(210, Math.min(regionHeight, M.usedH + PAD * 2));
+const TH = Math.max(210, Math.min(regionHeight - 2 * MIN_EDGE_GAP, TH_wanted));
 
-// —— Art sizing within the same region (make as large as possible while leaving room for panel)
-const midWidthRoom = W - 2 * (headerX - 20);
+// ——— Art sizing: make it as large as possible given equal gaps ———
+const midWidthRoom  = W - 2 * (headerX - 20);
 let ART_W = Math.min(ART_W_MAX, midWidthRoom);
 let ART_H = ART_W;
 
-let maxArtHeight = regionHeight - TH - GAP_ART_TRAITS;
-if (maxArtHeight < minArtH) maxArtHeight = minArtH;
-if (ART_H > maxArtHeight) ART_H = Math.floor(maxArtHeight);
-ART_W = ART_H; // keep square
+// With equal gaps g, we have: 2*g + ART_H + TH = regionHeight  →  g = (regionHeight - ART_H - TH)/2.
+// Ensure g >= MIN_EDGE_GAP; if not, shrink art until it is (but never below MIN_ART_H).
+let g = Math.floor((regionHeight - ART_H - TH) / 2);
+if (g < MIN_EDGE_GAP) {
+  ART_H = Math.max(MIN_ART_H, regionHeight - TH - 2 * MIN_EDGE_GAP);
+  ART_W = ART_H;
+  g = Math.floor((regionHeight - ART_H - TH) / 2);
+}
 
-// Center the combined block [ART + GAP + TRAITS] in the region
-const comboH = ART_H + GAP_ART_TRAITS + TH;
-const topY   = Math.round(headerBottom + (regionHeight - comboH) / 2);
-
-// Final frames
+// Final positions
 const AX = Math.round((W - ART_W) / 2);
-const AY = topY;
+const AY = Math.round(headerBottom + g);
 
 const TX = Math.round((W - TRAITS_W) / 2);
-const TY = AY + ART_H + GAP_ART_TRAITS;
+const TY = AY + ART_H;                 // panel starts right after the art
 const TW = TRAITS_W;
 
-// ——— Draw Art (no white stroke; with soft BR shadow) ———
+// ——— Draw Art (no white stroke; soft BR shadow) ———
 drawRoundRectShadow(
   ctx, AX, AY, ART_W, ART_H, RADIUS.art,
   PALETTE.artBackfill, null, 'rgba(0,0,0,0.14)', 14, 3
@@ -1439,14 +1446,15 @@ try {
 } catch {}
 ctx.restore();
 
-// ——— Traits panel background ———
+// ——— Traits panel bg ———
 drawRoundRect(ctx, TX, TY, TW, TH, RADIUS.traitsPanel, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-// Final top-aligned layout inside the panel
+// ——— Top-aligned trait layout inside the panel (unchanged) ———
 const innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
 const COL_W  = (innerW - COL_GAP) / 2;
-function layoutFinal(lineH = M.lineH, titleH = M.titleH, blockPad = M.blockPad) {
-  const boxes = measureTraits(lineH, titleH, blockPad).boxes;
+
+function layout(lineH = M.lineH, titleH = M.titleH, blockPad = M.blockPad) {
+  const boxes = M.boxes; // already measured with the same metrics
   let yL = innerY, yR = innerY;
   const placed = [];
   for (const b of boxes) {
@@ -1459,7 +1467,7 @@ function layoutFinal(lineH = M.lineH, titleH = M.titleH, blockPad = M.blockPad) 
   return placed;
 }
 
-const placed = layoutFinal();
+const placed = layout();
 
 
   // ——— Trait mini-cards (shadow, bigger value text) ———
