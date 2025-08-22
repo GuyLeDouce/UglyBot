@@ -1213,17 +1213,17 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
   if (bg) {
     // Trim a bit more off the source edges
-    const TRIM_X = Math.round(bg.width  * 0.036);  // was ~0.032
-    const TRIM_Y = Math.round(bg.height * 0.034);  // was ~0.028
+    const TRIM_X = Math.round(bg.width  * 0.044); // was ~0.036
+    const TRIM_Y = Math.round(bg.height * 0.042); // was ~0.034
 
     const sx = TRIM_X, sy = TRIM_Y;
     const sw = bg.width  - TRIM_X * 2;
     const sh = bg.height - TRIM_Y * 2;
 
-    // Slightly larger rounded mask + a little overdraw
-    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 1.25); // feel free to set MASK_EPS = 1.25 globally
+    // Slight overdraw to “eat” any leftover edge pixels
+    const OVER = (typeof MASK_EPS === 'number' ? Math.max(1.5, MASK_EPS) : 1.5);
     ctx.save();
-    roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, RADIUS.card + 4);
+    roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, RADIUS.card + 6); // +6 = slightly rounder mask
     ctx.clip();
     ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
     ctx.restore();
@@ -1232,6 +1232,7 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
     ctx.fillRect(0, 0, W, H);
   }
 }
+
 
 // ===== TRAIT NORMALIZER =====
 const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
@@ -1485,11 +1486,15 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     }
   }
 
-  // Footer line
+// Footer — vertically centered between the traits panel bottom and card bottom
+{
+  const footerY = Math.round((traitsBottom + H) / 2); // traitsBottom = TY + TH (already defined above)
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
+}
+
 
   // Rarity pill (shadow; black text)
   drawRoundRectShadow(ctx, pillX, pillY, pillW, PILL_H, RADIUS.pill, headerStripeFill, null, 'rgba(0,0,0,0.14)', 12, 3);
