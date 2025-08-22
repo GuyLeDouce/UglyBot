@@ -1280,16 +1280,15 @@ function hexToRgba(hex, a = 1) {
   const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
   return `rgba(${r},${g},${b},${a})`;
 }
+// Swap labels ONLY for display in the rarity pill
+function pillLabelForTier(label) {
+  if (!label) return '';
+  const l = String(label);
+  return l === 'Mythic' ? 'Legendary'
+       : l === 'Legendary' ? 'Epic'
+       : l;
+}
 
-/* ──────────────────────────────────────────────────────────────────────────
-   RENDERER
-   - Title bar centered horizontally (slightly taller).
-   - NFT image centered vertically between title and traits.
-   - Traits panel bottom aligned to rarity pill center.
-   - Trait mini-cards: squared-bottom colored tabs, taller titles & values.
-   - Content inside traits panel is vertically centered → equal top/bottom
-     spacing to the semi-transparent panel edges (even at max trait counts).
-────────────────────────────────────────────────────────────────────────── */
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1318,7 +1317,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // ——— Bigger rarity pill tucked into the corner ———
   const PILL_H     = 62;                 // ↑ was 52
   const PILL_PAD_X = 24;                 // ↑ a bit wider
-  const pillText   = tierLabel;
+  const pillText = pillLabelForTier(tierLabel);
   ctx.font         = `24px ${FONT_BOLD}`; // ↑ text size
   const pTextW     = ctx.measureText(pillText).width;
   const pillW      = pTextW + PILL_PAD_X * 2;
