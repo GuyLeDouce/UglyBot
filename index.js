@@ -852,30 +852,20 @@ const PALETTE = {
 // Mythic uses the special (LEGENDARY BG) art; all other tiers use Stock BG.
 const CARD_BG_URLS = {
   Mythic: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/LEGENDARY%20BG.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/LEGENDARY%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true'
   ],
   Legendary: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
   ],
   Rare: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
   ],
   Uncommon: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
-  ],
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+ ],
   Common: [
-    'https://raw.githubusercontent.com/GuyLeDouce/UglyBot/main/Stock%20BG.png',
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true',
-    'https://cdn.jsdelivr.net/gh/GuyLeDouce/UglyBot@main/Stock%20BG.png',
-  ],
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+  ]
 };
 
 
