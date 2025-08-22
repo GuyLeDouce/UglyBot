@@ -31,10 +31,10 @@ const MASK_EPS = 0.75; // pixels
 // How much tighter to shave the bg corners than the normal card radius (in px on 750×1050)
 const BG_CORNER_TIGHTEN = 2; // try 8–12; increase if you still see flecks
 // 1.00 = no zoom. Start ~1.05–1.10; go higher if you still see flecks.
-const BG_ZOOM = 1.1;
+const BG_ZOOM = 1.3;
 // Optional tiny pan if any corner still shows a speck (pixels in card space)
-const BG_PAN_X = 0;
-const BG_PAN_Y = 0;
+const BG_PAN_X = 2;
+const BG_PAN_Y = 2;
 
 
 // ===== FONT REGISTRATION (auto-download if missing) =====
