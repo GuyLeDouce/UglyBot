@@ -28,6 +28,8 @@ const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 // Put this near your other consts (top of file is fine)
 const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if file size is fine.
 const MASK_EPS = 0.75; // pixels
+// How much tighter to shave the bg corners than the normal card radius (in px on 750×1050)
+const BG_CORNER_TIGHTEN = 9; // try 8–12; increase if you still see flecks
 
 
 
@@ -1208,54 +1210,31 @@ const RADIUS = {
   pill: 22         // rarity pill
 };
 
-// --- Trimmed background drawing (aggressive edge-eater) ---
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
-  if (!bg) {
+  if (bg) {
+    // keep your existing trim (no additional cropping)
+    const TRIM_X = Math.round(bg.width  * 0.036);
+    const TRIM_Y = Math.round(bg.height * 0.034);
+    const sx = TRIM_X, sy = TRIM_Y;
+    const sw = bg.width  - TRIM_X * 2;
+    const sh = bg.height - TRIM_Y * 2;
+
+    // slightly larger corner radius + tiny overdraw to “eat” the dark flecks
+    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 0.75);
+    const r = (RADIUS.card || 38) + (typeof BG_CORNER_TIGHTEN === 'number' ? BG_CORNER_TIGHTEN : 9);
+
+    ctx.save();
+    roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, r);
+    ctx.clip();
+    ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
+    ctx.restore();
+  } else {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
-    return;
   }
-
-  // Crop a little heavier to remove the dark fringe baked into the asset
-  const TRIM_X = Math.round(bg.width  * 0.052); // was ~0.044
-  const TRIM_Y = Math.round(bg.height * 0.050); // was ~0.042
-
-  const sx = TRIM_X,  sy = TRIM_Y;
-  const sw = bg.width  - TRIM_X * 2;
-  const sh = bg.height - TRIM_Y * 2;
-
-  // Slight overscan around the canvas so the clipped edge doesn't sample dark pixels
-  const OVER = 2;              // outward bleed in target pixels
-  const BIGGER_RADIUS = RADIUS.card + 12; // mask is rounder/larger than the final card
-
-  ctx.clearRect(0, 0, W, H);
-
-  // 1) Big rounded clip to "eat" edges, then draw the BG WITHOUT smoothing
-  ctx.save();
-  roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, BIGGER_RADIUS);
-  ctx.clip();
-
-  const oldSmooth = ctx.imageSmoothingEnabled;
-  const oldQual   = ctx.imageSmoothingQuality;
-  ctx.imageSmoothingEnabled = false;          // avoid sampling the cropped border
-  ctx.imageSmoothingQuality = 'low';
-
-  // tiny 0.5px inset/oversize prevents AA from peeking
-  ctx.drawImage(bg, sx, sy, sw, sh, -0.5, -0.5, W + 1, H + 1);
-
-  ctx.imageSmoothingEnabled = oldSmooth;
-  ctx.imageSmoothingQuality = oldQual;
-  ctx.restore();
-
-  // 2) Hard-clip back down to the exact card radius so the visible silhouette is consistent
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-in';
-  roundRectPath(ctx, 0, 0, W, H, RADIUS.card);
-  ctx.fillStyle = '#000'; // color doesn't matter in destination-in
-  ctx.fill();
-  ctx.restore();
 }
+
 
 // ===== TRAIT NORMALIZER =====
 const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
