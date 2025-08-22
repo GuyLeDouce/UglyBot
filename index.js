@@ -838,7 +838,7 @@ const PALETTE = {
   traitCardStroke:   '#000000',
   traitCardShadow:   '#0000001A',
   traitTitleText:    '#222625',
-  traitValueText:    '#775fbb',
+  traitValueText:    '#000000',
   footerText:        '#212524',
 };
 
@@ -1439,53 +1439,59 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Reposition placed boxes by adding yStart
   const placed = L.placed.map(b => ({ ...b, y: b.y + yStart }));
 
-  // Draw trait mini-cards with squared-bottom tabs
-  const BUBBLE_R = RADIUS.traitCard;
-  const TAB_OVERLAP = 2;
-  const ROW_PAD_Y = 6;
+// Draw trait mini-cards with squared-bottom tabs
+const BUBBLE_R = RADIUS.traitCard;
+const TAB_OVERLAP = 2;
+const ROW_PAD_Y = 6;
 
-  for (const b of placed) {
-    // White card
-    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+for (const b of placed) {
+  // White card
+  drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored tab — rounded top, flat bottom
-    const tabH = b.titleH + TAB_OVERLAP;
-    drawTopRoundedRect(ctx, b.x, b.y, b.w, tabH, BUBBLE_R, headerStripeFill);
+  // Colored tab — rounded top, flat bottom
+  const tabH = b.titleH + TAB_OVERLAP;
+  drawTopRoundedRect(ctx, b.x, b.y, b.w, tabH, BUBBLE_R, headerStripeFill);
 
-    // Title (centered)
-    ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `16px ${FONT_BOLD}`;
-    ctx.textBaseline = 'alphabetic';
-    const mt = ctx.measureText(b.cat);
-    const tH = (mt.actualBoundingBoxAscent || 0) + (mt.actualBoundingBoxDescent || 0);
-    const titleY = b.y + (tabH - tH) / 2 + (mt.actualBoundingBoxAscent || 0);
-    ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleY);
-
-    // Values (centered)
-    let yy = b.y + tabH + ROW_PAD_Y;
-    ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `13px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
-    for (const line of b.lines) {
-      const lw = ctx.measureText(line).width;
-      ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
-      yy += b.lineH;
-    }
-  }
-
-  // Footer
-  ctx.fillStyle = PALETTE.footerText;
-  ctx.font = `18px ${FONT_REG}`;
+  // Title (centered in tab)
+  ctx.fillStyle = PALETTE.traitTitleText;
+  ctx.font = `16px ${FONT_BOLD}`;
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
+  const mt = ctx.measureText(b.cat);
+  const tH = (mt.actualBoundingBoxAscent || 0) + (mt.actualBoundingBoxDescent || 0);
+  const titleY = b.y + (tabH - tH) / 2 + (mt.actualBoundingBoxAscent || 0);
+  ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleY);
 
-  // Rarity pill (last)
-  drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, RADIUS.pill, headerStripeFill);
-  ctx.fillStyle = '#000000';
+  // Values (larger + vertically centered in the white portion)
+  const bodyTop   = b.y + tabH;
+  const bodyH     = b.boxH - tabH;
+  const contentH  = b.lines.length * b.lineH;
+  let yy = bodyTop + Math.max(ROW_PAD_Y, Math.floor((bodyH - contentH) / 2));
+
+  ctx.fillStyle = PALETTE.traitValueText;       // already matched to rarity text per your change
+  const valuePx = Math.max(14, Math.floor(b.lineH * 0.95)); // scale with line height
+  ctx.font = `${valuePx}px ${FONT_REG}`;
   ctx.textBaseline = 'middle';
-  ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
-  return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
+  for (const line of b.lines) {
+    const lw = ctx.measureText(line).width;
+    ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
+    yy += b.lineH;
+  }
+}
+
+// Footer
+ctx.fillStyle = PALETTE.footerText;
+ctx.font = `18px ${FONT_REG}`;
+ctx.textBaseline = 'alphabetic';
+ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
+
+// Rarity pill (last)
+drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, RADIUS.pill, headerStripeFill);
+ctx.fillStyle = PALETTE.rarityText; // you already switched this
+ctx.textBaseline = 'middle';
+ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
+
+return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
 
 // ---------- drawing helpers ----------
