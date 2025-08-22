@@ -837,8 +837,8 @@ const PALETTE = {
   traitCardStroke:   '#000000',
   traitCardShadow:   '#0000001A',
   traitTitleText:    '#222625',
-  traitValueText:    '#775fbb',
-  footerText:        '#212524',
+  traitValueText:    '#222625',
+  footerText:        '#222625',
 };
 
 // --- Background images by tier (GitHub-hosted) ---
@@ -1269,10 +1269,26 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ===== RENDERER: larger trait pills + larger text (balanced) =====
+// Compact, balanced renderer: smaller trait pills + synced type tab
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
+
+  // --- compact UI knobs (smaller than last pass) ---
+  const ui = {
+    headerW: 620, headerH: 56, headerR: 16, headerPadX: 16, headerY: 22,
+    artW: 610, artH: 610, artR: 22,
+    panelMinH: 210,
+    // ↓ trait sizing (smaller)
+    colGap: 14, panelPad: 14, cardGap: 12,
+    typeTabH: 22,            // was ~28+
+    typeTabFont: 18,         // was 19
+    typeTabNudge: 1.5,
+    valuePillH: 40,          // was 46–54
+    valuePillR: 14,
+    valueFont: 15,           // was 16
+    rowGap: 8,
+  };
 
   // Hi-DPI canvas
   const canvas = createCanvas(W * SCALE, H * SCALE);
@@ -1283,175 +1299,146 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   // Tier / colors
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
-  const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
+  const stripe = headerStripe || stripeFromRarity(tierLabel);
 
-  // Background (cropped to remove baked card border)
+  // Background (cropped to hide baked border)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
-  // ---------- Rarity pill (so we can align traits-bottom to its center) ----------
-  const PILL_H = 44;
+  // ----- Rarity pill (we align the traits panel bottom to its center) -----
   const pillText = tierLabel;
+  const PILL_H = 44, PILL_R = 20, PILL_PAD_X = 16;
   ctx.font = `20px ${FONT_BOLD}`;
-  const tW = ctx.measureText(pillText).width;
-  const PILL_PAD_X = 16, PILL_R = 20;
-  const pillW = tW + PILL_PAD_X * 2;
-  const pillX = W - 48 - pillW;
-  const pillY = H - 48 - PILL_H;
-  const pillCenterY = pillY + PILL_H / 2;
+  const pW = ctx.measureText(pillText).width + PILL_PAD_X * 2;
+  const pX = W - 48 - pW;
+  const pY = H - 48 - PILL_H;
+  const pillCY = pY + PILL_H / 2;
+  drawRoundRect(ctx, pX, pY, pW, PILL_H, PILL_R, stripe);
+  ctx.fillStyle = '#000';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(pillText, pX + PILL_PAD_X, pillCY);
 
-  // ---------- Title block ----------
-  const HEADER_W = 620;
-  const HEADER_H = 56;
-  const HEADER_R = 16;
-  const HEADER_SIDE_PAD = 16;
-  const HEADER_Y = 22;
-  const headerX = Math.round((W - HEADER_W) / 2);
-
-  drawRoundRectShadow(ctx, headerX, HEADER_Y, HEADER_W, HEADER_H, HEADER_R, headerStripeFill);
+  // ----- Title block (slight grow from previous smaller pass) -----
+  const hX = Math.round((W - ui.headerW) / 2);
+  drawRoundRectShadow(ctx, hX, ui.headerY, ui.headerW, ui.headerH, ui.headerR, stripe);
+  const hCY = ui.headerY + ui.headerH / 2;
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  const headerMidY = HEADER_Y + HEADER_H / 2;
   ctx.font = `30px ${FONT_BOLD}`;
-  ctx.fillText(name, headerX + HEADER_SIDE_PAD, headerMidY);
+  ctx.fillText(name, hX + ui.headerPadX, hCY);
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
   ctx.font = `24px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
-  ctx.fillText(hpText, headerX + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
+  ctx.fillText(hpText, hX + ui.headerW - ui.headerPadX - hpW, hCY);
 
-  // ---------- Traits panel: bottom aligned to rarity pill center ----------
-  const TRAITS_W = HEADER_W;
-  const headerBottom = HEADER_Y + HEADER_H;
-  const traitsBottom = pillCenterY;
-  let TH = Math.round((traitsBottom - headerBottom) * 0.38);
-  TH = Math.max(TH, 220);
-  const TX = Math.round((W - TRAITS_W) / 2);
+  // ----- Traits panel bottom locked to rarity pill center; compact height -----
+  const traitsW = ui.headerW;
+  const traitsBottom = pillCY;
+  let TH = Math.round((traitsBottom - (ui.headerY + ui.headerH)) * 0.35);
+  TH = Math.max(TH, ui.panelMinH);
+  const TX = Math.round((W - traitsW) / 2);
   const TY = traitsBottom - TH;
-  const TW = TRAITS_W;
+  drawRoundRect(ctx, TX, TY, traitsW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-  // ---------- Art (centered vertically between title and traits) ----------
-  const GAP_HEADER_ART = 10, GAP_ART_TRAITS = 10;
-  const ART_W_MAX = 560, ART_R = 24;
-  const midRegion = TY - headerBottom;
-  let ART_W = Math.min(ART_W_MAX, W - 2 * (headerX - 20));
-  let ART_H = ART_W;
-  const maxArtHeight = midRegion - (GAP_HEADER_ART + GAP_ART_TRAITS);
-  if (ART_H > maxArtHeight) ART_H = Math.max(380, Math.floor(maxArtHeight));
-  const AX = Math.round((W - ART_W) / 2);
-  const AY = Math.round(headerBottom + (midRegion - ART_H) / 2);
+  // ----- Art: centered between title and traits (may shrink if needed) -----
+  const available = TY - (ui.headerY + ui.headerH) - 18; // gap
+  let AW = ui.artW, AH = ui.artH;
+  const scaleA = Math.min(1, available / ui.artH);
+  AW = Math.round(ui.artW * scaleA);
+  AH = Math.round(ui.artH * scaleA);
+  const AX = Math.round((W - AW) / 2);
+  const AY = Math.round(ui.headerY + ui.headerH + (available - AH) / 2);
 
-  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
+  roundRectPath(ctx, AX, AY, AW, AH, ui.artR);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, ART_W, ART_H, ART_R, PALETTE.artBackfill);
+  drawRoundRect(ctx, AX, AY, AW, AH, ui.artR, PALETTE.artBackfill);
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = cover(img.width, img.height, ART_W, ART_H);
-    ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
+    const fit = cover(img.width, img.height, AW, AH);
+    ctx.drawImage(img, AX + fit.dx, AY + fit.dy, fit.dw, fit.dh);
   } catch {}
   ctx.restore();
   ctx.strokeStyle = PALETTE.artStroke;
   ctx.lineWidth = 3;
-  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
+  roundRectPath(ctx, AX, AY, AW, AH, ui.artR);
   ctx.stroke();
 
-  // ---------- Traits panel (semi-transparent) ----------
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
+  // ===== Traits grid (compact pills + synced header tab) =====
+  const innerX = TX + ui.panelPad, innerY = TY + ui.panelPad;
+  const innerW = traitsW - ui.panelPad * 2;
+  const colW = Math.floor((innerW - ui.colGap) / 2);
 
-  // ===== Balanced trait pills =====
-  // Larger category tab + larger inner white pill + bigger fonts
-  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
-
-  // Tunables for size/typography
-  const TITLE_H = 28;                 // colored tab height (larger)
-  const LINE_H  = 20;                 // line height inside the white pill
-  const VALUE_MIN_H = 46;             // minimum height for the white pill
-  const CARD_PAD = 8;                 // vertical padding around each mini-card
-  const PILL_INSET_X = 16;            // left/right inset for the white pill
-  const PILL_INSET_Y = 8;             // top/bottom inset under the tab
-
-  const TITLE_FONT = `18px ${FONT_BOLD}`;
-  const VALUE_FONT = `15px ${FONT_REG}`;
-
-  function layout(lineH = LINE_H, titleH = TITLE_H, blockPad = CARD_PAD) {
+  // Build boxes with new compact sizing
+  function build() {
     const boxes = [];
     for (const cat of TRAIT_ORDER) {
-      const items = (traits[cat] || []);
+      const items = traits[cat] || [];
       if (!items.length) continue;
 
+      // Lines (no bullet)
       const lines = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
-      const shown = lines.slice(0, 5);
-      const hidden = lines.length - shown.length;
-      if (hidden > 0) shown.push(`+${hidden} more`);
 
-      const pillH = Math.max(VALUE_MIN_H, shown.length * lineH + 12);
-      const boxH  = blockPad + titleH + PILL_INSET_Y + pillH + blockPad; // room for the big pill
-      boxes.push({ cat, lines: shown, boxH, lineH, titleH, pillH, blockPad });
+      // Height = tab + (line pills) + gaps + bottom pad
+      const lineCount = lines.length;
+      const contentH = lineCount * ui.valuePillH + (lineCount - 1) * ui.rowGap;
+      const cardH = ui.typeTabH + 10 + contentH + 10;
+
+      boxes.push({ cat, lines, cardH });
     }
+
+    // Masonry into 2 columns
     let yL = innerY, yR = innerY;
     const placed = [];
     for (const b of boxes) {
       const left = yL <= yR;
-      const x = left ? innerX : innerX + COL_W + COL_GAP;
+      const x = left ? innerX : innerX + colW + ui.colGap;
       const y = left ? yL : yR;
-      placed.push({ ...b, x, y, w: COL_W });
-      if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
+      placed.push({ ...b, x, y, w: colW });
+      if (left) yL += b.cardH + ui.cardGap; else yR += b.cardH + ui.cardGap;
     }
-    const usedH = Math.max(yL, yR) - innerY;
-    return { placed, usedH };
+    return { placed, usedH: Math.max(yL, yR) - innerY };
   }
 
-  let L = layout();
-  if (L.usedH > (innerH - 8)) {
-    const scale = Math.max(0.9, (innerH - 8) / L.usedH);
-    // scale down a touch if we overflow
-    L = layout(Math.max(16, Math.floor(LINE_H * scale)), Math.max(24, Math.floor(TITLE_H * scale)), 6);
+  // If overflow, shrink pills a touch
+  let L = build();
+  if (innerY + L.usedH > TY + TH - ui.panelPad) {
+    const shrink = Math.max(0.85, (TY + TH - ui.panelPad - innerY) / L.usedH);
+    ui.valuePillH = Math.round(ui.valuePillH * shrink);
+    ui.typeTabH = Math.round(ui.typeTabH * shrink);
+    ui.typeTabFont = Math.max(16, Math.round(ui.typeTabFont * shrink));
+    ui.valueFont = Math.max(14, Math.round(ui.valueFont * shrink));
+    L = build();
   }
 
-  // Draw each trait mini-card
-  const BUBBLE_R = 16, BUBBLE_OVERLAP = 2;
+  // Draw cards
+  ctx.textBaseline = 'middle';
   for (const b of L.placed) {
-    // Colored header tab — rounded top, squared bottom
-    const tabH = b.titleH + BUBBLE_OVERLAP;
-    drawTopRoundedRect(ctx, b.x, b.y, b.w, tabH, BUBBLE_R, headerStripeFill);
+    // Card body
+    drawRoundRect(ctx, b.x, b.y, b.w, b.cardH, 16, '#FFFFFF00'); // transparent body (only tab & pills visible)
 
-    // Title text (centered)
+    // Type tab (rounded top, squared bottom)
+    drawTopRoundedRect(ctx, b.x, b.y, b.w, ui.typeTabH, 16, stripe);
     ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = TITLE_FONT;
-    const mt = ctx.measureText(b.cat);
-    const titleBaseY = b.y + tabH / 2 + 1; // tiny nudge down for optical centering
-    ctx.textBaseline = 'middle';
-    ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleBaseY);
+    ctx.font = `${ui.typeTabFont}px ${FONT_BOLD}`;
+    const tW2 = ctx.measureText(b.cat).width;
+    ctx.fillText(b.cat, b.x + (b.w - tW2) / 2, b.y + ui.typeTabH / 2 + ui.typeTabNudge);
 
-    // Inner white pill (bigger)
-    const pillX = b.x + PILL_INSET_X;
-    const pillY = b.y + tabH + PILL_INSET_Y;
-    const pillW = b.w - PILL_INSET_X * 2;
-    const pillH = b.pillH;
-    drawRoundRect(ctx, pillX, pillY, pillW, pillH, 16, '#FFFFFF');
-
-    // Values (bigger)
+    // Value pills
+    let yy = b.y + ui.typeTabH + 10;
+    ctx.font = `${ui.valueFont}px ${FONT_REG}`;
     ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = VALUE_FONT;
-    ctx.textBaseline = 'middle';
-    let yy = pillY + Math.floor(b.lineH / 2) + 6;
     for (const line of b.lines) {
+      drawRoundRect(ctx, b.x + 14, yy, b.w - 28, ui.valuePillH, ui.valuePillR, '#FFFFFF');
       const lw = ctx.measureText(line).width;
-      ctx.fillText(line, pillX + (pillW - lw) / 2, yy);
-      yy += b.lineH;
+      ctx.fillText(line, b.x + 14 + (b.w - 28 - lw) / 2, yy + ui.valuePillH / 2);
+      yy += ui.valuePillH + ui.rowGap;
     }
   }
 
-  // Footer
+  // Footer left
   ctx.fillStyle = PALETTE.footerText;
   ctx.font = `18px ${FONT_REG}`;
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
-
-  // Rarity pill (draw last)
-  drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, PILL_R, headerStripeFill);
-  ctx.fillStyle = '#000000';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
