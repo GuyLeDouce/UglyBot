@@ -30,6 +30,9 @@ const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if
 const MASK_EPS = 0.75; // pixels
 // How much tighter to shave the bg corners than the normal card radius (in px on 750×1050)
 const BG_CORNER_TIGHTEN = 2; // try 8–12; increase if you still see flecks
+// Make the background image slightly larger under the same cutout.
+// 1.00 = no zoom. Try 1.035–1.08 depending on the tier art.
+const BG_ZOOM = 1.06;
 
 
 
@@ -1213,27 +1216,34 @@ const RADIUS = {
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
   if (bg) {
-    // keep your existing trim (no additional cropping)
+    // keep your existing edge trim (we are NOT cutting the card; just zooming the image)
     const TRIM_X = Math.round(bg.width  * 0.036);
     const TRIM_Y = Math.round(bg.height * 0.034);
     const sx = TRIM_X, sy = TRIM_Y;
     const sw = bg.width  - TRIM_X * 2;
     const sh = bg.height - TRIM_Y * 2;
 
-    // slightly larger corner radius + tiny overdraw to “eat” the dark flecks
-    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 0.75);
-    const r = (RADIUS.card || 38) + (typeof BG_CORNER_TIGHTEN === 'number' ? BG_CORNER_TIGHTEN : 9);
-
+    // Clip with the same card cutout (unchanged)
+    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 1.25);
     ctx.save();
-    roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, r);
+    roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, RADIUS.card + 4);
     ctx.clip();
-    ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
+
+    // Draw the background slightly larger so the baked border never peeks through
+    const Z  = Math.max(1, (typeof BG_ZOOM === 'number' ? BG_ZOOM : 1.06));
+    const dW = Math.round(W * Z);
+    const dH = Math.round(H * Z);
+    const dx = Math.round((W - dW) / 2); // center the zoom
+    const dy = Math.round((H - dH) / 2);
+
+    ctx.drawImage(bg, sx, sy, sw, sh, dx, dy, dW, dH);
     ctx.restore();
   } else {
     ctx.fillStyle = PALETTE.cardBg;
     ctx.fillRect(0, 0, W, H);
   }
 }
+
 
 
 // ===== TRAIT NORMALIZER =====
