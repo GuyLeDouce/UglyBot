@@ -1269,7 +1269,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: big art, shorter traits panel + shorter trait pills ======
+// ===== RENDERER: higher title, tighter big art, compact trait tabs, traits block moved up =====
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1288,73 +1288,73 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Background (cropped to remove baked border)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
-  // ---- Shared content width (title, art, traits align) ----
-  const CONTENT_W = 610;                   // wide content
-  const CONTENT_X = Math.round((W - CONTENT_W) / 2);
-
-  // --- Short Pokémon-style title band ---
-  const HEADER_W = CONTENT_W;
-  const HEADER_X = CONTENT_X;
-  const HEADER_H = 56;                     // short band
-  const HEADER_R = 16;
+  // ---------------- Layout knobs (tweak if you want) ----------------
+  const HEADER_W        = 600;
+  const HEADER_H        = 48;       // shorter title band (Pokemon vibe)
+  const HEADER_R        = 16;
   const HEADER_SIDE_PAD = 14;
+  const HEADER_Y        = 20;       // << higher up
 
-  // --- Big square art window (unchanged from your “big” size) ---
-  const AW = CONTENT_W;
-  const AH = CONTENT_W;
-  const AX = CONTENT_X;
-  const AY = 165;                          // leaves space for the title band
+  const ART_W           = 560;      // slightly smaller to fit everything nicely
+  const ART_H           = ART_W;
+  const GAP_HEADER_ART  = 10;       // << tight gap between header and image
 
-  // Center title band between card top and art top
-  const headerY = Math.max(12, Math.round((AY - HEADER_H) / 2));
-  drawRoundRectShadow(ctx, HEADER_X, headerY, HEADER_W, HEADER_H, HEADER_R, headerStripeFill);
+  const TRAITS_W        = 600;      // same width as header (image may be a bit narrower)
+  const GAP_ART_TRAITS  = 8;        // << tight gap image → traits
+  const PILL_H          = 38;       // shorter rarity badge
+  const BOTTOM_SAFE     = PILL_H + 64; // room for badge + footer
 
-  // Title + HP
+  // ------------------------------------------------------------------
+
+  // Title band (centered horizontally)
+  const headerX = Math.round((W - HEADER_W) / 2);
+  drawRoundRectShadow(ctx, headerX, HEADER_Y, HEADER_W, HEADER_H, HEADER_R, headerStripeFill);
+
+  // Title text (left)
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  const headerMidY = headerY + HEADER_H / 2;
+  const headerMidY = HEADER_Y + HEADER_H / 2;
+  ctx.font = `28px ${FONT_BOLD}`;
+  ctx.fillText(name, headerX + HEADER_SIDE_PAD, headerMidY);
 
-  ctx.font = `30px ${FONT_BOLD}`;
-  ctx.fillText(name, HEADER_X + HEADER_SIDE_PAD, headerMidY);
-
+  // HP (right)
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
-  ctx.font = `24px ${FONT_BOLD}`;
+  ctx.font = `22px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
-  ctx.fillText(hpText, HEADER_X + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
+  ctx.fillText(hpText, headerX + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
 
-  // Art (keep white stroke)
+  // Big NFT image (slightly narrower; moved up tighter to header)
+  const AX = Math.round((W - ART_W) / 2);
+  const AY = HEADER_Y + HEADER_H + GAP_HEADER_ART;
+
   const ART_R = 24;
-  roundRectPath(ctx, AX, AY, AW, AH, ART_R);
+  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, ART_R, PALETTE.artBackfill);
+  drawRoundRect(ctx, AX, AY, ART_W, ART_H, ART_R, PALETTE.artBackfill);
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
+    const { dx, dy, dw, dh } = cover(img.width, img.height, ART_W, ART_H);
     ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   } catch {}
   ctx.restore();
   ctx.strokeStyle = PALETTE.artStroke;
   ctx.lineWidth = 3;
-  roundRectPath(ctx, AX, AY, AW, AH, ART_R);
+  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
   ctx.stroke();
 
-  // --- Traits panel (shorter block) ---
-  const TX = CONTENT_X;
-  const TY = AY + AH + 18;
-  const TW = CONTENT_W;
-
-  // leave guaranteed room at the bottom for footer + rarity pill
-  const PILL_H = 40;                        // shorter rarity badge
-  const BOTTOM_SAFE = PILL_H + 70;          // gap so nothing collides with the badge/footer
-  const TH = Math.max(130, H - TY - BOTTOM_SAFE);
+  // Traits panel (moved up significantly; compact)
+  const TX = Math.round((W - TRAITS_W) / 2);
+  const TY = AY + ART_H + GAP_ART_TRAITS;
+  const TW = TRAITS_W;
+  const TH = Math.max(120, H - TY - BOTTOM_SAFE); // ensure footer room
 
   drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-  // --- Traits layout (more compact: shorter pills + tighter lines) ---
-  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  // ---- Compact layout (smaller tab + text) ----
+  const PAD = 10, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
   const COL_GAP = 10, COL_W = (innerW - COL_GAP) / 2;
 
-  function layout(lineH = 14, titleH = 24, blockPad = 6) {   // smaller by design
+  function layout(lineH = 13, titleH = 20, blockPad = 5) {
     const boxes = [];
     for (const cat of TRAIT_ORDER) {
       const items = (traits[cat] || []);
@@ -1366,7 +1366,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       if (hidden > 0) shown.push(`+${hidden} more`);
 
       const rowsH = shown.length * lineH;
-      const minRows = 30;                                    // shorter cards
+      const minRows = 28;
       const boxH = blockPad + titleH + Math.max(rowsH + 6, minRows) + blockPad;
 
       boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
@@ -1385,36 +1385,36 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   }
 
   let L = layout();
-  if (L.usedH > (innerH - 8)) {
-    // final safety shrink if needed
-    const scale = Math.max(0.85, (innerH - 8) / L.usedH);
-    L = layout(Math.max(12, Math.floor(14 * scale)), Math.max(20, Math.floor(24 * scale)), 5);
+  if (L.usedH > (innerH - 6)) {
+    // last-ditch shrink if still tall
+    const scale = Math.max(0.85, (innerH - 6) / L.usedH);
+    L = layout(Math.max(12, Math.floor(13 * scale)), Math.max(18, Math.floor(20 * scale)), 4);
   }
 
-  // --- Mini-cards (shorter trait "pills") ---
+  // Trait cards: smaller category tab
   const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 4;                 // shorter colored tab
-  const ROW_PAD_Y = 6;
+  const BUBBLE_OVERLAP = 2;  // short tab
+  const ROW_PAD_Y = 5;
 
   for (const b of L.placed) {
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    const bubbleH = b.titleH + BUBBLE_OVERLAP;               // shorter tab height
+    const bubbleH = b.titleH + BUBBLE_OVERLAP;                // smaller header tab
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // centered title
+    // centered title (smaller)
     ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `16px ${FONT_BOLD}`;                          // smaller title text
+    ctx.font = `15px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
     const mt = ctx.measureText(b.cat);
-    const textH = (mt.actualBoundingBoxAscent || 0) + (mt.actualBoundingBoxDescent || 0);
-    const titleY = b.y + (bubbleH - textH) / 2 + (mt.actualBoundingBoxAscent || 0);
+    const tH = (mt.actualBoundingBoxAscent || 0) + (mt.actualBoundingBoxDescent || 0);
+    const titleY = b.y + (bubbleH - tH) / 2 + (mt.actualBoundingBoxAscent || 0);
     ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleY);
 
-    // centered lines
+    // centered values (smaller)
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `13px ${FONT_REG}`;                           // smaller values
+    ctx.font = `12px ${FONT_REG}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
       const lw = ctx.measureText(line).width;
@@ -1429,7 +1429,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
 
-  // Rarity pill (shorter & kept clear of traits)
+  // Rarity pill (shorter)
   const pillText = tierLabel;
   ctx.font = `20px ${FONT_BOLD}`;
   const tW = ctx.measureText(pillText).width;
@@ -1444,8 +1444,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
 }
-
-
 
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
