@@ -30,9 +30,6 @@ const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if
 const MASK_EPS = 0.75; // pixels
 // How much tighter to shave the bg corners than the normal card radius (in px on 750×1050)
 const BG_CORNER_TIGHTEN = 2; // try 8–12; increase if you still see flecks
-// Absolute corner radius to mask the background image at 750×1050.
-// This doesn't change the canvas size—just the clip curvature.
-const BG_CORNER_RADIUS_ABS = 86;   // try 82–90 if you still see flecks
 
 
 
@@ -1216,16 +1213,16 @@ const RADIUS = {
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
   if (bg) {
-    // keep your existing trim of the source image (no further “cutting”)
+    // keep your existing trim (no additional cropping)
     const TRIM_X = Math.round(bg.width  * 0.036);
     const TRIM_Y = Math.round(bg.height * 0.034);
     const sx = TRIM_X, sy = TRIM_Y;
     const sw = bg.width  - TRIM_X * 2;
     const sh = bg.height - TRIM_Y * 2;
 
-    // clip with a *larger absolute* corner radius and a tiny overdraw
-    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 1.25); // ok to bump to 1.5–2
-    const r = (typeof BG_CORNER_RADIUS_ABS === 'number' ? BG_CORNER_RADIUS_ABS : 86);
+    // slightly larger corner radius + tiny overdraw to “eat” the dark flecks
+    const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 0.75);
+    const r = (RADIUS.card || 38) + (typeof BG_CORNER_TIGHTEN === 'number' ? BG_CORNER_TIGHTEN : 9);
 
     ctx.save();
     roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, r);
