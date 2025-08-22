@@ -32,7 +32,7 @@ const MASK_EPS = 0.75; // pixels
 const BG_CORNER_TIGHTEN = 2; // try 8–12; increase if you still see flecks
 // Make the background image slightly larger under the same cutout.
 // 1.00 = no zoom. Try 1.035–1.08 depending on the tier art.
-const BG_ZOOM = 1.06;
+const BG_ZOOM = 1.16;
 
 
 
