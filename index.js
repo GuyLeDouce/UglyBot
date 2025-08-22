@@ -1269,7 +1269,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ====== RENDERER: shared width + shorter Pokémon-style title band ======
+// ====== RENDERER: wide layout, big art, slimmer title/traits ======
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1288,44 +1288,45 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   // Background (cropped to remove baked border)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
-  // ---- Shared width so header, art and traits line up ----
-  const CONTENT_W = 460;
+  // ---- Shared width so header, art and traits line up (wider now) ----
+  const CONTENT_W = 610;                 // <— widen here if you want even more (max ≈ 630)
   const CONTENT_X = Math.round((W - CONTENT_W) / 2);
 
-  // --- Art window (square) ---
+  // --- Art window (square & bigger) ---
   const AW = CONTENT_W;
   const AH = CONTENT_W;
-  const AY = 150;
   const AX = CONTENT_X;
+  const AY = 165;                        // room for the title band above
+  const ART_R = 24;
 
-  // --- Pokémon-style title band (shorter, comfy padding) ---
+  // --- Short Pokémon-style title band (slimmer than art/traits visually) ---
   const HEADER_W = CONTENT_W;
   const HEADER_X = CONTENT_X;
-  const HEADER_H = 64;          // shorter than before
+  const HEADER_H = 56;                   // shorter band
   const HEADER_R = 16;
-  const HEADER_SIDE_PAD = 14;   // inside text padding
+  const HEADER_SIDE_PAD = 14;
 
-  // Center between card top and top of art
-  const headerY = Math.max(14, Math.round((AY - HEADER_H) / 2));
+  // Center the title band between the card top and the art top
+  const headerY = Math.max(12, Math.round((AY - HEADER_H) / 2));
   drawRoundRectShadow(ctx, HEADER_X, headerY, HEADER_W, HEADER_H, HEADER_R, headerStripeFill);
 
-  // Title + HP
+  // Title + HP (slightly smaller fonts to match the slimmer band)
   ctx.fillStyle = PALETTE.headerText;
   ctx.textBaseline = 'middle';
-  const midY = headerY + HEADER_H / 2;
+  const headerMidY = headerY + HEADER_H / 2;
 
-  ctx.font = `32px ${FONT_BOLD}`;          // slightly smaller to fit the shorter bar
-  ctx.fillText(name, HEADER_X + HEADER_SIDE_PAD, midY);
+  ctx.font = `30px ${FONT_BOLD}`;
+  ctx.fillText(name, HEADER_X + HEADER_SIDE_PAD, headerMidY);
 
   const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
-  ctx.font = `26px ${FONT_BOLD}`;
+  ctx.font = `24px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
-  ctx.fillText(hpText, HEADER_X + HEADER_W - HEADER_SIDE_PAD - hpW, midY);
+  ctx.fillText(hpText, HEADER_X + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
 
   // --- Art (keep white stroke) ---
-  roundRectPath(ctx, AX, AY, AW, AH, 22);
+  roundRectPath(ctx, AX, AY, AW, AH, ART_R);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, AW, AH, 22, PALETTE.artBackfill);
+  drawRoundRect(ctx, AX, AY, AW, AH, ART_R, PALETTE.artBackfill);
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
     const { dx, dy, dw, dh } = cover(img.width, img.height, AW, AH);
@@ -1334,21 +1335,21 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.restore();
   ctx.strokeStyle = PALETTE.artStroke;
   ctx.lineWidth = 3;
-  roundRectPath(ctx, AX, AY, AW, AH, 22);
+  roundRectPath(ctx, AX, AY, AW, AH, ART_R);
   ctx.stroke();
 
-  // --- Traits panel (same shared width) ---
+  // --- Traits panel (same wide width; semi-transparent) ---
   const TX = CONTENT_X;
-  const TY = AY + AH + 20;
+  const TY = AY + AH + 18;
   const TW = CONTENT_W;
-  const TH = H - TY - 92;
+  const TH = H - TY - 96;
   drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-  // Layout (2 cols)
+  // Layout (2 cols) — compact typography so it feels lighter than the big art
   const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
   const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
-  function layout(lineH = 18, titleH = 30, blockPad = 8) {
+  function layout(lineH = 16, titleH = 28, blockPad = 8) {
     const boxes = [];
     for (const cat of TRAIT_ORDER) {
       const items = (traits[cat] || []);
@@ -1361,7 +1362,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
       const rowsH = shown.length * lineH;
       const minRows = 34;
-      const boxH = blockPad + titleH + Math.max(rowsH + 10, minRows) + blockPad;
+      const boxH = blockPad + titleH + Math.max(rowsH + 8, minRows) + blockPad;
       boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
     }
     let yL = innerY, yR = innerY;
@@ -1379,23 +1380,24 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 
   let L = layout();
   if (L.usedH > (innerH - 12)) {
-    const scale = Math.max(0.8, (innerH - 12) / L.usedH);
-    L = layout(Math.max(14, Math.floor(18 * scale)), Math.max(26, Math.floor(30 * scale)), 6);
+    const scale = Math.max(0.85, (innerH - 12) / L.usedH);
+    L = layout(Math.max(14, Math.floor(16 * scale)), Math.max(24, Math.floor(28 * scale)), 6);
   }
 
   // Mini-cards (no outlines, centered text, squared-bottom tabs)
   const BUBBLE_R = 16;
   const BUBBLE_OVERLAP = 6;
-  const ROW_PAD_Y = 10;
+  const ROW_PAD_Y = 8;
 
   for (const b of L.placed) {
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
+
     const bubbleH = b.titleH + BUBBLE_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, bubbleH, BUBBLE_R, headerStripeFill);
 
-    // centered title
+    // centered title (tight)
     ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `19px ${FONT_BOLD}`;
+    ctx.font = `18px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
     const m = ctx.measureText(b.cat);
     const textH = (m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0);
@@ -1405,7 +1407,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     // rows
     let yy = b.y + bubbleH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `15px ${FONT_REG}`;
+    ctx.font = `14px ${FONT_REG}`;
     ctx.textBaseline = 'middle';
     for (const line of b.lines) {
       const lw = ctx.measureText(line).width;
