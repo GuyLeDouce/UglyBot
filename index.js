@@ -11,7 +11,8 @@ const {
   AttachmentBuilder,
   SlashCommandBuilder,
   REST,
-  Routes
+  Routes,
+  Events,
 } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
@@ -153,9 +154,11 @@ async function registerSlashCommands() {
 }
 
 // ===== READY =====
-client.on('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  try { await registerSlashCommands(); } catch (e) { console.error('Slash register error:', e.message); }
+client.once(Events.ClientReady, async (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}`);
+  try { await registerSlashCommands(); } catch (e) {
+    console.error('Slash register error:', e.message);
+  }
 });
 
 // ===== RANDOM CHARM REWARD =====
