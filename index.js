@@ -29,7 +29,7 @@ const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 const RENDER_SCALE = 3; // 1 = 750x1050 (old). 2 = 1500x2100 (sharper). Try 3 if file size is fine.
 const MASK_EPS = 0.75; // pixels
 // How much tighter to shave the bg corners than the normal card radius (in px on 750×1050)
-const BG_CORNER_TIGHTEN = 11; // try 8–12; increase if you still see flecks
+const BG_CORNER_TIGHTEN = 20; // try 8–12; increase if you still see flecks
 
 
 
