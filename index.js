@@ -1446,6 +1446,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
 }
 
 
+
 // ---------- drawing helpers ----------
 function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
 function roundRectPath(ctx, x, y, w, h, r) {
