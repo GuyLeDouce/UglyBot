@@ -1197,140 +1197,22 @@ function computeHpFromTraits(groupedTraits) {
   return { total, per };
 }
 
-  // ---------- Draw Traits panel ----------
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
+/* ──────────────────────────────────────────────────────────────────────────
+   Rounded-corner harmony (one set of radii everywhere) + tiny over-mask to
+   “eat” any fringe in the background corners.
+────────────────────────────────────────────────────────────────────────── */
+const RADIUS = {
+  card: 38,        // outer card mask
+  header: 16,      // title block
+  art: 26,         // NFT image
+  traitsPanel: 18, // semi-transparent panel
+  traitCard: 16,   // white mini-cards
+  pill: 22         // rarity pill
+};
+const MASK_EPS = 0.75; // px overdraw used in bg mask
 
-  // ===== Traits grid (taller tab/rows + perfect vertical centering) =====
-  const PAD = 12;
-  const innerX = TX + PAD, innerY = TY + PAD;
-  const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
-  const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
-
-  // Start a bit taller than before
-  let LINE_H   = 16;  // value row height (was 13)
-  let TITLE_H  = 24;  // type tab height (was 20)
-  let BLOCK_PAD = 7;  // inner padding inside each mini-card (was 5)
-
-  function build(startY = innerY, lineH = LINE_H, titleH = TITLE_H, blockPad = BLOCK_PAD) {
-    const boxes = [];
-    for (const cat of TRAIT_ORDER) {
-      const items = (traits[cat] || []);
-      if (!items.length) continue;
-
-      const lines = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
-      const shown  = lines.slice(0, 5);
-      const hidden = lines.length - shown.length;
-      if (hidden > 0) shown.push(`+${hidden} more`);
-
-      const rowsH = shown.length * lineH;
-      const minRows = 30; // keep a nice minimum
-      const boxH = blockPad + titleH + Math.max(rowsH + 6, minRows) + blockPad;
-
-      boxes.push({ cat, lines: shown, boxH, lineH: lineH, titleH: titleH, blockPad });
-    }
-
-    let yL = startY, yR = startY;
-    const placed = [];
-    for (const b of boxes) {
-      const left = yL <= yR;
-      const x = left ? innerX : innerX + COL_W + COL_GAP;
-      const y = left ? yL : yR;
-      placed.push({ ...b, x, y, w: COL_W });
-      if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
-    }
-    const usedH = Math.max(yL, yR) - startY;
-    return { placed, usedH };
-  }
-
-  // First pass: see how much space the grid needs
-  let L = build(innerY, LINE_H, TITLE_H, BLOCK_PAD);
-
-  // If it overflows, proportionally shrink to fit
-  if (L.usedH > innerH) {
-    const scale = Math.max(0.85, innerH / L.usedH);
-    LINE_H   = Math.max(14, Math.floor(LINE_H  * scale));
-    TITLE_H  = Math.max(20, Math.floor(TITLE_H * scale));
-    BLOCK_PAD = Math.max(6,  Math.floor(BLOCK_PAD * scale));
-    L = build(innerY, LINE_H, TITLE_H, BLOCK_PAD);
-  }
-
-  // Center vertically within the panel so top/bottom gaps match
-  const free = Math.max(0, innerH - L.usedH);
-  const offset = Math.floor(free / 2);
-  L = build(innerY + offset, LINE_H, TITLE_H, BLOCK_PAD);
-
-  // Draw the mini-cards (taller than before)
-  const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 2;
-  const ROW_PAD_Y = 6;
-
-  for (const b of L.placed) {
-    // Base card
-    drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
-
-    // Colored type tab (rounded top, squared bottom)
-    const tabH = b.titleH + BUBBLE_OVERLAP;
-    drawTopRoundedRect(ctx, b.x, b.y, b.w, tabH, BUBBLE_R, headerStripeFill);
-
-    // Type label (slightly larger)
-    ctx.fillStyle = PALETTE.traitTitleText;
-    ctx.font = `16px ${FONT_BOLD}`;
-    ctx.textBaseline = 'alphabetic';
-    const mt = ctx.measureText(b.cat);
-    const tH = (mt.actualBoundingBoxAscent || 0) + (mt.actualBoundingBoxDescent || 0);
-    const titleY = b.y + (tabH - tH) / 2 + (mt.actualBoundingBoxAscent || 0);
-    ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleY);
-
-    // Value rows (a touch taller)
-    let yy = b.y + tabH + ROW_PAD_Y;
-    ctx.fillStyle = PALETTE.traitValueText;
-    ctx.font = `13px ${FONT_REG}`;
-    ctx.textBaseline = 'middle';
-    for (const line of b.lines) {
-      const lw = ctx.measureText(line).width;
-      ctx.fillText(line, b.x + (b.w - lw) / 2, yy + Math.floor(b.lineH / 2));
-      yy += b.lineH;
-    }
-  }
-What this does
-
-Increases the Type tab height and value row height a bit (TITLE_H = 24, LINE_H = 16).
-
-If the grid would overflow, it scales down proportionally.
-
-Then it recenters the entire grid vertically inside the traits panel, so the gap from the top of the first pill to the panel edge equals the gap from the bottom of the last pill to the panel edge.
-
-No other parts of your file need to change. If you want the rows even taller, bump LINE_H to 17 and TITLE_H to 26 at the top of this block; everything will still center perfectly.
-
-
-
-
-
-
-
-Sources
-You said:
-Can we also adjust the radius of the corners so that those little miscolors in the corners are gone?
-
-
-ChatGPT said:
-Yep — the little “slivers” happen when the rounded mask you draw doesn’t quite match the bg asset’s corner radius. Easiest fix: use a single set of radii everywhere and slightly over-mask the background (clip a hair outside the canvas) so the mask “eats” any fringe.
-
-Drop these changes in:
-
-1) Add shared radii + mask fudge (near the top of renderSquigCard)
-js
-Copy
-Edit
-// Shared corner radii + tiny over-mask to eat edge fringes
-const RADIUS   = { card: 38, art: 26, traits: 18, header: 16, pill: 22, traitCard: 16 };
-const MASK_EPS = 0.75; // pixels
-2) Replace your drawCardBgWithoutBorder with this version
-js
-Copy
-Edit
 // --- Trimmed background drawing (cuts off the baked black border) ---
-async function drawCardBgWithoutBorder(ctx, W, H, tierLabel, cardCornerR = RADIUS.card) {
+async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   const bg = await loadBgByTier(tierLabel);
   if (bg) {
     // Trim a little from each edge of the *source* image to remove the black frame
@@ -1342,9 +1224,9 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel, cardCornerR = RADIU
     const sw = bg.width  - TRIM_X * 2;
     const sh = bg.height - TRIM_Y * 2;
 
-    // Clip with a *slightly larger* rounded rect so corner slivers get hidden
+    // Clip with a slightly *larger* rounded rect so corner slivers get hidden
     ctx.save();
-    roundRectPath(ctx, -MASK_EPS, -MASK_EPS, W + MASK_EPS * 2, H + MASK_EPS * 2, cardCornerR + 1);
+    roundRectPath(ctx, -MASK_EPS, -MASK_EPS, W + MASK_EPS * 2, H + MASK_EPS * 2, RADIUS.card + 1);
     ctx.clip();
     ctx.drawImage(bg, sx, sy, sw, sh, 0, 0, W, H);
     ctx.restore();
@@ -1353,7 +1235,6 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel, cardCornerR = RADIU
     ctx.fillRect(0, 0, W, H);
   }
 }
-
 
 // ===== TRAIT NORMALIZER =====
 const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
@@ -1403,7 +1284,15 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ===== RENDERER: bigger title, traits bottom = rarity pill center, image centered between =====
+/* ──────────────────────────────────────────────────────────────────────────
+   RENDERER
+   - Title bar centered horizontally (slightly taller).
+   - NFT image centered vertically between title and traits.
+   - Traits panel bottom aligned to rarity pill center.
+   - Trait mini-cards: squared-bottom colored tabs, taller titles & values.
+   - Content inside traits panel is vertically centered → equal top/bottom
+     spacing to the semi-transparent panel edges (even at max trait counts).
+────────────────────────────────────────────────────────────────────────── */
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
@@ -1419,27 +1308,26 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   const tierLabel = (rarityLabel && String(rarityLabel)) || hpToTierLabel(rankInfo?.hpTotal || 0);
   const headerStripeFill = headerStripe || stripeFromRarity(tierLabel);
 
-  // BG (cropped to remove baked border)
+  // Background (cropped + over-masked corners)
   await drawCardBgWithoutBorder(ctx, W, H, tierLabel);
 
   // ---------------- Layout knobs ----------------
-  const HEADER_W        = 620;     // a little wider
-  const HEADER_H        = 56;      // a little taller
-  const HEADER_R        = 16;
+  const HEADER_W        = 620;
+  const HEADER_H        = 56;
   const HEADER_SIDE_PAD = 16;
   const HEADER_Y        = 22;
 
-  const ART_W_MAX       = 560;     // max art size; will shrink if region is tight
-  const GAP_HEADER_ART  = 10;      // title → image
-  const GAP_ART_TRAITS  = 10;      // image → traits
+  const ART_W_MAX       = 560;   // upper bound; will shrink to fit
+  const GAP_HEADER_ART  = 10;
+  const GAP_ART_TRAITS  = 10;
 
-  // Rarity pill (we place it first so we can align traits-bottom to its center)
-  const PILL_H = 44;               // height of rarity badge
+  // Rarity pill (place first so we can use its center line)
+  const PILL_H = 44;
   const pillText = tierLabel;
   ctx.font = `20px ${FONT_BOLD}`;
-  const tW = ctx.measureText(pillText).width;
-  const PILL_PAD_X = 16, PILL_R = 20;
-  const pillW = tW + PILL_PAD_X * 2;
+  const pTextW = ctx.measureText(pillText).width;
+  const PILL_PAD_X = 16;
+  const pillW = pTextW + PILL_PAD_X * 2;
   const pillX = W - 48 - pillW;
   const pillY = H - 48 - PILL_H;
   const pillCenterY = pillY + PILL_H / 2;
@@ -1462,34 +1350,33 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.fillText(hpText, headerX + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
 
   // ---------- Traits panel: bottom aligned to pill center ----------
-  const TRAITS_W = HEADER_W;                    // match header width
-  const headerBottom = HEADER_Y + HEADER_H;     // top bound for the mid region
-  const traitsBottom = pillCenterY;             // requested alignment
+  const TRAITS_W = HEADER_W;                // match the title width
+  const headerBottom = HEADER_Y + HEADER_H;
+  const traitsBottom = pillCenterY;
 
-  // First estimate a reasonable traits height (will shrink if needed)
-  let TH = Math.round((traitsBottom - headerBottom) * 0.38); // occupy ~38% of the mid region
-  TH = Math.max(TH, 220);                                    // never too tiny
+  // Initial traits height guess (will adapt)
+  let TH = Math.round((traitsBottom - headerBottom) * 0.40);
+  TH = Math.max(TH, 230);
 
   const TX = Math.round((W - TRAITS_W) / 2);
-  const TY = traitsBottom - TH;                              // bottom anchored to pill center
+  const TY = traitsBottom - TH;             // anchor bottom to pill center
   const TW = TRAITS_W;
 
-  // ---------- Art: centered vertically between title and traits ----------
-  const midRegion = TY - headerBottom;                       // space between title and traits
-  let ART_W = Math.min(ART_W_MAX, W - 2 * (headerX - 20));   // keep comfortable side margins
+  // ---------- Art: centered between title and traits ----------
+  const midRegion = TY - headerBottom;
+  let ART_W = Math.min(ART_W_MAX, W - 2 * (headerX - 20));
   let ART_H = ART_W;
 
-  // ensure art fits with gaps
   const maxArtHeight = midRegion - (GAP_HEADER_ART + GAP_ART_TRAITS);
-  if (ART_H > maxArtHeight) ART_H = Math.max(380, Math.floor(maxArtHeight)); // clamp but keep decent size
+  if (ART_H > maxArtHeight) ART_H = Math.max(380, Math.floor(maxArtHeight));
+  ART_W = ART_H; // keep square
   const AX = Math.round((W - ART_W) / 2);
-  const AY = Math.round(headerBottom + (midRegion - ART_H) / 2);             // vertical centering
+  const AY = Math.round(headerBottom + (midRegion - ART_H) / 2);
 
   // ---------- Draw Art ----------
-  const ART_R = 24;
-  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
+  roundRectPath(ctx, AX, AY, ART_W, ART_H, RADIUS.art);
   ctx.save(); ctx.clip();
-  drawRoundRect(ctx, AX, AY, ART_W, ART_H, ART_R, PALETTE.artBackfill);
+  drawRoundRect(ctx, AX, AY, ART_W, ART_H, RADIUS.art, PALETTE.artBackfill);
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
     const { dx, dy, dw, dh } = cover(img.width, img.height, ART_W, ART_H);
@@ -1498,42 +1385,35 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.restore();
   ctx.strokeStyle = PALETTE.artStroke;
   ctx.lineWidth = 3;
-  roundRectPath(ctx, AX, AY, ART_W, ART_H, ART_R);
+  roundRectPath(ctx, AX, AY, ART_W, ART_H, RADIUS.art);
   ctx.stroke();
 
-  // ---------- Draw Traits panel ----------
-  drawRoundRect(ctx, TX, TY, TW, TH, 16, hexToRgba(PALETTE.traitsPanelBg, 0.58));
+  // ---------- Traits panel ----------
+  drawRoundRect(ctx, TX, TY, TW, TH, RADIUS.traitsPanel, hexToRgba(PALETTE.traitsPanelBg, 0.58));
 
-  // ===== Traits grid (taller tab/rows + perfect vertical centering) =====
-  const PAD = 12;
-  const innerX = TX + PAD, innerY = TY + PAD;
-  const innerW = TW - PAD * 2, innerH = TH - PAD * 2;
+  // Layout inside traits panel
+  const PAD = 12, innerX = TX + PAD, innerY = TY + PAD, innerW = TW - PAD * 2, innerH = TH - PAD * 2;
   const COL_GAP = 12, COL_W = (innerW - COL_GAP) / 2;
 
-  // Start a bit taller than before
-  let LINE_H   = 16;  // value row height (was 13)
-  let TITLE_H  = 24;  // type tab height (was 20)
-  let BLOCK_PAD = 7;  // inner padding inside each mini-card (was 5)
-
-  function build(startY = innerY, lineH = LINE_H, titleH = TITLE_H, blockPad = BLOCK_PAD) {
+  // Taller titles & values by default; auto-shrink if needed
+  function layout(lineH = 15, titleH = 22, blockPad = 6) {
     const boxes = [];
     for (const cat of TRAIT_ORDER) {
       const items = (traits[cat] || []);
       if (!items.length) continue;
-
       const lines = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
-      const shown  = lines.slice(0, 5);
+      const shown = lines.slice(0, 5);
       const hidden = lines.length - shown.length;
       if (hidden > 0) shown.push(`+${hidden} more`);
 
       const rowsH = shown.length * lineH;
-      const minRows = 30; // keep a nice minimum
-      const boxH = blockPad + titleH + Math.max(rowsH + 6, minRows) + blockPad;
-
-      boxes.push({ cat, lines: shown, boxH, lineH: lineH, titleH: titleH, blockPad });
+      const minRows = 30; // keeps pills comfortably tall
+      const boxH = blockPad + titleH + Math.max(rowsH + 8, minRows) + blockPad;
+      boxes.push({ cat, lines: shown, boxH, lineH, titleH, blockPad });
     }
 
-    let yL = startY, yR = startY;
+    // Greedy column packing
+    let yL = 0, yR = 0;
     const placed = [];
     for (const b of boxes) {
       const left = yL <= yR;
@@ -1542,41 +1422,40 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       placed.push({ ...b, x, y, w: COL_W });
       if (left) yL += b.boxH + COL_GAP; else yR += b.boxH + COL_GAP;
     }
-    const usedH = Math.max(yL, yR) - startY;
+    const usedH = Math.max(yL, yR) - COL_GAP; // last add overshoots by one gap
     return { placed, usedH };
   }
 
-  // First pass: see how much space the grid needs
-  let L = build(innerY, LINE_H, TITLE_H, BLOCK_PAD);
-
-  // If it overflows, proportionally shrink to fit
+  let L = layout();
+  // If we overflow, proportionally shrink fonts/padding but keep proportions pleasant
   if (L.usedH > innerH) {
-    const scale = Math.max(0.85, innerH / L.usedH);
-    LINE_H   = Math.max(14, Math.floor(LINE_H  * scale));
-    TITLE_H  = Math.max(20, Math.floor(TITLE_H * scale));
-    BLOCK_PAD = Math.max(6,  Math.floor(BLOCK_PAD * scale));
-    L = build(innerY, LINE_H, TITLE_H, BLOCK_PAD);
+    const scale = Math.max(0.80, innerH / L.usedH);
+    L = layout(
+      Math.max(13, Math.floor(15 * scale)), // lineH
+      Math.max(20, Math.floor(22 * scale)), // titleH
+      Math.max(5,  Math.floor(6  * scale))  // blockPad
+    );
   }
 
-  // Center vertically within the panel so top/bottom gaps match
-  const free = Math.max(0, innerH - L.usedH);
-  const offset = Math.floor(free / 2);
-  L = build(innerY + offset, LINE_H, TITLE_H, BLOCK_PAD);
+  // Center the *entire* stack vertically in the panel → equal top/bottom spacing
+  const yStart = innerY + Math.round((innerH - L.usedH) / 2);
+  // Reposition placed boxes by adding yStart
+  const placed = L.placed.map(b => ({ ...b, y: b.y + yStart }));
 
-  // Draw the mini-cards (taller than before)
-  const BUBBLE_R = 16;
-  const BUBBLE_OVERLAP = 2;
+  // Draw trait mini-cards with squared-bottom tabs
+  const BUBBLE_R = RADIUS.traitCard;
+  const TAB_OVERLAP = 2;
   const ROW_PAD_Y = 6;
 
-  for (const b of L.placed) {
-    // Base card
+  for (const b of placed) {
+    // White card
     drawRoundRect(ctx, b.x, b.y, b.w, b.boxH, BUBBLE_R, PALETTE.traitCardFill);
 
-    // Colored type tab (rounded top, squared bottom)
-    const tabH = b.titleH + BUBBLE_OVERLAP;
+    // Colored tab — rounded top, flat bottom
+    const tabH = b.titleH + TAB_OVERLAP;
     drawTopRoundedRect(ctx, b.x, b.y, b.w, tabH, BUBBLE_R, headerStripeFill);
 
-    // Type label (slightly larger)
+    // Title (centered)
     ctx.fillStyle = PALETTE.traitTitleText;
     ctx.font = `16px ${FONT_BOLD}`;
     ctx.textBaseline = 'alphabetic';
@@ -1585,7 +1464,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
     const titleY = b.y + (tabH - tH) / 2 + (mt.actualBoundingBoxAscent || 0);
     ctx.fillText(b.cat, b.x + (b.w - mt.width) / 2, titleY);
 
-    // Value rows (a touch taller)
+    // Values (centered)
     let yy = b.y + tabH + ROW_PAD_Y;
     ctx.fillStyle = PALETTE.traitValueText;
     ctx.font = `13px ${FONT_REG}`;
@@ -1603,8 +1482,8 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, H - 34);
 
-  // Rarity pill (draw last)
-  drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, PILL_R, headerStripeFill);
+  // Rarity pill (last)
+  drawRoundRect(ctx, pillX, pillY, pillW, PILL_H, RADIUS.pill, headerStripeFill);
   ctx.fillStyle = '#000000';
   ctx.textBaseline = 'middle';
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
