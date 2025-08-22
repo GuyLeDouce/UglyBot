@@ -1207,7 +1207,6 @@ const RADIUS = {
   traitCard: 16,   // white mini-cards
   pill: 22         // rarity pill
 };
-const MASK_EPS = 0.75; // px overdraw used in bg mask
 
 // --- Trimmed background drawing (cuts off the baked black border) ---
 async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
