@@ -121,12 +121,24 @@ let walletLinks = {};
 if (fs.existsSync('walletLinks.json')) {
   walletLinks = JSON.parse(fs.readFileSync('walletLinks.json'));
 }
+// atomic write to preserve storage safely across bot updates
+function saveWalletLinksSafe(obj) {
+  try {
+    fs.writeFileSync('walletLinks.tmp.json', JSON.stringify(obj, null, 2));
+    if (fs.existsSync('walletLinks.json')) {
+      fs.copyFileSync('walletLinks.json', 'walletLinks.backup.json');
+    }
+    fs.renameSync('walletLinks.tmp.json', 'walletLinks.json');
+  } catch (e) {
+    console.error('walletLinks save error:', e.message);
+  }
+}
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
 async function registerSlashCommands() {
   try {
     if (!DISCORD_CLIENT_ID || !GUILD_ID) {
-      console.warn('⚠️ DISCORD_CLIENT_ID or GUILD_ID missing; cannot register /card.');
+      console.warn('⚠️ DISCORD_CLIENT_ID or GUILD_ID missing; cannot register slash commands.');
       return;
     }
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -137,7 +149,25 @@ async function registerSlashCommands() {
         .setDescription(`Create a Squigs trading card JPEG (${Date.now()})`)
         .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
         .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
-        .toJSON()
+        .toJSON(),
+      // NEW: /linkwallet
+      new SlashCommandBuilder()
+        .setName('linkwallet')
+        .setDescription('Link your Ethereum wallet for Ugly Bot')
+        .addStringOption(o => o.setName('address').setDescription('Ethereum address (0x...)').setRequired(true))
+        .toJSON(),
+      // NEW: /mycard
+      new SlashCommandBuilder()
+        .setName('mycard')
+        .setDescription('Create a random Squig Card from an NFT in your linked wallet')
+        .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
+        .toJSON(),
+      // NEW: /myhp
+      new SlashCommandBuilder()
+        .setName('myhp')
+        .setDescription('Get total HP for all of your Squigs')
+        .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
+        .toJSON(),
     ];
 
     const data = await rest.put(
@@ -160,7 +190,6 @@ client.once(Events.ClientReady, async (c) => {
     console.error('Slash register error:', e.message);
   }
 });
-
 // ===== RANDOM CHARM REWARD =====
 function maybeRewardCharm(userId, username) {
   const roll = Math.floor(Math.random() * 200);
@@ -190,24 +219,25 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(1).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // !linkwallet
+  // !linkwallet — now deprecated in favor of /linkwallet
   if (command === 'linkwallet') {
     const address = args[0];
+    if (!address) return message.reply('ℹ️ `!linkwallet` is deprecated. Use **/linkwallet** instead.');
     if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      return message.reply('❌ Please enter a valid Ethereum wallet address.');
+      return message.reply('❌ Please enter a valid Ethereum wallet address.\nUse **/linkwallet** instead.');
     }
     walletLinks[message.author.id] = address;
-    fs.writeFileSync('walletLinks.json', JSON.stringify(walletLinks, null, 2));
+    saveWalletLinksSafe(walletLinks);
     try { await message.delete(); } catch (err) {
       console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message);
     }
-    return message.channel.send({ content: '✅ Wallet linked.', allowedMentions: { repliedUser: false } });
+    return message.channel.send({ content: '✅ Wallet linked (legacy). Prefer **/linkwallet** next time.', allowedMentions: { repliedUser: false } });
   }
 
   // !ugly
   if (command === 'ugly') {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${UGLY_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -243,7 +273,7 @@ client.on('messageCreate', async (message) => {
   // !monster
   if (command === 'monster') {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${MONSTER_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -279,7 +309,7 @@ client.on('messageCreate', async (message) => {
   // !myuglys with pagination
   if (command === 'myuglys') {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${UGLY_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -351,7 +381,7 @@ client.on('messageCreate', async (message) => {
   // !mymonsters with pagination
   if (command === 'mymonsters') {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${MONSTER_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -423,7 +453,7 @@ client.on('messageCreate', async (message) => {
   // !squig (random from linked wallet)
   if (command === 'squig' && args.length === 0) {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -492,7 +522,7 @@ client.on('messageCreate', async (message) => {
   // !mysquigs with pagination
   if (command === 'mysquigs') {
     const wallet = walletLinks[message.author.id];
-    if (!wallet) return message.reply('❌ Please link your wallet first using `!linkwallet 0x...`');
+    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
 
     const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     try {
@@ -569,10 +599,141 @@ client.on('messageCreate', async (message) => {
     }
   }
 });
-
-// ===== SLASH HANDLER: /card =====
+// ===== SLASH HANDLER: /card + new commands =====
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  // NEW: /linkwallet
+  if (interaction.commandName === 'linkwallet') {
+    const address = interaction.options.getString('address');
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      return interaction.reply({ content: '❌ Invalid Ethereum address. Please paste a 0x… address.', ephemeral: true });
+    }
+    walletLinks[interaction.user.id] = address;
+    saveWalletLinksSafe(walletLinks);
+    return interaction.reply({ content: `✅ Linked wallet: \`${address}\``, ephemeral: true });
+  }
+
+  // NEW: /mycard (random Squig card from linked wallet or override)
+  if (interaction.commandName === 'mycard') {
+    try {
+      await interaction.deferReply();
+      const override = interaction.options.getString('address') || null;
+      const wallet = override || walletLinks[interaction.user.id];
+      if (!wallet) {
+        await interaction.editReply('❌ Please link your wallet first with `/linkwallet 0x...`');
+        return;
+      }
+
+      // pull owned Squigs via Etherscan tx crawl (same as legacy)
+      const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
+      const res = await fetchWithRetry(url);
+      const data = await res.json();
+      const owned = new Set();
+      for (const tx of data.result) {
+        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
+        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
+      }
+      const tokenArray = Array.from(owned);
+      if (tokenArray.length === 0) {
+        await interaction.editReply('😢 No Squigs found in that wallet.');
+        return;
+      }
+      const tokenId = tokenArray[Math.floor(Math.random() * tokenArray.length)];
+
+      // Strict mint check (reuses helper below)
+      const minted = await isSquigMintedStrict(tokenId);
+      if (minted !== true) {
+        const msg = minted === 'UNVERIFIED'
+          ? `⏳ I can’t verify Squig #${tokenId} right now. Try again soon—or mint at **https://squigs.io**`
+          : notMintedLine(tokenId);
+        await interaction.editReply(msg);
+        return;
+      }
+
+      const meta = await getNftMetadataAlchemy(tokenId);
+      const { attrs } = await getTraitsForToken(meta, tokenId);
+      const traits = normalizeTraits(attrs);
+
+      const displayName = meta?.metadata?.name || `Squig #${tokenId}`;
+      const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+
+      const hpAgg   = computeHpFromTraits(traits);
+      const hpTotal = hpAgg.total || 0;
+      const tier    = hpToTierLabel(hpTotal);
+      const stripe  = hpToStripe(hpTotal);
+
+      const buffer = await renderSquigCard({
+        name: displayName,
+        tokenId,
+        imageUrl,
+        traits,
+        rankInfo: { hpTotal, per: hpAgg.per },
+        rarityLabel: tier,
+        headerStripe: stripe
+      });
+
+      const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
+      await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+
+    } catch (err) {
+      console.error('❌ /mycard error:', err);
+      if (interaction.deferred) {
+        await interaction.editReply('⚠️ Something went wrong building that card.');
+      } else {
+        await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
+      }
+    }
+    return;
+  }
+
+  // NEW: /myhp (sum HP of all Squigs in linked/override wallet)
+  if (interaction.commandName === 'myhp') {
+    try {
+      await interaction.deferReply();
+      const override = interaction.options.getString('address') || null;
+      const wallet = override || walletLinks[interaction.user.id];
+      if (!wallet) {
+        await interaction.editReply('❌ Please link your wallet first with `/linkwallet 0x...`');
+        return;
+      }
+
+      const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=200&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
+      const res = await fetchWithRetry(url);
+      const data = await res.json();
+      const owned = new Set();
+      for (const tx of data.result) {
+        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
+        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
+      }
+      const tokenArray = Array.from(owned);
+      if (tokenArray.length === 0) {
+        await interaction.editReply('😢 No Squigs found in that wallet.');
+        return;
+      }
+
+      let totalHp = 0;
+      for (const tokenId of tokenArray) {
+        const meta = await getNftMetadataAlchemy(tokenId);
+        const { attrs } = await getTraitsForToken(meta, tokenId);
+        const traits = normalizeTraits(attrs);
+        const { total } = computeHpFromTraits(traits);
+        totalHp += total || 0;
+      }
+
+      await interaction.editReply(`💪 Total Squig HP for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
+    } catch (err) {
+      console.error('❌ /myhp error:', err);
+      if (interaction.deferred) {
+        await interaction.editReply('⚠️ Error calculating total HP.');
+      } else {
+        await interaction.reply({ content: '⚠️ Error calculating total HP.', ephemeral: true });
+      }
+    }
+    return;
+  }
+
+  // ===== ORIGINAL /card HANDLER (unchanged except surrounding additions) =====
   if (interaction.commandName !== 'card') return;
 
   const tokenId = interaction.options.getInteger('token_id');
@@ -617,9 +778,9 @@ client.on('interactionCreate', async (interaction) => {
       tokenId,
       imageUrl,
       traits,
-      rankInfo: { hpTotal, per: hpAgg.per }, // shows HP in header; per-trait HP in rows
-      rarityLabel: tier,                     // kept for renderer fallback
-      headerStripe: stripe                   // actual fill color used
+      rankInfo: { hpTotal, per: hpAgg.per },
+      rarityLabel: tier,
+      headerStripe: stripe
     });
 
     const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
@@ -637,7 +798,6 @@ client.on('interactionCreate', async (interaction) => {
 
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
-
 // ===== Helper funcs (metadata) =====
 async function getNftMetadataAlchemy(tokenId) {
   const url =
@@ -812,27 +972,14 @@ async function fetchOpenSeaTraits(tokenId) {
   return [];
 }
 
-// ===== HP-BASED TIERS =====
-// Observed non-legend range with your current HP_TABLE:
+// ===== HP-BASED TIERS + TABLE (FULL from your original) =====
 const NONLEG_HP_MIN = 455;   // lowest non-legend observed
 const NONLEG_HP_MAX = 891;   // highest non-legend observed
-
-// Legend 1/1s:
 const LEGEND_HP = 1000;
-
-// Percentile-based cutpoints from the dataset:
 const CUT_UNCOMMON = 608; // ~45th percentile
 const CUT_RARE     = 656; // ~70th percentile
 const CUT_LEGEND   = 742; // ~95th percentile
 
-/**
- * Map HP to a rarity label.
- * - "Mythic" = 1/1 Legends only (HP = 1000)
- * - "Legendary" = top ~5% of non-Legend scores
- * - "Rare" = next ~25%
- * - "Uncommon" = next ~25% (up to ~70th pct)
- * - "Common" = the rest
- */
 function hpToTierLabel(hp) {
   if (hp >= LEGEND_HP) return 'Mythic';
   if (hp >= CUT_LEGEND) return 'Legendary';
@@ -841,355 +988,65 @@ function hpToTierLabel(hp) {
   return 'Common';
 }
 
-
-
-// ===== COLORS / THEME =====
-const PALETTE = {
-  // Frame colors are not filled anymore (bg image covers card); we keep a black outline.
-  cardBg: '#242623',
-  frameStroke: '#000000',
-  headerText: '#0F172A',
-  rarityStripeByTier: {
-    Mythic:   '#896936',
-    Legendary:'#FFF1AE',
-    Rare:     '#7ADDC0',
-    Uncommon: '#7A83BF',
-    Common:   '#B0DEEE',
-  },
-  artBackfill: '#b9dded',
-  artStroke:   '#F9FAFB',
-  traitsPanelBg:     '#b9dded', // drawn with alpha for transparency
-  traitsPanelStroke: '#000000',
-  traitCardFill:     '#FFFFFF',
-  traitCardStroke:   '#000000',
-  traitCardShadow:   '#0000001A',
-  traitTitleText:    '#222625',
-  traitValueText:    '#000000',
-  footerText:        '#212524',
-};
-
-// --- Background images by tier ---
-// Mythic uses the special (LEGENDARY BG) art; all other tiers use Stock BG.
-const CARD_BG_URLS = {
-  Mythic: [
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true'
-  ],
-  Legendary: [
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
-  ],
-  Rare: [
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
-  ],
-  Uncommon: [
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
- ],
-  Common: [
-    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
-  ]
-};
-
-
-function stripeFromRarity(label) {
-  return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
-}
-function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
-
-// Local font aliases
-const FONT_REG =
-  (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
-  (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
-const FONT_BOLD =
-  (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
-  (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
-
-// ====== HP SCORE TABLE + helpers ======
 const HP_TABLE = {
   "Legend": {
-    "Beige Giant Ears": 1000,
-    "Beige Giant Head": 1000,
-    "Beige Half Cut": 1000,
-    "Beige Malformed": 1000,
-    "Beige Zombie": 1000,
-    "Brown Yeti": 1000,
-    "Cornhuglyio": 1000,
-    "Dark Brown Giant Ears": 1000,
-    "Dark Brown Giant Head": 1000,
-    "Dark Brown Half Cut": 1000,
-    "Dark Brown Malformed": 1000,
-    "Dark Brown Zombie": 1000,
-    "Gold Halo": 1000,
-    "Green Slime": 1000,
-    "Green Zombie": 1000,
-    "Monochrome": 1000,
-    "Night": 1000,
-    "Orange Zombie": 1000,
-    "Pikachugly": 1000,
-    "Purple Yeti": 1000,
-    "Purple Zombie": 1000,
-    "Robot": 1000,
-    "Silver": 1000,
-    "Sulks Elf": 1000,
-    "Yellow Slime": 1000
+    "Beige Giant Ears": 1000, "Beige Giant Head": 1000, "Beige Half Cut": 1000, "Beige Malformed": 1000, "Beige Zombie": 1000,
+    "Brown Yeti": 1000, "Cornhuglyio": 1000, "Dark Brown Giant Ears": 1000, "Dark Brown Giant Head": 1000, "Dark Brown Half Cut": 1000,
+    "Dark Brown Malformed": 1000, "Dark Brown Zombie": 1000, "Gold Halo": 1000, "Green Slime": 1000, "Green Zombie": 1000,
+    "Monochrome": 1000, "Night": 1000, "Orange Zombie": 1000, "Pikachugly": 1000, "Purple Yeti": 1000,
+    "Purple Zombie": 1000, "Robot": 1000, "Silver": 1000, "Sulks Elf": 1000, "Yellow Slime": 1000
   },
-  "Type": {
-    "Unknown": 50,
-    "Squigs": 47,
-    "Elf Squigs": 45
-  },
+  "Type": { "Unknown": 50, "Squigs": 47, "Elf Squigs": 45 },
   "Background": {
-    "Unknown": 150,
-    "Dark Blue Galaxy": 147,
-    "Grey Boom": 144,
-    "Grey Splash": 141,
-    "Blue Splash": 138,
-    "Purple Splash": 136,
-    "Light Blue Boom": 134,
-    "Yellow Splash": 132,
-    "Green Boom": 130,
-    "Light Blue Splash": 128,
-    "Dark Blue Boom": 126,
-    "Dark Blue Splash": 124,
-    "Green Splash": 122,
-    "Blue Boom": 120,
-    "Purple Boom": 118,
-    "Yellow Boom": 116,
-    "Green": 114,
-    "Purple": 112,
-    "Dark Blue": 110,
-    "Light Blue": 108,
-    "Yellow": 106,
-    "Grey": 104,
-    "Blue": 102
+    "Unknown": 150, "Dark Blue Galaxy": 147, "Grey Boom": 144, "Grey Splash": 141, "Blue Splash": 138, "Purple Splash": 136,
+    "Light Blue Boom": 134, "Yellow Splash": 132, "Green Boom": 130, "Light Blue Splash": 128, "Dark Blue Boom": 126,
+    "Dark Blue Splash": 124, "Green Splash": 122, "Blue Boom": 120, "Purple Boom": 118, "Yellow Boom": 116,
+    "Green": 114, "Purple": 112, "Dark Blue": 110, "Light Blue": 108, "Yellow": 106, "Grey": 104, "Blue": 102
   },
   "Body": {
-    "Beavis Tee": 180,
-    "Butthead Tee": 178,
-    "Blue Sexy Bowling Shirt": 176,
-    "Unknown": 174,
-    "Super Ugly": 172,
-    "Airplane Life Jacket": 170,
-    "Cowboy Jacket": 168,
-    "Futuristic Armor": 166,
-    "Astronaut": 164,
-    "Jedi": 162,
-    "Sexy Bowling Shirt": 160,
-    "Yellow Jersey": 158,
-    "Rick Laser": 156,
-    "Acupuncture": 154,
-    "Ugly Food Shirt": 152,
-    "Suit": 150,
-    "Ugly Scene": 148,
-    "Ugly Side of the Moon": 146,
-    "Basketball Jersey": 144,
-    "Mario Overalls": 142,
-    "Pet Lover Bag": 140,
-    "UGS Jacket": 138,
-    "Ninja": 136,
-    "Astronaut Blue": 134,
-    "Maple Leafs 1967 Tracksuit": 132,
-    "Caveman": 130,
-    "White and Green Jacket": 128,
-    "Maple Leafs 1967": 126,
-    "Blue Wetsuit": 124,
-    "Cheerleader": 122,
-    "Sports Bra": 120,
-    "Ugly Army Tank": 118,
-    "Red Cowboy": 116,
-    "Blue Cowboy": 114,
-    "Gardener Overalls": 112,
-    "PAAF White Tee": 110,
-    "Indian": 108,
-    "Red Baseball Shirt": 106,
-    "Camo Wetsuit": 104,
-    "Grey Bike Jersey": 102,
-    "Prison Tee": 100,
-    "Blue Baseball Jersey": 98,
-    "Born Ugly Tee Tank": 96,
-    "Red Varsity": 94,
-    "White Ugly Tank": 92,
-    "Long Sleeve Flame Tee": 90,
-    "Monster Tee Bag": 88,
-    "Yellow Tracksuit": 86,
-    "Black Puffy": 84,
-    "Bowling Shirt": 82,
-    "Grease Tank": 80,
-    "Light Green Tee": 78,
-    "White and Blue Jacket": 76,
-    "Green Varsity": 74,
-    "Purple Hoodie": 72,
-    "Beige Jacket": 70,
-    "420 Purple Tracksuit": 68,
-    "Beige Fisherman Jacket": 66,
-    "Grey Fisherman Jacket": 64,
-    "Pink Jacket": 62,
-    "Borat": 60,
-    "Blue Overalls": 58,
-    "Flame Tee Tank": 56,
-    "Hawaiian Shirt": 54,
-    "Holey Tee": 52,
-    "Yellow Puffy": 50,
-    "Ugly Tank on Pink": 49,
-    "Purple Shirt": 48,
-    "Tattooed Body": 47,
-    "Naked": 46,
-    "Green Sweater": 45,
-    "Black Sweater": 44,
-    "Born Ugly Tee": 43,
-    "Purple Tee": 42,
-    "White Tee": 41,
-    "Green Tee": 40
+    "Beavis Tee": 180, "Butthead Tee": 178, "Blue Sexy Bowling Shirt": 176, "Unknown": 174, "Super Ugly": 172, "Airplane Life Jacket": 170,
+    "Cowboy Jacket": 168, "Futuristic Armor": 166, "Astronaut": 164, "Jedi": 162, "Sexy Bowling Shirt": 160, "Yellow Jersey": 158,
+    "Rick Laser": 156, "Acupuncture": 154, "Ugly Food Shirt": 152, "Suit": 150, "Ugly Scene": 148, "Ugly Side of the Moon": 146,
+    "Basketball Jersey": 144, "Mario Overalls": 142, "Pet Lover Bag": 140, "UGS Jacket": 138, "Ninja": 136, "Astronaut Blue": 134,
+    "Maple Leafs 1967 Tracksuit": 132, "Caveman": 130, "White and Green Jacket": 128, "Maple Leafs 1967": 126, "Blue Wetsuit": 124,
+    "Cheerleader": 122, "Sports Bra": 120, "Ugly Army Tank": 118, "Red Cowboy": 116, "Blue Cowboy": 114, "Gardener Overalls": 112,
+    "PAAF White Tee": 110, "Indian": 108, "Red Baseball Shirt": 106, "Camo Wetsuit": 104, "Grey Bike Jersey": 102, "Prison Tee": 100,
+    "Blue Baseball Jersey": 98, "Born Ugly Tee Tank": 96, "Red Varsity": 94, "White Ugly Tank": 92, "Long Sleeve Flame Tee": 90,
+    "Monster Tee Bag": 88, "Yellow Tracksuit": 86, "Black Puffy": 84, "Bowling Shirt": 82, "Grease Tank": 80, "Light Green Tee": 78,
+    "White and Blue Jacket": 76, "Green Varsity": 74, "Purple Hoodie": 72, "Beige Jacket": 70, "420 Purple Tracksuit": 68,
+    "Beige Fisherman Jacket": 66, "Grey Fisherman Jacket": 64, "Pink Jacket": 62, "Borat": 60, "Blue Overalls": 58, "Flame Tee Tank": 56,
+    "Hawaiian Shirt": 54, "Holey Tee": 52, "Yellow Puffy": 50, "Ugly Tank on Pink": 49, "Purple Shirt": 48, "Tattooed Body": 47,
+    "Naked": 46, "Green Sweater": 45, "Black Sweater": 44, "Born Ugly Tee": 43, "Purple Tee": 42, "White Tee": 41, "Green Tee": 40
   },
   "Eyes": {
-    "Unknown": 80,
-    "Bionic": 78,
-    "Bionic Lashes": 76,
-    "Angry Cyclops": 74,
-    "Sleepy Trio": 72,
-    "Angry Cyclops Lashes": 70,
-    "Angry Trio": 68,
-    "Angry Trio Lashes": 66,
-    "Cyclops": 64,
-    "Cyclops Lashes": 62,
-    "Trio": 61,
-    "Trio Lashes": 60
+    "Unknown": 80, "Bionic": 78, "Bionic Lashes": 76, "Angry Cyclops": 74, "Sleepy Trio": 72, "Angry Cyclops Lashes": 70,
+    "Angry Trio": 68, "Angry Trio Lashes": 66, "Cyclops": 64, "Cyclops Lashes": 62, "Trio": 61, "Trio Lashes": 60
   },
   "Head": {
-    "Butthead Hair": 280,
-    "Cape": 277,
-    "Paper bag": 274,
-    "Beavis Hair": 271,
-    "Hairball Z": 268,
-    "Buoy": 265,
-    "Sheriff": 262,
-    "Human Air": 259,
-    "VR Headset": 256,
-    "Tyre": 253,
-    "Captured Piranha": 250,
-    "Slasher": 247,
-    "Crown": 244,
-    "Unknown": 241,
-    "UGS Delivery": 238,
-    "Blindfold": 235,
-    "Headphones": 232,
-    "Hood": 229,
-    "Indian": 226,
-    "Diving Mask": 223,
-    "Lobster": 220,
-    "Green Visor": 217,
-    "Acupuncture": 215,
-    "Basketball": 213,
-    "Elf Human Air": 211,
-    "Watermelon": 209,
-    "Elf Hood": 207,
-    "Flower Power": 205,
-    "Long Hair": 203,
-    "Beer": 201,
-    "Bunny": 199,
-    "Imposter Mask": 197,
-    "Fro Comb": 195,
-    "Halo": 193,
-    "Knife": 191,
-    "Night Vision": 189,
-    "Proud to be Ugly": 187,
-    "Dinomite": 185,
-    "Purr Paw": 183,
-    "HeliHat": 181,
-    "I Need TP": 179,
-    "Panda Bike Helmet": 177,
-    "Pot Head": 175,
-    "Visor with Hair": 173,
-    "Rainbow": 171,
-    "Space Brain": 169,
-    "Blonde Fro Comb": 167,
-    "Zeus Hand": 165,
-    "Captain": 163,
-    "Pirate": 161,
-    "Ski Mask": 159,
-    "Dread Cap": 157,
-    "Boom Bucket": 155,
-    "Baseball": 153,
-    "Green Cap": 151,
-    "Honey Pot": 149,
-    "Pomade": 147,
-    "Bear Fur Hat": 145,
-    "Ice Cream": 143,
-    "Rastalocks": 141,
-    "3D": 139,
-    "Trucker": 137,
-    "Umbrella Hat": 135,
-    "Golfs": 133,
-    "Green Ugly": 131,
-    "Pink Beanie": 129,
-    "Rice Dome": 127,
-    "Head Canoe": 125,
-    "Brain Bucket": 123,
-    "Fiesta": 121,
-    "Cactus": 119,
-    "Fire": 117,
-    "Floral": 115,
-    "Green Mountie": 113,
-    "Lemon Bucket": 111,
-    "Notlocks": 109,
-    "90's blonde": 107,
-    "Bandana": 105,
-    "Cowboy": 103,
-    "Mountie": 101,
-    "Yellow Beanie": 99,
-    "90's Pink": 97,
-    "Black Ugly": 95,
-    "Twintails": 93,
-    "Grey Cap": 91,
-    "Cube Cut": 89,
-    "Yellow Twintails": 87,
-    "Afro": 85,
-    "Green Beanie": 83,
-    "Parted": 81,
-    "Tin Topper": 79,
-    "Bald": 77,
-    "Blond Punk": 75,
-    "Purple Punk": 73
+    "Butthead Hair": 280, "Cape": 277, "Paper bag": 274, "Beavis Hair": 271, "Hairball Z": 268, "Buoy": 265, "Sheriff": 262, "Human Air": 259,
+    "VR Headset": 256, "Tyre": 253, "Captured Piranha": 250, "Slasher": 247, "Crown": 244, "Unknown": 241, "UGS Delivery": 238,
+    "Blindfold": 235, "Headphones": 232, "Hood": 229, "Indian": 226, "Diving Mask": 223, "Lobster": 220, "Green Visor": 217,
+    "Acupuncture": 215, "Basketball": 213, "Elf Human Air": 211, "Watermelon": 209, "Elf Hood": 207, "Flower Power": 205, "Long Hair": 203,
+    "Beer": 201, "Bunny": 199, "Imposter Mask": 197, "Fro Comb": 195, "Halo": 193, "Knife": 191, "Night Vision": 189,
+    "Proud to be Ugly": 187, "Dinomite": 185, "Purr Paw": 183, "HeliHat": 181, "I Need TP": 179, "Panda Bike Helmet": 177, "Pot Head": 175,
+    "Visor with Hair": 173, "Rainbow": 171, "Space Brain": 169, "Blonde Fro Comb": 167, "Zeus Hand": 165, "Captain": 163, "Pirate": 161,
+    "Ski Mask": 159, "Dread Cap": 157, "Boom Bucket": 155, "Baseball": 153, "Green Cap": 151, "Honey Pot": 149, "Pomade": 147,
+    "Bear Fur Hat": 145, "Ice Cream": 143, "Rastalocks": 141, "3D": 139, "Trucker": 137, "Umbrella Hat": 135, "Golfs": 133, "Green Ugly": 131,
+    "Pink Beanie": 129, "Rice Dome": 127, "Head Canoe": 125, "Brain Bucket": 123, "Fiesta": 121, "Cactus": 119, "Fire": 117, "Floral": 115,
+    "Green Mountie": 113, "Lemon Bucket": 111, "Notlocks": 109, "90's blonde": 107, "Bandana": 105, "Cowboy": 103, "Mountie": 101,
+    "Yellow Beanie": 99, "90's Pink": 97, "Black Ugly": 95, "Twintails": 93, "Grey Cap": 91, "Cube Cut": 89, "Yellow Twintails": 87,
+    "Afro": 85, "Green Beanie": 83, "Parted": 81, "Tin Topper": 79, "Bald": 77, "Blond Punk": 75, "Purple Punk": 73
   },
   "Skin": {
-    "Unknown": 170,
-    "Cristal": 167,
-    "Cristal Elf": 164,
-    "Green Camo": 161,
-    "Purple Elf Space": 158,
-    "Purple Space": 155,
-    "Green Elf Camo": 152,
-    "Green Elf": 149,
-    "Green": 146,
-    "Orange": 144,
-    "Purple": 142,
-    "Purple Elf": 140,
-    "Orange Elf": 138,
-    "Pink": 136,
-    "Pink Elf": 134,
-    "Brown": 132,
-    "Beige": 130,
-    "Beige Elf": 128,
-    "Brown Elf": 126,
-    "Dark Brown": 124,
-    "Dark Brown Elf": 122
+    "Unknown": 170, "Cristal": 167, "Cristal Elf": 164, "Green Camo": 161, "Purple Elf Space": 158, "Purple Space": 155,
+    "Green Elf Camo": 152, "Green Elf": 149, "Green": 146, "Orange": 144, "Purple": 142, "Purple Elf": 140, "Orange Elf": 138, "Pink": 136,
+    "Pink Elf": 134, "Brown": 132, "Beige": 130, "Beige Elf": 128, "Brown Elf": 126, "Dark Brown": 124, "Dark Brown Elf": 122
   },
   "Special": {
-    "Laser Tits": 80,
-    "Green Laser": 78,
-    "Yellow Laser": 76,
-    "Nouns Glasses": 74,
-    "Ugly Necklace": 72,
-    "Dino": 70,
-    "Weed Necklace": 68,
-    "Parakeet": 66,
-    "Piranha": 64,
-    "Smile Necklace": 62,
-    "Monocle": 60,
-    "Sad Smile Necklace": 59,
-    "None": 0,
+    "Laser Tits": 80, "Green Laser": 78, "Yellow Laser": 76, "Nouns Glasses": 74, "Ugly Necklace": 72, "Dino": 70, "Weed Necklace": 68,
+    "Parakeet": 66, "Piranha": 64, "Smile Necklace": 62, "Monocle": 60, "Sad Smile Necklace": 59, "None": 0
   }
 };
-
-
 
 function hpFor(cat, val) {
   const group = HP_TABLE[cat];
@@ -1213,73 +1070,51 @@ function computeHpFromTraits(groupedTraits) {
   return { total, per };
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Rounded-corner harmony (one set of radii everywhere) + tiny over-mask to
-   “eat” any fringe in the background corners.
-────────────────────────────────────────────────────────────────────────── */
-const RADIUS = {
-  card: 38,        // outer card mask
-  header: 16,      // title block
-  art: 26,         // NFT image
-  traitsPanel: 18, // semi-transparent panel
-  traitCard: 16,   // white mini-cards
-  pill: 22         // rarity pill
+// ===== COLORS / THEME =====
+const PALETTE = {
+  cardBg: '#242623',
+  frameStroke: '#000000',
+  headerText: '#0F172A',
+  rarityStripeByTier: {
+    Mythic:   '#896936',
+    Legendary:'#FFF1AE',
+    Rare:     '#7ADDC0',
+    Uncommon: '#7A83BF',
+    Common:   '#B0DEEE',
+  },
+  artBackfill: '#b9dded',
+  artStroke:   '#F9FAFB',
+  traitsPanelBg:     '#b9dded', // drawn with alpha for transparency
+  traitsPanelStroke: '#000000',
+  traitCardFill:     '#FFFFFF',
+  traitCardStroke:   '#000000',
+  traitCardShadow:   '#0000001A',
+  traitTitleText:    '#222625',
+  traitValueText:    '#000000',
+  footerText:        '#212524',
 };
 
-async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
-  const bg = await loadBgByTier(tierLabel);
-  if (!bg) {
-    ctx.fillStyle = PALETTE.cardBg;
-    ctx.fillRect(0, 0, W, H);
-    return;
-  }
+// --- Background images by tier ---
+const CARD_BG_URLS = {
+  Mythic:   ['https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true'],
+  Legendary:['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
+  Rare:     ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
+  Uncommon: ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
+  Common:   ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true']
+};
 
-  // Keep your edge trim so the baked border is cropped off the source.
-  const TRIM_X = Math.round(bg.width  * 0.036);
-  const TRIM_Y = Math.round(bg.height * 0.034);
-  const sx = TRIM_X, sy = TRIM_Y;
-  const sw = bg.width  - TRIM_X * 2;
-  const sh = bg.height - TRIM_Y * 2;
-
-  // Clip to the *same* card cutout. OVER extends clip a hair outside the card,
-  // so we never see a seam; it does not change the visible cutout size.
-  const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 1.25);
-  ctx.save();
-  roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, RADIUS.card + 4);
-  ctx.clip();
-
-  // Force-zoom the background under that mask.
-  // Using a transform guarantees the zoom applies even if the image is cached.
-  const Z = Math.max(1, Number.isFinite(BG_ZOOM) ? BG_ZOOM : 1.06);
-  ctx.save();
-  ctx.translate(W / 2 + (BG_PAN_X || 0), H / 2 + (BG_PAN_Y || 0)); // optional pan
-  ctx.scale(Z, Z);
-  // Draw the trimmed image centered, sized to the card *pre*-scale
-  ctx.drawImage(bg, sx, sy, sw, sh, -W / 2, -H / 2, W, H);
-  ctx.restore(); // undo scale/translate
-
-  ctx.restore(); // undo clip
+function stripeFromRarity(label) {
+  return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common;
 }
+function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
 
-// ===== TRAIT NORMALIZER =====
-const TRAIT_ORDER = ['Type', 'Background', 'Body', 'Eyes', 'Head', 'Legend', 'Skin', 'Special'];
-function normalizeTraits(attrs) {
-  const groups = {};
-  for (const k of TRAIT_ORDER) groups[k] = [];
-
-  for (const t of (Array.isArray(attrs) ? attrs : [])) {
-    const type = String(t?.trait_type ?? '').trim();
-    const valStr = String(t?.value ?? '').trim();
-    if (!type || !valStr) continue;
-    if (valStr.toLowerCase() === 'none' || valStr.toLowerCase() === 'none (ignore)') continue;
-    if (!Object.prototype.hasOwnProperty.call(groups, type)) continue;
-    groups[type].push({ value: valStr });
-  }
-  return groups;
-}
-
-// Back-compat alias
-function rarityColorFromLabel(label) { return stripeFromRarity(label); }
+// Local font aliases
+const FONT_REG =
+  (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY :
+  (typeof FONT_FAMILY_REGULAR !== 'undefined' ? FONT_FAMILY_REGULAR : 'sans-serif'));
+const FONT_BOLD =
+  (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY :
+  (typeof FONT_FAMILY_BOLD !== 'undefined' ? FONT_FAMILY_BOLD : 'sans-serif'));
 
 // ---------- image helpers / cache ----------
 globalThis.__CARD_IMG_CACHE ||= {};
@@ -1308,7 +1143,105 @@ function hexToRgba(hex, a = 1) {
   const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
   return `rgba(${r},${g},${b},${a})`;
 }
-// Swap labels ONLY for display in the rarity pill
+function pillLabelForTier(label) {
+  if (!label) return '';
+  const l = String(label);
+  return l === 'Mythic' ? 'Legendary'
+       : l === 'Legendary' ? 'Epic'
+       : l;
+}
+
+// ===================== RENDERER =====================
+const RADIUS = {
+  card: 38, header: 16, art: 26, traitsPanel: 18, traitCard: 16, pill: 22
+};
+
+async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
+  const bg = await loadBgByTier(tierLabel);
+  if (!bg) {
+    ctx.fillStyle = PALETTE.cardBg;
+    ctx.fillRect(0, 0, W, H);
+    return;
+  }
+
+  // Keep your edge trim so the baked border is cropped off the source.
+  const TRIM_X = Math.round(bg.width  * 0.036);
+  const TRIM_Y = Math.round(bg.height * 0.034);
+  const sx = TRIM_X, sy = TRIM_Y;
+  const sw = bg.width  - TRIM_X * 2;
+  const sh = bg.height - TRIM_Y * 2;
+
+  // Clip to the *same* card cutout. OVER extends clip a hair outside the card,
+  // so we never see a seam; it does not change the visible cutout size.
+  const OVER = (typeof MASK_EPS === 'number' ? MASK_EPS : 1.25);
+  ctx.save();
+  roundRectPath(ctx, -OVER, -OVER, W + OVER * 2, H + OVER * 2, RADIUS.card + 4);
+  ctx.clip();
+
+  // Force-zoom the background under that mask.
+  const Z = Math.max(1, Number.isFinite(BG_ZOOM) ? BG_ZOOM : 1.06);
+  ctx.save();
+  ctx.translate(W / 2 + (BG_PAN_X || 0), H / 2 + (BG_PAN_Y || 0));
+  ctx.scale(Z, Z);
+  ctx.drawImage(bg, sx, sy, sw, sh, -W / 2, -H / 2, W, H);
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
+function roundRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+function drawRoundRect(ctx, x, y, w, h, r, fill) {
+  roundRectPath(ctx, x, y, w, h, r);
+  ctx.fillStyle = fill; ctx.fill();
+}
+function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
+  ctx.save();
+  ctx.shadowColor = shadowColor;
+  ctx.shadowBlur = shadowBlur;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = shadowDy;
+  drawRoundRect(ctx, x, y, w, h, r, fill);
+  ctx.restore();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
+}
+// Top-rounded, flat-bottom rectangle (for the category tab)
+function drawTopRoundedRect(ctx, x, y, w, h, r, fill) {
+  const rr = Math.min(r, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + rr, rr); // top-right
+  ctx.lineTo(x + w, y + h);                // right edge (square bottom)
+  ctx.lineTo(x,     y + h);                // bottom edge (flat)
+  ctx.lineTo(x,     y + rr);               // left edge
+  ctx.arcTo(x, y, x + rr, y, rr);          // top-left
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+// image cover
+function cover(sw, sh, mw, mh) {
+  const s = Math.max(mw / sw, mh / sh);
+  const dw = Math.round(sw * s), dh = Math.round(sh * s);
+  return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
+}
+async function fetchBuffer(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
+  const ab = await r.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+function stripeFromRarity(label) { return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common; }
+function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
 function pillLabelForTier(label) {
   if (!label) return '';
   const l = String(label);
@@ -1522,7 +1455,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.fillText(`Squigs • Token #${tokenId}`, 60, footerY);
 }
 
-
   // Rarity pill (shadow; black text)
   drawRoundRectShadow(ctx, pillX, pillY, pillW, PILL_H, RADIUS.pill, headerStripeFill, null, 'rgba(0,0,0,0.14)', 12, 3);
   ctx.fillStyle = '#000000';
@@ -1531,57 +1463,4 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
   return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
-}
-
-// ---------- drawing helpers ----------
-function drawRect(ctx, x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
-function roundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-function drawRoundRect(ctx, x, y, w, h, r, fill) {
-  roundRectPath(ctx, x, y, w, h, r);
-  ctx.fillStyle = fill; ctx.fill();
-}
-function drawRoundRectShadow(ctx, x, y, w, h, r, fill, stroke, shadowColor = '#00000022', shadowBlur = 14, shadowDy = 2) {
-  ctx.save();
-  ctx.shadowColor = shadowColor;
-  ctx.shadowBlur = shadowBlur;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = shadowDy;
-  drawRoundRect(ctx, x, y, w, h, r, fill);
-  ctx.restore();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; roundRectPath(ctx, x, y, w, h, r); ctx.stroke(); }
-}
-// Top-rounded, flat-bottom rectangle (for the category tab)
-function drawTopRoundedRect(ctx, x, y, w, h, r, fill) {
-  const rr = Math.min(r, w / 2, h);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + rr, rr); // top-right
-  ctx.lineTo(x + w, y + h);                // right edge (square bottom)
-  ctx.lineTo(x,     y + h);                // bottom edge (flat)
-  ctx.lineTo(x,     y + rr);               // left edge
-  ctx.arcTo(x, y, x + rr, y, rr);          // top-left
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-}
-// image cover
-function cover(sw, sh, mw, mh) {
-  const s = Math.max(mw / sw, mh / sh);
-  const dw = Math.round(sw * s), dh = Math.round(sh * s);
-  return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
-}
-async function fetchBuffer(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
-  const ab = await r.arrayBuffer();
-  return Buffer.from(ab);
 }
