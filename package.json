@@ -4,10 +4,10 @@
   "description": "Ugly Bot + Squig Card renderer",
   "private": true,
   "main": "index.js",
- "scripts": {
-  "start": "node index.js",
-  "build:traits": "node scripts/buildTraitCounts.js"
-},
+  "scripts": {
+    "start": "node index.js",
+    "build:traits": "node scripts/buildTraitCounts.js"
+  },
   "engines": {
     "node": "20.x"
   },
@@ -16,6 +16,7 @@
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "ethers": "^6.10.0",
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "pg": "^8.12.0"
   }
 }
