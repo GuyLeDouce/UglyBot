@@ -1419,9 +1419,7 @@ async function drawCardBgWithoutBorder(ctx, W, H, tierLabel) {
   ctx.restore();
 }
 
-// Local font aliases
-const FONT_REG = (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY : 'sans-serif');
-const FONT_BOLD = (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY : 'sans-serif');
+// (font aliases defined earlier)
 
 function hexToRgba(hex, a = 1) {
   const h = hex.replace('#', '');
@@ -1509,14 +1507,7 @@ async function fetchBuffer(url) {
   return Buffer.from(ab);
 }
 
-function stripeFromRarity(label) { return PALETTE.rarityStripeByTier[label] || PALETTE.rarityStripeByTier.Common; }
-function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
-
-function pillLabelForTier(label) {
-  if (!label) return '';
-  const l = String(label);
-  return l === 'Mythic' ? 'Legendary' : (l === 'Legendary' ? 'Epic' : l);
-}
+// (stripeFromRarity, hpToStripe, pillLabelForTier defined earlier)
 
 async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
