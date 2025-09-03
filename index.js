@@ -756,11 +756,11 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.editReply(`💪 Total Ugly Points for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
     } catch (err) {
-      console.error('❌ /myhp error:', err);
+      console.error('❌ /myup error:', err);
       if (interaction.deferred) {
         await interaction.editReply('⚠️ Error calculating total UP.');
       } else {
-        await interaction.reply({ content: '⚠️ Error calculating total HP.', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Error calculating total UP.', ephemeral: true });
       }
     }
     return;
