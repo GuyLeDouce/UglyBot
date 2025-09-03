@@ -189,8 +189,8 @@ async function registerSlashCommands() {
         .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
         .toJSON(),
       new SlashCommandBuilder()
-        .setName('myhp')
-        .setDescription('Get total HP for all of your Squigs')
+        .setName('myup')
+        .setDescription('Get total UP (Ugly Points) for all of your Squigs')
         .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
         .toJSON(),
     ];
@@ -719,8 +719,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /myhp (sum HP of all Squigs in linked/override wallet)
-  if (interaction.commandName === 'myhp') {
+  // /myup (sum HP of all Squigs in linked/override wallet)
+  if (interaction.commandName === 'myup') {
     try {
       await interaction.deferReply();
       const override = interaction.options.getString('address') || null;
@@ -754,11 +754,11 @@ client.on('interactionCreate', async (interaction) => {
         totalHp += total || 0;
       }
 
-      await interaction.editReply(`💪 Total Squig HP for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
+      await interaction.editReply(`💪 Total Ugly Points for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
     } catch (err) {
       console.error('❌ /myhp error:', err);
       if (interaction.deferred) {
-        await interaction.editReply('⚠️ Error calculating total HP.');
+        await interaction.editReply('⚠️ Error calculating total UP.');
       } else {
         await interaction.reply({ content: '⚠️ Error calculating total HP.', ephemeral: true });
       }
@@ -1559,7 +1559,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.font = `32px ${FONT_BOLD}`;
   ctx.fillText(name, headerX + HEADER_SIDE_PAD, headerMidY);
 
-  const hpText = `${rankInfo?.hpTotal ?? 0} HP`;
+  const hpText = `${rankInfo?.hpTotal ?? 0} UP`
   ctx.font = `26px ${FONT_BOLD}`;
   const hpW = ctx.measureText(hpText).width;
   ctx.fillText(hpText, headerX + HEADER_W - HEADER_SIDE_PAD - hpW, headerMidY);
@@ -1622,7 +1622,7 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
       const items = (traits[cat] || []);
       if (!items.length) continue;
 
-      const lines  = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} HP)`);
+      const lines  = items.map(t => `${String(t.value)} (${hpFor(cat, t.value)} UP)`);
       const shown  = lines.slice(0, 5);
       const hidden = lines.length - shown.length;
       if (hidden > 0) shown.push(`+${hidden} more`);
