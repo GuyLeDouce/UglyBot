@@ -1042,7 +1042,7 @@ const PALETTE = {
     Uncommon: '#7A83BF',
     Common:   '#B0DEEE',
   },
-  artBackfill: '#b9dded',
+  artBackfill: '#FFFFFF',
   artStroke:   '#F9FAFB',
   traitsPanelBg:     '#b9dded',
   traitsPanelStroke: '#000000',
@@ -1500,6 +1500,13 @@ function cover(sw, sh, mw, mh) {
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
   return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
 }
+function contain(sw, sh, mw, mh) {
+  const s = Math.min(mw / sw, mh / sh);
+  const dw = Math.round(sw * s), dh = Math.round(sh * s);
+  const dx = Math.round((mw - dw) / 2);
+  const dy = Math.round((mh - dh) / 2);
+  return { dx, dy, dw, dh };
+}
 async function fetchBuffer(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
@@ -1605,8 +1612,9 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.clip();
   try {
     const img = await loadImage(await fetchBuffer(imageUrl));
-    const { dx, dy, dw, dh } = cover(img.width, img.height, ART_W, ART_H);
-    ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
+    const { dx, dy, dw, dh } = contain(img.width, img.height, ART_W, ART_H);
+ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
+
   } catch {}
   ctx.restore();
 
@@ -1705,5 +1713,6 @@ async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rari
   ctx.font = `24px ${FONT_BOLD}`;
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
-  return canvas.toBuffer('image/jpeg', { quality: 0.98, progressive: true });
+  return canvas.toBuffer('image/png');
+
 }
