@@ -16,6 +16,7 @@ const {
 } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
+const path = require('path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
@@ -1054,12 +1055,30 @@ const PALETTE = {
   footerText:        '#212524',
 };
 
-const CARD_BG_URLS = {
-  Mythic:   ['https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true'],
-  Legendary:['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
-  Rare:     ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
-  Uncommon: ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'],
-  Common:   ['https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true']
+const UGLYDEX_PUBLIC_DIR = path.resolve(__dirname, '..', 'SquigUgly Card images', 'public');
+const UGLYDEX_CARDS_DIR = path.join(UGLYDEX_PUBLIC_DIR, 'cards');
+
+const CARD_BG_SOURCES = {
+  Mythic: [
+    path.join(UGLYDEX_CARDS_DIR, 'card_vide_Legendary.png'),
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/LEGENDARY%20BG.png?raw=true'
+  ],
+  Legendary: [
+    path.join(UGLYDEX_CARDS_DIR, 'card_vide_Legendary.png'),
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+  ],
+  Rare: [
+    path.join(UGLYDEX_CARDS_DIR, 'card_vide_Rare.png'),
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+  ],
+  Uncommon: [
+    path.join(UGLYDEX_CARDS_DIR, 'card_vide_Common.png'),
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+  ],
+  Common: [
+    path.join(UGLYDEX_CARDS_DIR, 'card_vide_Common.png'),
+    'https://github.com/GuyLeDouce/UglyBot/blob/main/Stock%20BG.png?raw=true'
+  ]
 };
 
 function stripeFromRarity(label) {
@@ -1438,20 +1457,23 @@ function pillLabelForTier(label) {
 
 // ---------- image helpers / cache ----------
 globalThis.__CARD_IMG_CACHE ||= {};
-async function loadImageCached(url) {
-  if (globalThis.__CARD_IMG_CACHE[url]) return globalThis.__CARD_IMG_CACHE[url];
-  const buf = await fetchBuffer(url);
+function isHttpUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value);
+}
+async function loadImageCached(source) {
+  if (globalThis.__CARD_IMG_CACHE[source]) return globalThis.__CARD_IMG_CACHE[source];
+  const buf = await fetchBuffer(source);
   const img = await loadImage(buf);
-  globalThis.__CARD_IMG_CACHE[url] = img;
+  globalThis.__CARD_IMG_CACHE[source] = img;
   return img;
 }
 async function loadBgByTier(tier) {
-  const list = CARD_BG_URLS[tier] || CARD_BG_URLS.Common;
-  for (const url of list) {
+  const list = CARD_BG_SOURCES[tier] || CARD_BG_SOURCES.Common;
+  for (const source of list) {
     try {
-      return await loadImageCached(url);
+      return await loadImageCached(source);
     } catch (e) {
-      console.warn('BG load failed:', url, e.message);
+      console.warn('BG load failed:', source, e.message);
     }
   }
   return null;
@@ -1507,11 +1529,14 @@ function contain(sw, sh, mw, mh) {
   const dy = Math.round((mh - dh) / 2);
   return { dx, dy, dw, dh };
 }
-async function fetchBuffer(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
-  const ab = await r.arrayBuffer();
-  return Buffer.from(ab);
+async function fetchBuffer(source) {
+  if (isHttpUrl(source)) {
+    const r = await fetch(source);
+    if (!r.ok) throw new Error(`Image HTTP ${r.status}`);
+    const ab = await r.arrayBuffer();
+    return Buffer.from(ab);
+  }
+  return fs.promises.readFile(source);
 }
 
 // (stripeFromRarity, hpToStripe, pillLabelForTier defined earlier)
