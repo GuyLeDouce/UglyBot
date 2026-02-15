@@ -733,7 +733,7 @@ client.on('interactionCreate', async (interaction) => {
         rarityLabel: tier,
         headerStripe: stripe,
         bgSources: CARD_BG_SOURCES,
-        hpFor,
+        hpForFn: hpFor,
         fonts: { reg: FONT_REG, bold: FONT_BOLD },
         scale: RENDER_SCALE
       });
@@ -842,7 +842,7 @@ client.on('interactionCreate', async (interaction) => {
       rarityLabel: tier,
       headerStripe: stripe,
       bgSources: CARD_BG_SOURCES,
-      hpFor,
+      hpForFn: hpFor,
       fonts: { reg: FONT_REG, bold: FONT_BOLD },
       scale: RENDER_SCALE
     });

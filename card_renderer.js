@@ -88,6 +88,36 @@ function contain(sw, sh, mw, mh) {
   return { dx: Math.round((mw - dw) / 2), dy: Math.round((mh - dh) / 2), dw, dh };
 }
 
+function getFirstTraitValue(traits, categoryName) {
+  if (!traits || !categoryName) return 'Unknown';
+  const wanted = String(categoryName).toLowerCase();
+
+  if (traits && typeof traits === 'object' && !Array.isArray(traits)) {
+    const grouped = traits[categoryName];
+    if (Array.isArray(grouped) && grouped.length > 0) {
+      const first = grouped[0];
+      if (first && typeof first === 'object') return String(first.value ?? 'Unknown');
+      return String(first ?? 'Unknown');
+    }
+  }
+
+  if (Array.isArray(traits)) {
+    const found = traits.find((t) => {
+      if (!t || typeof t !== 'object') return false;
+      const tt = String(t.trait_type ?? t.traitType ?? '').toLowerCase();
+      return tt === wanted;
+    });
+    if (found) return String(found.value ?? 'Unknown');
+  }
+
+  return 'Unknown';
+}
+
+function getTraitUp(hpForFn, categoryName, value) {
+  if (typeof hpForFn !== 'function') return 0;
+  return Number(hpForFn(categoryName, value) || 0);
+}
+
 // ---------- main renderer ----------
 /**
  * Renders EXACT template style like your samples (560x792 base).
@@ -102,7 +132,7 @@ async function renderSquigCardExact({
   rankInfo,               // { hpTotal }
   tierLabel,              // 'Common'|'Uncommon'|'Rare'|'Epic'|'Legendary'|'Mythic'
   bgSources,              // CARD_BG_SOURCES from your main file
-  hpFor,                  // function hpFor(cat, val) from main file
+  hpForFn,                // function hpFor(cat, val) from main file
   fonts = { reg: 'sans-serif', bold: 'sans-serif' },
   scale = 1               // your RENDER_SCALE
 }) {
@@ -185,12 +215,12 @@ async function renderSquigCardExact({
 
     // Trait pills (2 columns x 3 rows)
     const pills = [
-      { k: 'BG',    cat: 'Background' },
-      { k: 'BODY',  cat: 'Body' },
-      { k: 'EYES',  cat: 'Eyes' },
-      { k: 'HEAD',  cat: 'Head' },
-      { k: 'SKIN',  cat: 'Skin' },
-      { k: 'SPECIAL', cat: 'Special' },
+      { label: 'BG', cat: 'Background' },
+      { label: 'BODY', cat: 'Body' },
+      { label: 'EYES', cat: 'Eyes' },
+      { label: 'HEAD', cat: 'Head' },
+      { label: 'SKIN', cat: 'Skin' },
+      { label: 'SPECIAL', cat: 'Special' },
     ];
 
     const traitBaseY = 500;
@@ -202,11 +232,6 @@ async function renderSquigCardExact({
     const leftX = 40;
     const rightX = leftX + traitPillW + gapX;
 
-    function firstVal(cat) {
-      const arr = traits?.[cat] || [];
-      return arr[0]?.value || 'Unknown';
-    }
-
     ctx.textAlign = 'center';
     ctx.fillStyle = '#111';
 
@@ -216,31 +241,33 @@ async function renderSquigCardExact({
       const x = col === 0 ? leftX : rightX;
       const y = traitBaseY + row * (traitPillH + gapY);
 
-      drawRoundRect(ctx, x, y, traitPillW, traitPillH, 20, '#D9EEF7', '#111', 3);
+      drawRoundRect(ctx, x, y, traitPillW, traitPillH, 22, '#D9EEF7', '#111', 4);
 
       const cat = pills[i].cat;
-      const key = pills[i].k;
-      const val = firstVal(cat);
-      const up = (typeof hpFor === 'function') ? Number(hpFor(cat, val) || 0) : 0;
+      const key = pills[i].label;
+      const val = getFirstTraitValue(traits, cat);
+      const up = getTraitUp(hpForFn, cat, val);
       const title = `${key} (${up}UP)`;
 
       // Title line
-      ctx.font = `900 18px ${FONT_BOLD}`;
+      ctx.font = `900 17px ${FONT_BOLD}`;
       ctx.fillText(title, x + traitPillW / 2, y + 22);
 
       // Value line
-      ctx.font = `600 16px ${FONT_REG}`;
+      ctx.font = `italic 600 15px ${FONT_REG}`;
       ctx.fillText(val, x + traitPillW / 2, y + 44);
     }
 
     // Type pill (bottom left)
     const typeX = 40, typeY = 708, typeW = 240, typeH = 56;
-    drawRoundRect(ctx, typeX, typeY, typeW, typeH, 20, '#D9EEF7', '#111', 3);
-    ctx.font = `900 18px ${FONT_BOLD}`;
+    drawRoundRect(ctx, typeX, typeY, typeW, typeH, 22, '#D9EEF7', '#111', 4);
+    const typeVal = getFirstTraitValue(traits, 'Type');
+    const typeUp = getTraitUp(hpForFn, 'Type', typeVal);
+    ctx.font = `900 17px ${FONT_BOLD}`;
     ctx.fillStyle = '#111';
-    ctx.fillText('TYPE', typeX + typeW / 2, typeY + 22);
-    ctx.font = `600 16px ${FONT_REG}`;
-    ctx.fillText(firstVal('Type'), typeX + typeW / 2, typeY + 42);
+    ctx.fillText(`TYPE (${typeUp}UP)`, typeX + typeW / 2, typeY + 22);
+    ctx.font = `italic 600 15px ${FONT_REG}`;
+    ctx.fillText(typeVal, typeX + typeW / 2, typeY + 42);
 
     // Rarity banner (bottom right, diagonal-ish block like your samples)
     const bannerW = 230, bannerH = 66;
