@@ -18,6 +18,7 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const { renderSquigCardExact } = require('./card_renderer');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
 
@@ -103,10 +104,20 @@ const client = new Client({
 });
 
 // ===== UTILS =====
+async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 const fetchWithRetry = async (url, retries = 3, delay = 1000, opts = {}) => {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const res = await fetch(url, { timeout: 10000, ...opts });
+      const res = await fetchWithTimeout(url, { timeoutMs: 10000, ...opts });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
     } catch (err) {
@@ -115,6 +126,19 @@ const fetchWithRetry = async (url, retries = 3, delay = 1000, opts = {}) => {
     }
   }
 };
+
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 // ===== POSTGRES (wallet storage) =====
 const DATABASE_URL = process.env.DATABASE_URL || null; // e.g. postgres://user:pass@host:5432/db
@@ -218,25 +242,27 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 // ===== RANDOM CHARM REWARD =====
+function weightedPick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 function maybeRewardCharm(userId, username) {
-  const roll = Math.floor(Math.random() * 200);
-  if (roll === 0) {
-    const rewards = [100, 100, 100, 200]; // weighted pool
-    const reward = rewards[Math.floor(Math.random() * rewards.length)];
-    const loreMessages = [
-      "A Squig blinked and $CHARM fell out of the sky.",
-      "The spirals aligned. You’ve been dripped on.",
-      "You weren’t supposed to find this... but the Squigs don’t care.",
-      "A whisper reached your wallet: ‘take it, fast.’",
-      "This reward was meant for someone else. The Squigs disagreed.",
-      "The Charmkeeper slipped. You caught it.",
-      "A Squig coughed up 200 $CHARM. Please wash your hands.",
-      "This token came from *somewhere very wet*. Don’t ask."
-    ];
-    const lore = loreMessages[Math.floor(Math.random() * loreMessages.length)];
-    return { reward, lore };
-  }
-  return null;
+  const roll = Math.floor(Math.random() * CHARM_REWARD_CHANCE);
+  if (roll !== 0) return null;
+
+  const reward = weightedPick(CHARM_REWARDS);
+  const loreMessages = [
+    "A Squig blinked and $CHARM fell out of the sky.",
+    "The spirals aligned. You’ve been dripped on.",
+    "You weren’t supposed to find this... but the Squigs don’t care.",
+    "A whisper reached your wallet: ‘take it, fast.’",
+    "This reward was meant for someone else. The Squigs disagreed.",
+    "The Charmkeeper slipped. You caught it.",
+    "A Squig coughed up $CHARM. Please wash your hands.",
+    "This token came from *somewhere very wet*. Don’t ask."
+  ];
+  const lore = loreMessages[Math.floor(Math.random() * loreMessages.length)];
+  return { reward, lore };
 }
 
 // ===== PREFIX COMMANDS =====
@@ -635,16 +661,17 @@ client.on('interactionCreate', async (interaction) => {
 
   // /linkwallet
   if (interaction.commandName === 'linkwallet') {
+    await interaction.deferReply({ ephemeral: true });
     const address = interaction.options.getString('address');
     if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      return interaction.reply({ content: '❌ Invalid Ethereum address. Please paste a 0x… address.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Invalid Ethereum address. Please paste a 0x… address.' });
     }
     try {
       await setWalletLink(interaction.user.id, address);
-      return interaction.reply({ content: `✅ Linked wallet: \`${address}\``, ephemeral: true });
+      return interaction.editReply({ content: `✅ Linked wallet: \`${address}\`` });
     } catch (e) {
       console.error('PG setWalletLink error:', e);
-      return interaction.reply({ content: '⚠️ Could not save your wallet right now. Try again soon.', ephemeral: true });
+      return interaction.editReply({ content: '⚠️ Could not save your wallet right now. Try again soon.' });
     }
   }
 
@@ -696,17 +723,22 @@ client.on('interactionCreate', async (interaction) => {
       const tier    = hpToTierLabel(hpTotal);
       const stripe  = hpToStripe(hpTotal);
 
-      const buffer = await renderSquigCard({
+      const buffer = await renderSquigCardExact({
         name: displayName,
         tokenId,
         imageUrl,
         traits,
         rankInfo: { hpTotal, per: hpAgg.per },
+        tierLabel: tier,
         rarityLabel: tier,
-        headerStripe: stripe
+        headerStripe: stripe,
+        bgSources: CARD_BG_SOURCES,
+        hpFor,
+        fonts: { reg: FONT_REG, bold: FONT_BOLD },
+        scale: RENDER_SCALE
       });
 
-      const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
+      const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.png` });
       await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
 
     } catch (err) {
@@ -747,13 +779,14 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       let totalHp = 0;
-      for (const tokenId of tokenArray) {
+      const hpList = await mapLimit(tokenArray, 6, async (tokenId) => {
         const meta = await getNftMetadataAlchemy(tokenId);
         const { attrs } = await getTraitsForToken(meta, tokenId);
         const traits = normalizeTraits(attrs);
         const { total } = computeHpFromTraits(traits);
-        totalHp += total || 0;
-      }
+        return total || 0;
+      });
+      for (const hp of hpList) totalHp += hp;
 
       await interaction.editReply(`💪 Total Ugly Points for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
     } catch (err) {
@@ -799,17 +832,22 @@ client.on('interactionCreate', async (interaction) => {
     const tier    = hpToTierLabel(hpTotal);
     const stripe  = hpToStripe(hpTotal);
 
-    const buffer = await renderSquigCard({
+    const buffer = await renderSquigCardExact({
       name: displayName,
       tokenId,
       imageUrl,
       traits,
       rankInfo: { hpTotal, per: hpAgg.per },
+      tierLabel: tier,
       rarityLabel: tier,
-      headerStripe: stripe
+      headerStripe: stripe,
+      bgSources: CARD_BG_SOURCES,
+      hpFor,
+      fonts: { reg: FONT_REG, bold: FONT_BOLD },
+      scale: RENDER_SCALE
     });
 
-    const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.jpg` });
+    const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.png` });
     await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
 
   } catch (err) {
@@ -839,7 +877,19 @@ globalThis.__SQUIGS_PROVIDER   ||= new ethers.JsonRpcProvider(ALCHEMY_RPC_URL);
 globalThis.__SQUIGS_ERC721_ABI ||= ['function ownerOf(uint256 tokenId) view returns (address)'];
 globalThis.__SQUIGS_ERC721     ||= new ethers.Contract(SQUIGS_CONTRACT, globalThis.__SQUIGS_ERC721_ABI, globalThis.__SQUIGS_PROVIDER);
 globalThis.__SQUIGS_MINT_CACHE ||= new Map();
+globalThis.__SQUIGS_MINT_CACHE_ORDER ||= [];
 const squigsErc721 = globalThis.__SQUIGS_ERC721;
+
+function mintCacheSet(key, val, max = 5000) {
+  const cache = globalThis.__SQUIGS_MINT_CACHE;
+  const order = globalThis.__SQUIGS_MINT_CACHE_ORDER;
+  if (!cache.has(key)) order.push(key);
+  cache.set(key, val);
+  while (order.length > max) {
+    const oldest = order.shift();
+    cache.delete(oldest);
+  }
+}
 
 // Not-minted messages (dedup-safe)
 if (!globalThis.__SQUIGS_NOT_MINTED_MESSAGES) {
@@ -871,12 +921,12 @@ async function isSquigMintedStrict(tokenId) {
   try {
     const owner = await squigsErc721.ownerOf(tokenId);
     const minted = !!owner && owner !== '0x0000000000000000000000000000000000000000';
-    cache.set(tokenId, minted);
+    mintCacheSet(tokenId, minted);
     return minted;
   } catch (e) {
     const msg = String(e?.shortMessage || e?.message || '');
     if (e?.code === 'CALL_EXCEPTION' || /execution reverted/i.test(msg)) {
-      cache.set(tokenId, false);
+      mintCacheSet(tokenId, false);
       return false;
     }
     // other errors: continue to fallback
@@ -893,7 +943,7 @@ async function isSquigMintedStrict(tokenId) {
       (Array.isArray(data?.ownerAddresses) && data.ownerAddresses) ||
       [];
     const minted = owners.length > 0;
-    cache.set(tokenId, minted);
+    mintCacheSet(tokenId, minted);
     return minted;
   } catch (e2) {
     console.warn(`⚠️ Mint check unavailable for #${tokenId}:`, e2.message);
@@ -981,7 +1031,7 @@ async function fetchOpenSeaTraits(tokenId) {
   const headers = { 'X-API-KEY': OPENSEA_API_KEY };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetch(url, { headers, timeout: 10000 });
+      const res = await fetchWithTimeout(url, { headers, timeoutMs: 10000 });
       if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
       const data = await res.json();
       const arr =
@@ -1448,11 +1498,7 @@ function hexToRgba(hex, a = 1) {
   return `rgba(${r},${g},${b},${a})`;
 }
 function pillLabelForTier(label) {
-  if (!label) return '';
-  const l = String(label);
-  return l === 'Mythic' ? 'Legendary'
-       : l === 'Legendary' ? 'Epic'
-       : l;
+  return String(label || '');
 }
 
 // ---------- image helpers / cache ----------
@@ -1541,7 +1587,7 @@ async function fetchBuffer(source) {
 
 // (stripeFromRarity, hpToStripe, pillLabelForTier defined earlier)
 
-async function renderSquigCard({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
+async function renderSquigCard__OLD({ name, tokenId, imageUrl, traits, rankInfo, rarityLabel, headerStripe }) {
   const W = 750, H = 1050;
   const SCALE = (typeof RENDER_SCALE !== 'undefined' ? RENDER_SCALE : 2);
 
@@ -1738,6 +1784,6 @@ ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   ctx.font = `24px ${FONT_BOLD}`;
   ctx.fillText(pillText, pillX + PILL_PAD_X, pillY + PILL_H / 2);
 
-  return canvas.toBuffer('image/png');
+  return canvas.toBuffer('image/jpeg', { quality: 92 });
 
 }
