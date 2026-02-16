@@ -506,21 +506,22 @@ async function computeWalletStatsForPayout(guildId, walletAddress, payoutType) {
 
 function verificationMenuEmbed(guildName) {
   return new EmbedBuilder()
-    .setTitle('Squig Holder Verification Portal')
+    .setTitle('Holder Verification')
     .setDescription(
-      `Welcome to **${guildName}** verification.\n\n` +
+      `Welcome to **${guildName}**.\n\n` +
       `Use the buttons below:\n` +
-      `• **Connect**: link your wallet (address-only for now; signature flow can be added later).\n` +
-      `• **Claim**: claim your daily $CHARM payout based on server settings.\n` +
-      `• **Check NFT Stats**: inspect a Squig token and view its UP breakdown.`
+      `• **Connect Wallet**: link your wallet for holder verification.\n` +
+      `• **Claim Rewards**: collect your daily holder payout.\n` +
+      `• **Check NFT Stats**: view a Squig token's UP breakdown.\n` +
+      `• **Disconnect**: remove your verification data from this server.`
     )
     .setColor(0x7ADDC0);
 }
 
 function verificationButtons() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('verify_claim').setLabel('Claim').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect Wallet').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('verify_claim').setLabel('Claim Rewards').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('verify_check_stats').setLabel('Check NFT Stats').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect').setStyle(ButtonStyle.Danger),
   );
@@ -892,8 +893,8 @@ async function handleClaim(interaction) {
     if (!dripMemberIdCandidates.length) {
       await interaction.reply({
         content:
-          'Claim failed: no DRIP member found for your Discord ID in this realm.\n' +
-          'Ask an admin to verify DRIP Realm ID and your DRIP Discord member link.',
+          'Claim unavailable: your DRIP profile is not linked in this realm yet.\n' +
+          'Please ask an admin to verify your realm/member setup.',
         flags: 64
       });
       return;
@@ -914,17 +915,15 @@ async function handleClaim(interaction) {
     const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
     let receiptMessage = null;
     if (receiptChannel?.isTextBased()) {
+      const earningBasis =
+        payoutType === 'per_nft'
+          ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
+          : `${stats.totalUp} UglyPoints`;
       receiptMessage = await receiptChannel.send(
         `🧾 Claim Receipt\n` +
         `User: <@${interaction.user.id}>\n` +
-        `DRIP Member: \`${dripMemberId}\`\n` +
-        `Wallet: \`${link.wallet_address}\`\n` +
-        `Type: ${payoutType}\n` +
-        `Units: ${stats.unitTotal}\n` +
-        `Payout: **${amount} $CHARM**\n` +
-        `DRIP Realm: \`${settings.drip_realm_id}\` | Currency: \`${settings.currency_id}\`\n` +
-        `Endpoint: \`${awardResult?.endpoint || 'unknown'}\`\n` +
-        `Result: \`${JSON.stringify(dripResult).slice(0, 300)}\``
+        `Earning Basis: ${earningBasis}\n` +
+        `Reward: **${amount} $CHARM**`
       );
     }
 
@@ -934,13 +933,14 @@ async function handleClaim(interaction) {
       [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
     );
 
-    await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, flags: 64 });
+    await interaction.reply({ content: `Claim complete. You received **${amount} $CHARM**.`, flags: 64 });
   } catch (err) {
+    console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
-    let reason = 'Unknown error during claim.';
-    if (/DRIP member search failed/i.test(msg)) reason = `DRIP member lookup failed (${msg}).`;
-    else if (/DRIP award failed/i.test(msg)) reason = `DRIP transfer failed (${msg}).`;
-    else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = `Database error while recording claim (${msg}).`;
+    let reason = 'We could not process your claim right now.';
+    if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
+    else if (/DRIP award failed/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
+    else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
     await interaction.reply({
       content: `Claim failed: ${reason}`,
       flags: 64
@@ -1068,8 +1068,8 @@ client.on('interactionCreate', async (interaction) => {
         );
         await interaction.reply({
           content:
-            '⚠️ This will delete your saved wallet + claim history for this server and remove holder roles that were assigned by verification.\n' +
-            'Are you sure?',
+            'This will remove your verification data and holder roles for this server.\n' +
+            'Are you sure you want to continue?',
           components: [row],
           flags: 64
         });
@@ -1078,7 +1078,7 @@ client.on('interactionCreate', async (interaction) => {
 
       if (interaction.customId === 'verify_disconnect_cancel') {
         await interaction.update({
-          content: 'Disconnect canceled. Your saved data is unchanged.',
+          content: 'Disconnect canceled.',
           components: []
         });
         return;
@@ -1094,9 +1094,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({
           content:
             `Disconnected successfully.\n` +
-            `Deleted wallet records: ${result.wallets}\n` +
-            `Deleted claim records: ${result.claims}\n` +
-            `Removed holder roles: ${removedRoles}`,
+            `Removed holder roles: ${removedRoles}\n` +
+            `Your verification records were cleared for this server.`,
           components: []
         });
         return;
@@ -1295,7 +1294,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const settings = await getGuildSettings(interaction.guild.id);
         let dripMemberId = null;
-        let dripStatus = 'DRIP lookup skipped (realm/API key not configured).';
+        let dripStatus = 'DRIP profile check unavailable (not configured).';
         if (settings?.drip_api_key && settings?.drip_realm_id) {
           try {
             const resolved = await resolveDripMemberForDiscordUser(
@@ -1307,11 +1306,11 @@ client.on('interactionCreate', async (interaction) => {
             const dripMember = resolved.member;
             dripMemberId = dripMember?.id || null;
             dripStatus = dripMemberId
-              ? `DRIP member linked: \`${dripMemberId}\` (via ${resolved.source})`
-              : `No DRIP member found (${resolved.details.join('; ') || 'no match'}).`;
+              ? 'DRIP profile linked.'
+              : 'DRIP profile not linked in this realm yet.';
           } catch (err) {
-            const msg = String(err?.message || err || '').slice(0, 220);
-            dripStatus = `DRIP lookup failed: ${msg}`;
+            console.error('DRIP lookup during connect failed:', err);
+            dripStatus = 'DRIP profile check is temporarily unavailable.';
           }
         }
 
@@ -1321,10 +1320,10 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({
           flags: 64,
           content:
-            `Wallet connected: \`${addr}\`\n` +
+            `Wallet connected successfully.\n` +
             `${dripStatus}\n` +
-            `Role sync complete (${sync.changed} role changes).\n` +
-            `${sync.applied.length ? sync.applied.join('\n') : 'No holder role rules configured yet.'}`
+            `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
+            `${sync.applied.length ? sync.applied.join('\n') : 'No holder roles matched yet.'}`
         });
         return;
       }
