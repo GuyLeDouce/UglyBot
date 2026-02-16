@@ -223,12 +223,14 @@ async function ensureTeamSchema() {
       drip_client_id TEXT,
       drip_realm_id TEXT,
       currency_id TEXT,
+      receipt_channel_id TEXT,
       payout_type TEXT NOT NULL DEFAULT 'per_up',
       payout_amount NUMERIC NOT NULL DEFAULT 1,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS drip_client_id TEXT;`);
+  await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS receipt_channel_id TEXT;`);
   await teamPool.query(`
     CREATE TABLE IF NOT EXISTS holder_rules (
       id BIGSERIAL PRIMARY KEY,
@@ -267,33 +269,39 @@ async function getWalletLink(guildId, discordId) {
 }
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
-async function registerSlashCommands() {
+function buildSlashCommands() {
+  return [
+    new SlashCommandBuilder()
+      .setName('launch-verification')
+      .setDescription('Post the public holder verification menu in this channel')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('setup-verification')
+      .setDescription('Create/open a private admin setup channel for verification config')
+      .toJSON(),
+  ];
+}
+
+async function registerSlashCommands(clientRef) {
   try {
-    if (!DISCORD_CLIENT_ID || !GUILD_ID) {
-      console.warn('⚠️ DISCORD_CLIENT_ID or GUILD_ID missing; cannot register slash commands.');
+    if (!DISCORD_CLIENT_ID) {
+      console.warn('⚠️ DISCORD_CLIENT_ID missing; cannot register slash commands.');
       return;
     }
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-
-    const commands = [
-      new SlashCommandBuilder()
-        .setName('launch-verification')
-        .setDescription('Post the public holder verification menu in this channel')
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('setup-verification')
-        .setDescription('Create/open a private admin setup channel for verification config')
-        .toJSON(),
-    ];
-
-    const data = await rest.put(
-      Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log(`✅ Registered ${data.length} guild slash command(s) to ${GUILD_ID}.`);
-
-    const guildCmds = await rest.get(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, GUILD_ID));
-    console.log('🔎 Guild commands now:', guildCmds.map(c => `${c.name} (${c.id})`).join(', '));
+    const commands = buildSlashCommands();
+    const guildIds = (GUILD_ID ? [GUILD_ID] : [...clientRef.guilds.cache.keys()]);
+    if (guildIds.length === 0) {
+      console.warn('⚠️ Bot is not in any guilds yet; skipping slash registration.');
+      return;
+    }
+    for (const gid of guildIds) {
+      const data = await rest.put(
+        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, gid),
+        { body: commands }
+      );
+      console.log(`✅ Registered ${data.length} guild slash command(s) to ${gid}.`);
+    }
   } catch (e) {
     console.error('❌ Slash register error:', e?.data ?? e);
   }
@@ -302,7 +310,7 @@ async function registerSlashCommands() {
 // ===== READY =====
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
-  try { await registerSlashCommands(); } catch (e) {
+  try { await registerSlashCommands(c); } catch (e) {
     console.error('Slash register error:', e.message);
   }
 });
@@ -326,7 +334,7 @@ async function getGuildSettings(guildId) {
 }
 
 async function upsertGuildSetting(guildId, field, value) {
-  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'payout_type', 'payout_amount']);
+  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'receipt_channel_id', 'payout_type', 'payout_amount']);
   if (!allowed.has(field)) throw new Error(`Invalid setting field: ${field}`);
   await teamPool.query(
     `INSERT INTO guild_settings (guild_id, ${field}, updated_at)
@@ -518,6 +526,7 @@ function setupButtons() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_currency_id').setLabel('Set Currency ID').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_receipt_channel').setLabel('Set Receipt Channel ID').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_type').setLabel('Set Payout Type').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_amount').setLabel('Set Payout Amount').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Success),
@@ -628,7 +637,8 @@ async function handleClaim(interaction) {
   }
   const dripResult = await awardDripPoints(settings.drip_realm_id, member.id, amount, settings.currency_id, settings);
 
-  const receiptChannel = await interaction.guild.channels.fetch(RECEIPT_CHANNEL_ID).catch(() => null);
+  const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
+  const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
   let receiptMessage = null;
   if (receiptChannel?.isTextBased()) {
     receiptMessage = await receiptChannel.send(
@@ -774,12 +784,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_payout_amount') {
+      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_receipt_channel' || interaction.customId === 'setup_payout_amount') {
         const fieldMap = {
           setup_drip_key: ['setup_drip_key_modal', 'DRIP API Key', 'drip_api_key', 'API key'],
           setup_client_id: ['setup_client_id_modal', 'DRIP Client ID', 'drip_client_id', 'Client ID'],
           setup_realm_id: ['setup_realm_id_modal', 'DRIP Realm ID', 'drip_realm_id', 'Realm ID'],
           setup_currency_id: ['setup_currency_id_modal', 'Currency ID', 'currency_id', 'Currency ID'],
+          setup_receipt_channel: ['setup_receipt_channel_modal', 'Receipt Channel ID', 'receipt_channel_id', 'Channel ID'],
           setup_payout_amount: ['setup_payout_amount_modal', 'Payout Amount', 'payout_amount', 'Number'],
         };
         const [id, title, field, label] = fieldMap[interaction.customId];
@@ -816,6 +827,7 @@ client.on('interactionCreate', async (interaction) => {
             `- DRIP Client ID: ${settings?.drip_client_id ? 'set' : 'not set'}\n` +
             `- DRIP Realm ID: ${settings?.drip_realm_id || 'not set'}\n` +
             `- Currency ID: ${settings?.currency_id || 'not set'}\n` +
+            `- Receipt Channel ID: ${settings?.receipt_channel_id || RECEIPT_CHANNEL_ID}\n` +
             `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
             `- Payout Amount: ${settings?.payout_amount || 1}\n\n` +
             `Rules (${rules.length}):\n` +
@@ -974,6 +986,7 @@ client.on('interactionCreate', async (interaction) => {
         setup_client_id_modal: 'drip_client_id',
         setup_realm_id_modal: 'drip_realm_id',
         setup_currency_id_modal: 'currency_id',
+        setup_receipt_channel_modal: 'receipt_channel_id',
         setup_payout_amount_modal: 'payout_amount',
       };
       const field = settingModalMap[interaction.customId];
