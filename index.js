@@ -353,6 +353,16 @@ function buildSlashCommands() {
           .setDescription('CSV file with category/trait/points mapping')
           .setRequired(true)
       )
+      .addStringOption((opt) =>
+        opt
+          .setName('mode')
+          .setDescription('How to apply this CSV to existing mapping')
+          .setRequired(false)
+          .addChoices(
+            { name: 'Merge (append/update traits)', value: 'merge' },
+            { name: 'Replace (overwrite mapping)', value: 'replace' }
+          )
+      )
       .toJSON(),
     new SlashCommandBuilder()
       .setName('remove-points-mapping')
@@ -468,6 +478,36 @@ function parsePointsMappingCsv(input) {
   }
   if (!rowCount) throw new Error('No valid data rows found. Check category/trait/points columns.');
   return { table, rowCount, categoryCount: Object.keys(table).length, delimiter };
+}
+
+function mergePointsMappingTables(existingTable, incomingTable) {
+  const existing = (existingTable && typeof existingTable === 'object') ? existingTable : {};
+  const incoming = (incomingTable && typeof incomingTable === 'object') ? incomingTable : {};
+  const merged = {};
+
+  for (const [category, traits] of Object.entries(existing)) {
+    if (!traits || typeof traits !== 'object') continue;
+    merged[category] = { ...traits };
+  }
+
+  let addedTraits = 0;
+  let updatedTraits = 0;
+  for (const [category, traits] of Object.entries(incoming)) {
+    if (!traits || typeof traits !== 'object') continue;
+    if (!merged[category]) merged[category] = {};
+    for (const [trait, points] of Object.entries(traits)) {
+      if (Object.prototype.hasOwnProperty.call(merged[category], trait)) updatedTraits++;
+      else addedTraits++;
+      merged[category][trait] = points;
+    }
+  }
+
+  return {
+    table: merged,
+    addedTraits,
+    updatedTraits,
+    totalCategories: Object.keys(merged).length,
+  };
 }
 
 async function postWalletReceipt(guild, settings, actorDiscordId, action, walletAddress) {
@@ -1488,6 +1528,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ flags: 64 });
 
         const collectionInput = String(interaction.options.getString('collection', true) || '').trim();
+        const mode = String(interaction.options.getString('mode', false) || 'merge').toLowerCase();
+        const replaceMode = mode === 'replace';
         const file = interaction.options.getAttachment('csv_file', true);
         if (!file?.url) {
           await interaction.editReply({ content: 'CSV attachment is required.' });
@@ -1527,12 +1569,20 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
           const parsed = parsePointsMappingCsv(csvInput);
-          await setGuildPointMapping(interaction.guild.id, selected.contract_address, parsed.table, interaction.user.id);
+          const existingMappings = await getGuildPointMappings(interaction.guild.id);
+          const existingTable = existingMappings.get(String(selected.contract_address).toLowerCase()) || {};
+          const merged = replaceMode
+            ? { table: parsed.table, addedTraits: parsed.rowCount, updatedTraits: 0, totalCategories: parsed.categoryCount }
+            : mergePointsMappingTables(existingTable, parsed.table);
+          await setGuildPointMapping(interaction.guild.id, selected.contract_address, merged.table, interaction.user.id);
+          const updatedLine = replaceMode ? '' : `Traits updated: ${merged.updatedTraits}\n`;
           await interaction.editReply({
             content:
-              `Points mapping saved for **${selected.name}** (\`${selected.contract_address}\`).\n` +
+              `Points mapping ${replaceMode ? 'replaced' : 'merged'} for **${selected.name}** (\`${selected.contract_address}\`).\n` +
               `Rows imported: ${parsed.rowCount}\n` +
-              `Categories: ${parsed.categoryCount}\n` +
+              `${replaceMode ? 'Categories' : 'Total categories'}: ${merged.totalCategories}\n` +
+              `${replaceMode ? 'Traits set' : 'Traits added'}: ${merged.addedTraits}\n` +
+              `${updatedLine}` +
               `Delimiter detected: \`${parsed.delimiter}\``
           });
         } catch (err) {
@@ -1795,6 +1845,7 @@ client.on('interactionCreate', async (interaction) => {
           content:
             `Choose a collection, then paste CSV mapping data.\n` +
             `For drag-and-drop CSV uploads, use: \`/set-points-mapping\`.\n` +
+            `New uploads are merged into existing mappings by default.\n` +
             `Required columns: \`category\`, \`trait\`, and \`ugly_points\` (or \`points\`).\n` +
             `Examples:\n` +
             `\`category,trait,ugly_points\`\n` +
@@ -2399,15 +2450,20 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
           const parsed = parsePointsMappingCsv(csvInput);
-          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, parsed.table, interaction.user.id);
+          const existingMappings = await getGuildPointMappings(interaction.guild.id);
+          const existingTable = existingMappings.get(String(pending.contractAddress).toLowerCase()) || {};
+          const merged = mergePointsMappingTables(existingTable, parsed.table);
+          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, merged.table, interaction.user.id);
           globalThis.__PENDING_POINTS_MAPPING.delete(key);
           const collections = await getHolderCollections(interaction.guild.id);
           const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(pending.contractAddress).toLowerCase());
           await interaction.editReply({
             content:
-              `Points mapping saved for **${selected?.name || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`).\n` +
+              `Points mapping merged for **${selected?.name || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`).\n` +
               `Rows imported: ${parsed.rowCount}\n` +
-              `Categories: ${parsed.categoryCount}\n` +
+              `Total categories: ${merged.totalCategories}\n` +
+              `Traits added: ${merged.addedTraits}\n` +
+              `Traits updated: ${merged.updatedTraits}\n` +
               `Delimiter detected: \`${parsed.delimiter}\``
           });
         } catch (err) {
