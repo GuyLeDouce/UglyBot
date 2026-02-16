@@ -851,24 +851,64 @@ async function verifyDripConnection(settings, discordProbeId) {
     return { ok: false, reason: `Missing required settings: ${missing.join(', ')}` };
   }
 
-  const pointsUrls = dripRealmBaseUrls(settings.drip_realm_id).map((baseUrl) => `${baseUrl}/points`);
-  let pointsPayload = null;
-  let pointsErr = null;
+  const configuredCurrency = String(settings.currency_id).trim();
+  const baseUrls = dripRealmBaseUrls(settings.drip_realm_id);
+  const pointsUrls = [];
+  for (const baseUrl of baseUrls) {
+    pointsUrls.push(`${baseUrl}/points`);
+    pointsUrls.push(`${baseUrl}/point`);
+    pointsUrls.push(`${baseUrl}/currencies`);
+    pointsUrls.push(`${baseUrl}/currency`);
+    pointsUrls.push(`${baseUrl}/points/${encodeURIComponent(configuredCurrency)}`);
+    pointsUrls.push(`${baseUrl}/point/${encodeURIComponent(configuredCurrency)}`);
+  }
+
+  const seen = new Set();
+  const attempts = [];
+  let points = [];
+
+  const extractPoints = (payload) => {
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.points)) return payload.points;
+    if (Array.isArray(payload?.currencies)) return payload.currencies;
+    if (Array.isArray(payload?.data?.points)) return payload.data.points;
+    if (Array.isArray(payload?.data?.currencies)) return payload.data.currencies;
+    if (payload?.data && typeof payload.data === 'object' && (payload.data.id || payload.data.name)) return [payload.data];
+    if (payload && typeof payload === 'object' && (payload.id || payload.name)) return [payload];
+    return [];
+  };
+
   for (const pointsUrl of pointsUrls) {
+    if (seen.has(pointsUrl)) continue;
+    seen.add(pointsUrl);
     const pointsRes = await fetchWithTimeout(pointsUrl, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
     if (pointsRes.ok) {
-      pointsPayload = await pointsRes.json().catch(() => ({}));
-      pointsErr = null;
-      break;
+      const payload = await pointsRes.json().catch(() => ({}));
+      const extracted = extractPoints(payload);
+      if (extracted.length > 0) {
+        points = extracted;
+        break;
+      }
+      attempts.push(`${pointsRes.status} ${pointsUrl} (no point/currency data)`);
+      continue;
     }
     const body = await pointsRes.text().catch(() => '');
-    pointsErr = `Points endpoint failed: HTTP ${pointsRes.status} ${body}`.slice(0, 320);
+    attempts.push(`${pointsRes.status} ${pointsUrl} ${String(body || '').slice(0, 120)}`.trim());
   }
-  if (!pointsPayload) return { ok: false, reason: pointsErr || 'Points endpoint failed for unknown reason.' };
 
-  const points = Array.isArray(pointsPayload?.data) ? pointsPayload.data : [];
-  const configuredCurrency = String(settings.currency_id);
-  const matchedCurrency = points.find(p => String(p?.id || '') === configuredCurrency);
+  if (!points.length) {
+    return {
+      ok: false,
+      reason: `Points endpoint failed. Tried: ${attempts.slice(0, 4).join(' | ') || 'no endpoints reached'}`.slice(0, 500)
+    };
+  }
+
+  const matchedCurrency = points.find((p) => {
+    const candidates = [p?.id, p?.currencyId, p?.realmPointId]
+      .map((v) => (v == null ? '' : String(v).trim()))
+      .filter(Boolean);
+    return candidates.includes(configuredCurrency);
+  });
   if (!matchedCurrency) {
     return {
       ok: false,
