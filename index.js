@@ -495,19 +495,26 @@ function setupButtons() {
 async function getOrCreateSetupChannel(guild) {
   let ch = guild.channels.cache.find(c => c.name === 'holder-verification-admin' && c.type === ChannelType.GuildText);
   if (ch) return ch;
-  ch = await guild.channels.create({
-    name: 'holder-verification-admin',
-    type: ChannelType.GuildText,
-    permissionOverwrites: [
-      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-      {
-        id: guild.members.me.id,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels],
-      },
-    ],
-    reason: 'Verification setup channel',
-  });
-  return ch;
+  const me = guild.members.me;
+  if (!me?.permissions?.has(PermissionFlagsBits.ManageChannels)) return null;
+  try {
+    ch = await guild.channels.create({
+      name: 'holder-verification-admin',
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        {
+          id: guild.members.me.id,
+          allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels],
+        },
+      ],
+      reason: 'Verification setup channel',
+    });
+    return ch;
+  } catch (err) {
+    if (err?.code === 50013) return null;
+    throw err;
+  }
 }
 
 function buildDripHeaders(settings, includeJson = false) {
@@ -552,11 +559,11 @@ async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
   const link = await getWalletLink(guildId, interaction.user.id);
   if (!link?.wallet_address) {
-    await interaction.reply({ content: 'Connect your wallet first.', ephemeral: true });
+    await interaction.reply({ content: 'Connect your wallet first.', flags: 64 });
     return;
   }
   if (await hasClaimedToday(guildId, interaction.user.id)) {
-    await interaction.reply({ content: 'You already claimed today. Try again after UTC midnight.', ephemeral: true });
+    await interaction.reply({ content: 'You already claimed today. Try again after UTC midnight.', flags: 64 });
     return;
   }
 
@@ -566,7 +573,7 @@ async function handleClaim(interaction) {
   if (!settings?.drip_api_key || !settings?.drip_client_id || !settings?.drip_realm_id || !settings?.currency_id) {
     await interaction.reply({
       content: 'Claim is not configured yet. Admin must set DRIP API Key, DRIP Client ID, DRIP Realm ID, and Currency ID.',
-      ephemeral: true
+      flags: 64
     });
     return;
   }
@@ -574,7 +581,7 @@ async function handleClaim(interaction) {
   const amount = Math.max(0, Math.floor(stats.unitTotal * payoutAmount));
 
   if (amount <= 0) {
-    await interaction.reply({ content: 'No payout available. Check your holdings or payout settings.', ephemeral: true });
+    await interaction.reply({ content: 'No payout available. Check your holdings or payout settings.', flags: 64 });
     return;
   }
 
@@ -582,7 +589,7 @@ async function handleClaim(interaction) {
   if (!member) {
     await interaction.reply({
       content: 'You are not registered as a DRIP member in this realm for your Discord ID.',
-      ephemeral: true
+      flags: 64
     });
     return;
   }
@@ -610,7 +617,7 @@ async function handleClaim(interaction) {
     [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
   );
 
-  await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, ephemeral: true });
+  await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, flags: 64 });
 }
 
 client.on('interactionCreate', async (interaction) => {
@@ -618,7 +625,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'launch-verification') {
         if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
           return;
         }
         const msg = await interaction.channel.send({
@@ -629,16 +636,25 @@ client.on('interactionCreate', async (interaction) => {
           `INSERT INTO verification_panels (guild_id, channel_id, message_id, created_by) VALUES ($1, $2, $3, $4)`,
           [interaction.guild.id, interaction.channel.id, msg.id, interaction.user.id]
         );
-        await interaction.reply({ content: 'Verification menu launched.', ephemeral: true });
+        await interaction.reply({ content: 'Verification menu launched.', flags: 64 });
         return;
       }
 
       if (interaction.commandName === 'setup-verification') {
         if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
           return;
         }
         const adminChannel = await getOrCreateSetupChannel(interaction.guild);
+        if (!adminChannel) {
+          await interaction.reply({
+            content:
+              'I cannot create a private setup channel (Missing Permissions: Manage Channels).\n' +
+              'Either grant `Manage Channels` to the bot or create `#holder-verification-admin` manually and run this command there.',
+            flags: 64
+          });
+          return;
+        }
         await adminChannel.send({
           embeds: [
             new EmbedBuilder()
@@ -654,7 +670,7 @@ client.on('interactionCreate', async (interaction) => {
           ],
           components: setupButtons(),
         });
-        await interaction.reply({ content: `Setup panel posted in <#${adminChannel.id}>`, ephemeral: true });
+        await interaction.reply({ content: `Setup panel posted in <#${adminChannel.id}>`, flags: 64 });
         return;
       }
       return;
@@ -699,7 +715,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (!isAdmin(interaction)) {
-        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
         return;
       }
 
@@ -742,7 +758,7 @@ client.on('interactionCreate', async (interaction) => {
               { label: 'Per UglyPoint', value: 'per_up', description: 'Payout = total UP x payout amount' },
             )
         );
-        await interaction.reply({ content: 'Choose payout type:', components: [row], ephemeral: true });
+        await interaction.reply({ content: 'Choose payout type:', components: [row], flags: 64 });
         return;
       }
 
@@ -750,7 +766,7 @@ client.on('interactionCreate', async (interaction) => {
         const settings = await getGuildSettings(interaction.guild.id);
         const rules = await getHolderRules(interaction.guild.id);
         await interaction.reply({
-          ephemeral: true,
+          flags: 64,
           content:
             `Settings:\n` +
             `- DRIP API Key: ${settings?.drip_api_key ? 'set' : 'not set'}\n` +
@@ -769,7 +785,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'setup_payout_type_select') {
       if (!isAdmin(interaction)) {
-        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
         return;
       }
       await upsertGuildSetting(interaction.guild.id, 'payout_type', interaction.values[0]);
@@ -782,14 +798,14 @@ client.on('interactionCreate', async (interaction) => {
         const raw = interaction.fields.getTextInputValue('wallet_address');
         const addr = normalizeEthAddress(raw);
         if (!addr) {
-          await interaction.reply({ content: 'Invalid Ethereum address.', ephemeral: true });
+          await interaction.reply({ content: 'Invalid Ethereum address.', flags: 64 });
           return;
         }
         await setWalletLink(interaction.guild.id, interaction.user.id, addr, false);
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, addr);
         await interaction.reply({
-          ephemeral: true,
+          flags: 64,
           content:
             `Wallet connected: \`${addr}\`\n` +
             `Role sync complete (${sync.changed} role changes).\n` +
@@ -801,7 +817,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'verify_check_stats_modal') {
         const tokenId = String(interaction.fields.getTextInputValue('token_id') || '').trim();
         if (!/^\d+$/.test(tokenId)) {
-          await interaction.reply({ content: 'Token ID must be numeric.', ephemeral: true });
+          await interaction.reply({ content: 'Token ID must be numeric.', flags: 64 });
           return;
         }
         const meta = await getNftMetadataAlchemy(tokenId);
@@ -811,7 +827,7 @@ client.on('interactionCreate', async (interaction) => {
         const tier = hpToTierLabel(hpAgg.total || 0);
         const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
         await interaction.reply({
-          ephemeral: true,
+          flags: 64,
           embeds: [
             new EmbedBuilder()
               .setTitle(`Squig #${tokenId}`)
@@ -824,7 +840,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (!isAdmin(interaction)) {
-        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
         return;
       }
 
@@ -835,15 +851,15 @@ client.on('interactionCreate', async (interaction) => {
         const maxRaw = String(interaction.fields.getTextInputValue('max_tokens') || '').trim();
         const maxTokens = maxRaw === '' ? null : Number(maxRaw);
         if (!contractAddress) {
-          await interaction.reply({ content: 'Invalid contract address.', ephemeral: true });
+          await interaction.reply({ content: 'Invalid contract address.', flags: 64 });
           return;
         }
         if (!Number.isInteger(minTokens) || minTokens < 0 || (maxTokens != null && (!Number.isInteger(maxTokens) || maxTokens < minTokens))) {
-          await interaction.reply({ content: 'Invalid min/max token values.', ephemeral: true });
+          await interaction.reply({ content: 'Invalid min/max token values.', flags: 64 });
           return;
         }
         const role = await addHolderRule(interaction.guild, { roleName, contractAddress, minTokens, maxTokens });
-        await interaction.reply({ content: `Rule added for role **${role.name}** on \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}).`, ephemeral: true });
+        await interaction.reply({ content: `Rule added for role **${role.name}** on \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}).`, flags: 64 });
         return;
       }
 
@@ -860,23 +876,23 @@ client.on('interactionCreate', async (interaction) => {
         if (field === 'payout_amount') {
           const n = Number(value);
           if (!Number.isFinite(n) || n < 0) {
-            await interaction.reply({ content: 'Payout amount must be a non-negative number.', ephemeral: true });
+            await interaction.reply({ content: 'Payout amount must be a non-negative number.', flags: 64 });
             return;
           }
           await upsertGuildSetting(interaction.guild.id, field, n);
         } else {
           await upsertGuildSetting(interaction.guild.id, field, value);
         }
-        await interaction.reply({ content: `Updated \`${field}\`.`, ephemeral: true });
+        await interaction.reply({ content: `Updated \`${field}\`.`, flags: 64 });
         return;
       }
     }
   } catch (err) {
     console.error('❌ Verification interaction error:', err);
     if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: '⚠️ Something went wrong handling that action.', ephemeral: true }).catch(() => {});
+      await interaction.followUp({ content: '⚠️ Something went wrong handling that action.', flags: 64 }).catch(() => {});
     } else {
-      await interaction.reply({ content: '⚠️ Something went wrong handling that action.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: '⚠️ Something went wrong handling that action.', flags: 64 }).catch(() => {});
     }
   }
 });
@@ -1807,4 +1823,5 @@ ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   return canvas.toBuffer('image/jpeg', { quality: 92 });
 
 }
+
 
