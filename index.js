@@ -537,11 +537,44 @@ function verificationButtons() {
   );
 }
 
-function setupButtons() {
+function setupMainEmbed() {
+  return new EmbedBuilder()
+    .setTitle('Holder Verification Setup')
+    .setDescription(
+      `Choose a setup action.\n` +
+      `• Holder roles: add/remove contract role rules.\n` +
+      `• Setup DRIP: open DRIP settings + connection checks.\n` +
+      `• View Config: show current settings and rules.`
+    )
+    .setColor(0xB0DEEE);
+}
+
+function setupDripEmbed() {
+  return new EmbedBuilder()
+    .setTitle('DRIP Setup')
+    .setDescription(
+      `Configure DRIP credentials and payout behavior, then verify connection.\n` +
+      `• Credentials: API key, client ID, realm ID.\n` +
+      `• Rewards: currency, receipt channel, payout type/amount.\n` +
+      `• Verify DRIP Connection: checks realm + points endpoint access.`
+    )
+    .setColor(0x7ADDC0);
+}
+
+function setupMainButtons() {
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role Rule').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role Rule').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+function setupDripButtons() {
+  return [
+    new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_drip_key').setLabel('Set DRIP API Key').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_client_id').setLabel('Set DRIP Client ID').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_realm_id').setLabel('Set DRIP Realm ID').setStyle(ButtonStyle.Secondary),
@@ -554,7 +587,7 @@ function setupButtons() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_verify_drip').setLabel('Verify DRIP Connection').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_back_main').setLabel('Back to Main Setup').setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -1013,19 +1046,8 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await interaction.channel.send({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle('Holder Verification Setup')
-              .setDescription(
-                `Configure holder rules and DRIP settings.\n` +
-                `• Role rules: role + contract + min/max holdings.\n` +
-                `• DRIP settings: API key, realm, currency.\n` +
-                `• Payout type: per NFT or per UP.\n` +
-                `• Payout amount: multiplier for the selected payout type.`
-              )
-              .setColor(0xB0DEEE)
-          ],
-          components: setupButtons(),
+          embeds: [setupMainEmbed()],
+          components: setupMainButtons(),
         });
         await interaction.reply({ content: `Setup panel posted in <#${interaction.channel.id}>`, flags: 64 });
         return;
@@ -1113,6 +1135,22 @@ client.on('interactionCreate', async (interaction) => {
 
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+
+      if (interaction.customId === 'setup_drip_menu') {
+        await interaction.update({
+          embeds: [setupDripEmbed()],
+          components: setupDripButtons(),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_back_main') {
+        await interaction.update({
+          embeds: [setupMainEmbed()],
+          components: setupMainButtons(),
+        });
         return;
       }
 
