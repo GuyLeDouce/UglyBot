@@ -251,6 +251,17 @@ async function ensureTeamSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS holder_collections (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await teamPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS holder_collections_guild_contract_uidx ON holder_collections (guild_id, contract_address);`);
   console.log('✅ team schema ready');
 }
 
@@ -346,6 +357,14 @@ function normalizeEthAddress(input) {
   return addr.toLowerCase();
 }
 
+function labelForContract(contractAddress) {
+  const c = String(contractAddress || '').toLowerCase();
+  if (c === UGLY_CONTRACT.toLowerCase()) return 'Charm of the Ugly';
+  if (c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
+  if (c === SQUIGS_CONTRACT.toLowerCase()) return 'Squigs';
+  return String(contractAddress || 'Unknown Contract');
+}
+
 function parseWalletAddressesInput(raw) {
   const text = String(raw || '').trim();
   if (!text) return [];
@@ -433,6 +452,40 @@ async function getHolderRules(guildId) {
     [guildId]
   );
   return rows;
+}
+
+function defaultHolderCollections() {
+  return [
+    { name: 'Charm of the Ugly', contract_address: UGLY_CONTRACT.toLowerCase() },
+    { name: 'Ugly Monsters', contract_address: MONSTER_CONTRACT.toLowerCase() },
+    { name: 'Squigs', contract_address: SQUIGS_CONTRACT.toLowerCase() },
+  ];
+}
+
+async function getHolderCollections(guildId) {
+  const { rows } = await teamPool.query(
+    `SELECT name, contract_address FROM holder_collections WHERE guild_id = $1 AND enabled = TRUE ORDER BY created_at ASC`,
+    [guildId]
+  );
+  const out = [];
+  const seen = new Set();
+  for (const c of [...defaultHolderCollections(), ...rows]) {
+    const addr = normalizeEthAddress(c.contract_address);
+    if (!addr || seen.has(addr)) continue;
+    seen.add(addr);
+    out.push({ name: String(c.name || addr), contract_address: addr });
+  }
+  return out;
+}
+
+async function upsertHolderCollection(guildId, name, contractAddress) {
+  await teamPool.query(
+    `INSERT INTO holder_collections (guild_id, name, contract_address, enabled)
+     VALUES ($1, $2, $3, TRUE)
+     ON CONFLICT (guild_id, contract_address) DO UPDATE
+     SET name = EXCLUDED.name, enabled = TRUE`,
+    [guildId, String(name || '').trim(), String(contractAddress || '').toLowerCase()]
+  );
 }
 
 async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens }) {
@@ -668,7 +721,8 @@ function setupMainEmbed() {
     .setTitle('Holder Verification Setup')
     .setDescription(
       `Choose a setup action.\n` +
-      `• Holder roles: add/remove contract role rules.\n` +
+      `• Collections: add collection name + contract for setup options.\n` +
+      `• Holder roles: add/remove collection-based role rules.\n` +
       `• Setup DRIP: open DRIP settings + connection checks.\n` +
       `• View Config: show current settings and rules.`
     )
@@ -691,6 +745,7 @@ function setupMainButtons() {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup_add_collection').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
@@ -1365,11 +1420,51 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'setup_add_rule') {
-        const modal = new ModalBuilder().setCustomId('setup_add_rule_modal').setTitle('Add Holder Role Rule');
+        const collections = await getHolderCollections(interaction.guild.id);
+        if (!collections.length) {
+          const addBtnRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('setup_add_collection_from_rule').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
+          );
+          await interaction.reply({
+            content: 'No collections found. Add one to continue.',
+            components: [addBtnRow],
+            flags: 64
+          });
+          return;
+        }
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        globalThis.__PENDING_HOLDER_RULES.set(key, { contractAddress: null, collectionName: null, minTokens: null, maxTokens: null, createdAt: Date.now() });
+        const options = collections.slice(0, 25).map((c) => ({
+          label: String(c.name).slice(0, 100),
+          value: c.contract_address,
+          description: String(c.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_add_rule_collection_select')
+            .setPlaceholder('Select collection')
+            .addOptions(options)
+        );
+        const addBtnRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('setup_add_collection_from_rule').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.reply({
+          content: 'Select collection for holder role rule. If not listed, add it below.',
+          components: [row, addBtnRow],
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_add_collection' || interaction.customId === 'setup_add_collection_from_rule') {
+        const modal = new ModalBuilder().setCustomId('setup_add_collection_modal').setTitle('Add Collection');
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_tokens').setLabel('Min tokens (inclusive)').setRequired(true).setStyle(TextInputStyle.Short)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_tokens').setLabel('Max tokens (optional)').setRequired(false).setStyle(TextInputStyle.Short)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('collection_name').setLabel('Collection name').setRequired(true).setStyle(TextInputStyle.Short)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)
+          ),
         );
         await interaction.showModal(modal);
         return;
@@ -1491,6 +1586,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'setup_view') {
         const settings = await getGuildSettings(interaction.guild.id);
         const rules = await getHolderRules(interaction.guild.id);
+        const collections = await getHolderCollections(interaction.guild.id);
         await interaction.reply({
           flags: 64,
           content:
@@ -1502,6 +1598,8 @@ client.on('interactionCreate', async (interaction) => {
             `- Receipt Channel ID: ${settings?.receipt_channel_id || RECEIPT_CHANNEL_ID}\n` +
             `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
             `- Payout Amount: ${settings?.payout_amount || 1}\n\n` +
+            `Collections (${collections.length}):\n` +
+            `${collections.map(c => `- ${c.name}: ${c.contract_address}`).join('\n') || '- none'}\n\n` +
             `Rules (${rules.length}):\n` +
             `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}`
         });
@@ -1517,7 +1615,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       const key = `${interaction.guild.id}:${interaction.user.id}`;
       const pending = globalThis.__PENDING_HOLDER_RULES.get(key);
-      if (!pending) {
+      if (!pending || !pending.contractAddress || !Number.isInteger(pending.minTokens) || (pending.maxTokens != null && !Number.isInteger(pending.maxTokens))) {
         await interaction.reply({ content: 'No pending holder rule found. Click "Add Holder Role Rule" again.', flags: 64 });
         return;
       }
@@ -1558,7 +1656,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       const stats = await computeWalletStatsForPayout(interaction.guild.id, walletAddresses, 'per_up');
-      const byCollectionLines = (stats.byCollection || []).map((x) => `- \`${x.contractAddress}\`: ${x.count} NFT${x.count === 1 ? '' : 's'}`);
+      const byCollectionLines = (stats.byCollection || []).map((x) => `- ${labelForContract(x.contractAddress)}: ${x.count} NFT${x.count === 1 ? '' : 's'}`);
       const mode = interaction.values?.[0] || 'all';
       let content = '';
       if (mode === 'by_collection') {
@@ -1573,6 +1671,36 @@ client.on('interactionCreate', async (interaction) => {
           `By collection:\n${byCollectionLines.join('\n') || '- none'}`;
       }
       await interaction.update({ content, components: [] });
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_add_rule_collection_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      const pending = globalThis.__PENDING_HOLDER_RULES.get(key);
+      if (!pending) {
+        await interaction.update({ content: 'No pending holder rule found. Click "Add Holder Role" again.', components: [] });
+        return;
+      }
+      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
+      if (!contractAddress) {
+        await interaction.update({ content: 'Invalid collection selection.', components: [] });
+        return;
+      }
+      const collections = await getHolderCollections(interaction.guild.id);
+      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      pending.contractAddress = contractAddress;
+      pending.collectionName = selected?.name || labelForContract(contractAddress);
+      globalThis.__PENDING_HOLDER_RULES.set(key, pending);
+      const modal = new ModalBuilder().setCustomId('setup_add_rule_modal').setTitle('Set Token Range');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_tokens').setLabel('Min tokens (inclusive)').setRequired(true).setStyle(TextInputStyle.Short)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_tokens').setLabel('Max tokens (optional)').setRequired(false).setStyle(TextInputStyle.Short)),
+      );
+      await interaction.showModal(modal);
       return;
     }
 
@@ -1730,20 +1858,22 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'setup_add_rule_modal') {
-        const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
         const minTokens = Number(interaction.fields.getTextInputValue('min_tokens'));
         const maxRaw = String(interaction.fields.getTextInputValue('max_tokens') || '').trim();
         const maxTokens = maxRaw === '' ? null : Number(maxRaw);
-        if (!contractAddress) {
-          await interaction.reply({ content: 'Invalid contract address.', flags: 64 });
-          return;
-        }
         if (!Number.isInteger(minTokens) || minTokens < 0 || (maxTokens != null && (!Number.isInteger(maxTokens) || maxTokens < minTokens))) {
           await interaction.reply({ content: 'Invalid min/max token values.', flags: 64 });
           return;
         }
         const key = `${interaction.guild.id}:${interaction.user.id}`;
-        globalThis.__PENDING_HOLDER_RULES.set(key, { contractAddress, minTokens, maxTokens, createdAt: Date.now() });
+        const pending = globalThis.__PENDING_HOLDER_RULES.get(key);
+        if (!pending?.contractAddress) {
+          await interaction.reply({ content: 'No pending collection selection found. Click "Add Holder Role" again.', flags: 64 });
+          return;
+        }
+        pending.minTokens = minTokens;
+        pending.maxTokens = maxTokens;
+        globalThis.__PENDING_HOLDER_RULES.set(key, pending);
         const row = new ActionRowBuilder().addComponents(
           new RoleSelectMenuBuilder()
             .setCustomId('setup_add_rule_role_select')
@@ -1752,10 +1882,26 @@ client.on('interactionCreate', async (interaction) => {
             .setMaxValues(1)
         );
         await interaction.reply({
-          content: `Now select which role should be assigned for \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}):`,
+          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`) with range ${minTokens}-${maxTokens ?? '∞'}:`,
           components: [row],
           flags: 64
         });
+        return;
+      }
+
+      if (interaction.customId === 'setup_add_collection_modal') {
+        const name = String(interaction.fields.getTextInputValue('collection_name') || '').trim();
+        const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
+        if (!name) {
+          await interaction.reply({ content: 'Collection name is required.', flags: 64 });
+          return;
+        }
+        if (!contractAddress) {
+          await interaction.reply({ content: 'Invalid contract address.', flags: 64 });
+          return;
+        }
+        await upsertHolderCollection(interaction.guild.id, name, contractAddress);
+        await interaction.reply({ content: `Collection saved: **${name}** (\`${contractAddress}\`)`, flags: 64 });
         return;
       }
 
