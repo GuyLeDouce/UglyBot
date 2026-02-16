@@ -705,33 +705,75 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
   return resolved.member || null;
 }
 
-async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
-  const payload = { tokens: Number(tokens) };
-  if (currencyId) payload.realmPointId = String(currencyId);
-  const baseUrls = dripRealmBaseUrls(realmId);
-  let last404 = false;
+function collectDripMemberIdCandidates(memberLike, fallbackId = null) {
+  const ids = [
+    fallbackId,
+    memberLike?.id,
+    memberLike?.realmMemberId,
+    memberLike?.memberId,
+    memberLike?.dripId,
+    memberLike?.accountId,
+  ]
+    .map(v => (v == null ? '' : String(v).trim()))
+    .filter(Boolean);
+  return [...new Set(ids)];
+}
 
-  for (const baseUrl of baseUrls) {
-    const url = `${baseUrl}/members/${encodeURIComponent(memberId)}/point-balance`;
-    const res = await fetchWithTimeout(url, {
-      timeoutMs: 15000,
-      headers: buildDripHeaders(settings, true),
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      return res.json().catch(() => ({}));
-    }
-    if (res.status === 404) {
-      last404 = true;
-      continue;
-    }
-    const body = await res.text().catch(() => '');
-    throw new Error(`DRIP award failed: HTTP ${res.status} ${body}`);
+async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings) {
+  const ids = Array.isArray(memberIds) ? memberIds : [memberIds];
+  const memberIdCandidates = [...new Set(ids.map(v => (v == null ? '' : String(v).trim())).filter(Boolean))];
+  if (!memberIdCandidates.length) {
+    throw new Error('DRIP award failed: no member ID candidates provided.');
   }
 
-  if (last404) {
-    throw new Error('DRIP award failed: member or endpoint not found (HTTP 404 on all realm path variants).');
+  const baseUrls = dripRealmBaseUrls(realmId);
+  const endpointVariants = [
+    {
+      suffix: '/point-balance',
+      payload: {
+        tokens: Number(tokens),
+        ...(currencyId ? { realmPointId: String(currencyId) } : {})
+      },
+    },
+    {
+      suffix: '/balance',
+      payload: {
+        amount: Number(tokens),
+        ...(currencyId ? { currencyId: String(currencyId) } : {})
+      },
+    },
+  ];
+
+  const notFoundAttempts = [];
+
+  for (const memberId of memberIdCandidates) {
+    for (const baseUrl of baseUrls) {
+      for (const variant of endpointVariants) {
+        const url = `${baseUrl}/members/${encodeURIComponent(memberId)}${variant.suffix}`;
+        const res = await fetchWithTimeout(url, {
+          timeoutMs: 15000,
+          headers: buildDripHeaders(settings, true),
+          method: 'PATCH',
+          body: JSON.stringify(variant.payload),
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          return { data, usedMemberId: memberId, endpoint: variant.suffix, baseUrl };
+        }
+        const body = await res.text().catch(() => '');
+        if (res.status === 404) {
+          notFoundAttempts.push(`${memberId}@${variant.suffix}: ${String(body || '404').slice(0, 90)}`);
+          continue;
+        }
+        throw new Error(`DRIP award failed: HTTP ${res.status} ${body}`);
+      }
+    }
+  }
+
+  if (notFoundAttempts.length) {
+    throw new Error(
+      `DRIP award failed: member or endpoint not found (HTTP 404 across all variants). Attempts: ${notFoundAttempts.join(' | ')}`
+    );
   }
   throw new Error('DRIP award failed: no endpoint accepted the request.');
 }
@@ -828,21 +870,26 @@ async function handleClaim(interaction) {
   }
 
   try {
+    let resolved = null;
     let dripMemberId = link.drip_member_id || null;
-    if (!dripMemberId) {
-      const resolved = await resolveDripMemberForDiscordUser(
+    try {
+      resolved = await resolveDripMemberForDiscordUser(
         settings.drip_realm_id,
         interaction.user.id,
         link.wallet_address,
         settings
       );
-      dripMemberId = resolved.member?.id || null;
-      if (dripMemberId) {
+      const resolvedPrimary = resolved?.member?.id || null;
+      if (resolvedPrimary && resolvedPrimary !== dripMemberId) {
+        dripMemberId = resolvedPrimary;
         await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
       }
+    } catch (resolveErr) {
+      if (!dripMemberId) throw resolveErr;
     }
 
-    if (!dripMemberId) {
+    const dripMemberIdCandidates = collectDripMemberIdCandidates(resolved?.member, dripMemberId);
+    if (!dripMemberIdCandidates.length) {
       await interaction.reply({
         content:
           'Claim failed: no DRIP member found for your Discord ID in this realm.\n' +
@@ -852,7 +899,16 @@ async function handleClaim(interaction) {
       return;
     }
 
-    const dripResult = await awardDripPoints(settings.drip_realm_id, dripMemberId, amount, settings.currency_id, settings);
+    const awardResult = await awardDripPoints(
+      settings.drip_realm_id,
+      dripMemberIdCandidates,
+      amount,
+      settings.currency_id,
+      settings
+    );
+    const dripResult = awardResult?.data || {};
+    dripMemberId = awardResult?.usedMemberId || dripMemberIdCandidates[0];
+    await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
 
     const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
     const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
@@ -867,6 +923,7 @@ async function handleClaim(interaction) {
         `Units: ${stats.unitTotal}\n` +
         `Payout: **${amount} $CHARM**\n` +
         `DRIP Realm: \`${settings.drip_realm_id}\` | Currency: \`${settings.currency_id}\`\n` +
+        `Endpoint: \`${awardResult?.endpoint || 'unknown'}\`\n` +
         `Result: \`${JSON.stringify(dripResult).slice(0, 300)}\``
       );
     }
