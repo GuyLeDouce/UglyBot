@@ -231,6 +231,7 @@ async function ensureTeamSchema() {
       drip_realm_id TEXT,
       currency_id TEXT,
       receipt_channel_id TEXT,
+      points_label TEXT NOT NULL DEFAULT 'UglyPoints',
       payout_type TEXT NOT NULL DEFAULT 'per_up',
       payout_amount NUMERIC NOT NULL DEFAULT 1,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -238,6 +239,7 @@ async function ensureTeamSchema() {
   `);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS drip_client_id TEXT;`);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS receipt_channel_id TEXT;`);
+  await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS points_label TEXT NOT NULL DEFAULT 'UglyPoints';`);
   await teamPool.query(`
     CREATE TABLE IF NOT EXISTS holder_rules (
       id BIGSERIAL PRIMARY KEY,
@@ -262,6 +264,15 @@ async function ensureTeamSchema() {
     );
   `);
   await teamPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS holder_collections_guild_contract_uidx ON holder_collections (guild_id, contract_address);`);
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS holder_point_mappings (
+      guild_id TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      mapping_json JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, contract_address)
+    );
+  `);
   console.log('✅ team schema ready');
 }
 
@@ -350,6 +361,7 @@ client.once(Events.ClientReady, async (c) => {
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
 globalThis.__PENDING_HOLDER_RULES ||= new Map();
+globalThis.__PENDING_POINTS_MAPPING ||= new Map();
 
 function normalizeEthAddress(input) {
   const addr = String(input || '').trim();
@@ -378,6 +390,43 @@ function parseWalletAddressesInput(raw) {
     out.push(normalized);
   }
   return out;
+}
+
+function parsePointsMappingCsv(input) {
+  const text = String(input || '').trim();
+  if (!text) throw new Error('CSV content is empty.');
+
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) throw new Error('CSV must include a header and at least one data row.');
+
+  const delimiter = lines[0].includes('|') ? '|' : ',';
+  const split = (line) => {
+    if (delimiter === '|') return String(line || '').split('|').map((x) => x.trim().replace(/^"|"$/g, ''));
+    return parseSimpleCsvLine(line);
+  };
+  const header = split(lines[0]).map((h) => String(h || '').toLowerCase());
+  const catIdx = header.indexOf('category');
+  const traitIdx = header.indexOf('trait');
+  const ptsIdxCandidates = ['ugly_points', 'points', 'up', 'value'].map((k) => header.indexOf(k)).filter((i) => i >= 0);
+  const ptsIdx = ptsIdxCandidates[0] ?? -1;
+  if (catIdx < 0 || traitIdx < 0 || ptsIdx < 0) {
+    throw new Error('CSV header must include: category, trait, and ugly_points (or points).');
+  }
+
+  const table = {};
+  let rowCount = 0;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = split(lines[i]);
+    const category = String(cols[catIdx] ?? '').trim();
+    const trait = String(cols[traitIdx] ?? '').trim();
+    const points = Number(String(cols[ptsIdx] ?? '').trim());
+    if (!category || !trait || !Number.isFinite(points)) continue;
+    if (!table[category]) table[category] = {};
+    table[category][trait] = points;
+    rowCount++;
+  }
+  if (!rowCount) throw new Error('No valid data rows found. Check category/trait/points columns.');
+  return { table, rowCount, categoryCount: Object.keys(table).length, delimiter };
 }
 
 async function postWalletReceipt(guild, settings, actorDiscordId, action, walletAddress) {
@@ -416,7 +465,7 @@ async function getGuildSettings(guildId) {
 }
 
 async function upsertGuildSetting(guildId, field, value) {
-  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'receipt_channel_id', 'payout_type', 'payout_amount']);
+  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'receipt_channel_id', 'points_label', 'payout_type', 'payout_amount']);
   if (!allowed.has(field)) throw new Error(`Invalid setting field: ${field}`);
   await teamPool.query(
     `INSERT INTO guild_settings (guild_id, ${field}, updated_at)
@@ -425,6 +474,11 @@ async function upsertGuildSetting(guildId, field, value) {
      SET ${field} = EXCLUDED.${field}, updated_at = NOW()`,
     [guildId, value]
   );
+}
+
+function getPointsLabel(settings) {
+  const label = String(settings?.points_label || '').trim();
+  return label || 'UglyPoints';
 }
 
 async function clearDripSettings(guildId) {
@@ -486,6 +540,30 @@ async function upsertHolderCollection(guildId, name, contractAddress) {
      SET name = EXCLUDED.name, enabled = TRUE`,
     [guildId, String(name || '').trim(), String(contractAddress || '').toLowerCase()]
   );
+}
+
+async function setGuildPointMapping(guildId, contractAddress, mappingTable) {
+  await teamPool.query(
+    `INSERT INTO holder_point_mappings (guild_id, contract_address, mapping_json, updated_at)
+     VALUES ($1, $2, $3::jsonb, NOW())
+     ON CONFLICT (guild_id, contract_address) DO UPDATE
+     SET mapping_json = EXCLUDED.mapping_json, updated_at = NOW()`,
+    [guildId, String(contractAddress || '').toLowerCase(), JSON.stringify(mappingTable || {})]
+  );
+}
+
+async function getGuildPointMappings(guildId) {
+  const { rows } = await teamPool.query(
+    `SELECT contract_address, mapping_json FROM holder_point_mappings WHERE guild_id = $1`,
+    [guildId]
+  );
+  const out = new Map();
+  for (const r of rows) {
+    const c = normalizeEthAddress(r.contract_address);
+    if (!c) continue;
+    out.set(c, (r.mapping_json && typeof r.mapping_json === 'object') ? r.mapping_json : {});
+  }
+  return out;
 }
 
 async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens }) {
@@ -633,6 +711,7 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
   if (!normalizedAddresses.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] };
 
   const rules = await getHolderRules(guildId);
+  const guildPointMappings = await getGuildPointMappings(guildId);
   const contracts = [...new Set(rules.map(r => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
   if (!contracts.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] };
 
@@ -645,7 +724,7 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
   let totalUp = 0;
   if (payoutType === 'per_up') {
     const scorableContracts = byCollection.filter(({ contractAddress }) => {
-      const table = hpTableForContract(contractAddress);
+      const table = hpTableForContract(contractAddress, guildPointMappings);
       return table && Object.keys(table).length > 0;
     });
     const perContractTotals = await mapLimit(scorableContracts, 2, async ({ contractAddress, ids }) => {
@@ -654,7 +733,7 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
           const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
           const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
           const grouped = normalizeTraits(attrs);
-          const table = hpTableForContract(contractAddress);
+          const table = hpTableForContract(contractAddress, guildPointMappings);
           const { total } = computeHpFromTraits(grouped, table);
           return total || 0;
         } catch {
@@ -695,15 +774,15 @@ function verificationButtons() {
   );
 }
 
-function rewardsMenuEmbed(guildName) {
+function rewardsMenuEmbed(guildName, pointsLabel = 'UglyPoints') {
   return new EmbedBuilder()
     .setTitle('Holder Rewards')
     .setDescription(
       `Welcome to **${guildName}** rewards.\n\n` +
       `Use the buttons below:\n` +
       `• **Claim Rewards**: collect your daily holder payout.\n` +
-      `• **Check NFT Status**: view a Squig token's UP breakdown.\n` +
-      `• **View Holdings**: see holdings by collection, UglyPoints, or full summary.`
+      `• **Check NFT Status**: view a Squig token's ${pointsLabel} breakdown.\n` +
+      `• **View Holdings**: see holdings by collection, ${pointsLabel}, or full summary.`
     )
     .setColor(0xB0DEEE);
 }
@@ -723,6 +802,7 @@ function setupMainEmbed() {
       `Choose a setup action.\n` +
       `• Collections: add collection name + contract for setup options.\n` +
       `• Holder roles: add/remove collection-based role rules.\n` +
+      `• Points Mapping: upload category/trait/points CSV per collection.\n` +
       `• Setup DRIP: open DRIP settings + connection checks.\n` +
       `• View Config: show current settings and rules.`
     )
@@ -747,7 +827,10 @@ function setupMainButtons() {
       new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup_add_collection').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('setup_points_mapping').setLabel('Points Mapping').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -763,6 +846,7 @@ function setupDripButtons() {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_currency_id').setLabel('Set Currency ID').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_receipt_channel').setLabel('Set Receipt Channel ID').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_points_label').setLabel('Set Points Label').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_type').setLabel('Set Payout Type').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_amount').setLabel('Set Payout Amount').setStyle(ButtonStyle.Secondary),
     ),
@@ -1125,6 +1209,7 @@ async function handleClaim(interaction) {
   }
 
   const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1 };
+  const pointsLabel = getPointsLabel(settings);
   const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
   const payoutAmount = Number(settings.payout_amount || 0);
   const missing = [];
@@ -1197,10 +1282,10 @@ async function handleClaim(interaction) {
     try {
       receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
       if (receiptChannel?.isTextBased()) {
-        const earningBasis =
-          payoutType === 'per_nft'
-            ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
-            : `${stats.totalUp} UglyPoints`;
+      const earningBasis =
+        payoutType === 'per_nft'
+          ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
+          : `${stats.totalUp} ${pointsLabel}`;
         receiptMessage = await receiptChannel.send(
           `🧾 Claim Receipt\n` +
           `User: <@${interaction.user.id}>\n` +
@@ -1287,8 +1372,10 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
           return;
         }
+        const settings = await getGuildSettings(interaction.guild.id);
+        const pointsLabel = getPointsLabel(settings);
         await interaction.channel.send({
-          embeds: [rewardsMenuEmbed(interaction.guild.name)],
+          embeds: [rewardsMenuEmbed(interaction.guild.name, pointsLabel)],
           components: [rewardsButtons()],
         });
         await interaction.reply({ content: 'Rewards menu launched.', flags: 64 });
@@ -1380,14 +1467,16 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'rewards_view_holdings') {
+        const settings = await getGuildSettings(interaction.guild.id);
+        const pointsLabel = getPointsLabel(settings);
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
             .setCustomId('rewards_view_holdings_select')
             .setPlaceholder('Select holdings view')
             .addOptions(
               { label: 'By Collection', value: 'by_collection', description: 'Counts per configured contract' },
-              { label: 'UglyPoints', value: 'up_only', description: 'Total UglyPoints across linked wallets' },
-              { label: 'All', value: 'all', description: 'Collection counts + total NFTs + total UP' },
+              { label: pointsLabel, value: 'up_only', description: `Total ${pointsLabel} across linked wallets` },
+              { label: 'All', value: 'all', description: `Collection counts + total NFTs + total ${pointsLabel}` },
             )
         );
         await interaction.reply({
@@ -1470,6 +1559,60 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.customId === 'setup_points_mapping') {
+        const collections = await getHolderCollections(interaction.guild.id);
+        if (!collections.length) {
+          const addBtnRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('setup_add_collection_from_points').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
+          );
+          await interaction.reply({
+            content: 'No collections found. Add one first, then configure points mapping.',
+            components: [addBtnRow],
+            flags: 64
+          });
+          return;
+        }
+        const options = collections.slice(0, 25).map((c) => ({
+          label: String(c.name).slice(0, 100),
+          value: c.contract_address,
+          description: String(c.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_points_mapping_collection_select')
+            .setPlaceholder('Select collection to map points')
+            .addOptions(options)
+        );
+        await interaction.reply({
+          content:
+            `Choose a collection, then paste CSV mapping data.\n` +
+            `Required columns: \`category\`, \`trait\`, and \`ugly_points\` (or \`points\`).\n` +
+            `Examples:\n` +
+            `\`category,trait,ugly_points\`\n` +
+            `\`Background,Blue,250\`\n` +
+            `or\n` +
+            `\`category|trait|points\`\n` +
+            `\`Background|Blue|250\``,
+          components: [row],
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_add_collection_from_points') {
+        const modal = new ModalBuilder().setCustomId('setup_add_collection_modal').setTitle('Add Collection');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('collection_name').setLabel('Collection name').setRequired(true).setStyle(TextInputStyle.Short)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)
+          ),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
       if (interaction.customId === 'setup_remove_rule') {
         const rules = await getHolderRules(interaction.guild.id);
         if (!rules.length) {
@@ -1491,13 +1634,14 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_receipt_channel' || interaction.customId === 'setup_payout_amount') {
+      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_receipt_channel' || interaction.customId === 'setup_points_label' || interaction.customId === 'setup_payout_amount') {
         const fieldMap = {
           setup_drip_key: ['setup_drip_key_modal', 'DRIP API Key', 'drip_api_key', 'API key'],
           setup_client_id: ['setup_client_id_modal', 'DRIP Client ID', 'drip_client_id', 'Client ID'],
           setup_realm_id: ['setup_realm_id_modal', 'DRIP Realm ID', 'drip_realm_id', 'Realm ID'],
           setup_currency_id: ['setup_currency_id_modal', 'Currency ID', 'currency_id', 'Currency ID'],
           setup_receipt_channel: ['setup_receipt_channel_modal', 'Receipt Channel ID', 'receipt_channel_id', 'Channel ID'],
+          setup_points_label: ['setup_points_label_modal', 'Points Label', 'points_label', 'Points label (e.g. UglyPoints)'],
           setup_payout_amount: ['setup_payout_amount_modal', 'Payout Amount', 'payout_amount', 'Number'],
         };
         const [id, title, field, label] = fieldMap[interaction.customId];
@@ -1510,13 +1654,15 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'setup_payout_type') {
+        const settings = await getGuildSettings(interaction.guild.id);
+        const pointsLabel = getPointsLabel(settings);
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
             .setCustomId('setup_payout_type_select')
             .setPlaceholder('Select payout type')
             .addOptions(
               { label: 'Per NFT', value: 'per_nft', description: 'Payout = owned NFT count x payout amount' },
-              { label: 'Per UglyPoint', value: 'per_up', description: 'Payout = total UP x payout amount' },
+              { label: `Per ${pointsLabel}`, value: 'per_up', description: `Payout = total ${pointsLabel} x payout amount` },
             )
         );
         await interaction.reply({ content: 'Choose payout type:', components: [row], flags: 64 });
@@ -1587,6 +1733,8 @@ client.on('interactionCreate', async (interaction) => {
         const settings = await getGuildSettings(interaction.guild.id);
         const rules = await getHolderRules(interaction.guild.id);
         const collections = await getHolderCollections(interaction.guild.id);
+        const mappings = await getGuildPointMappings(interaction.guild.id);
+        const mappingLines = [...mappings.keys()].map((c) => `- ${labelForContract(c)}: ${c}`);
         await interaction.reply({
           flags: 64,
           content:
@@ -1596,10 +1744,13 @@ client.on('interactionCreate', async (interaction) => {
             `- DRIP Realm ID: ${settings?.drip_realm_id || 'not set'}\n` +
             `- Currency ID: ${settings?.currency_id || 'not set'}\n` +
             `- Receipt Channel ID: ${settings?.receipt_channel_id || RECEIPT_CHANNEL_ID}\n` +
+            `- Points Label: ${getPointsLabel(settings)}\n` +
             `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
             `- Payout Amount: ${settings?.payout_amount || 1}\n\n` +
             `Collections (${collections.length}):\n` +
             `${collections.map(c => `- ${c.name}: ${c.contract_address}`).join('\n') || '- none'}\n\n` +
+            `Points Mappings (${mappings.size}):\n` +
+            `${mappingLines.join('\n') || '- none'}\n\n` +
             `Rules (${rules.length}):\n` +
             `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}`
         });
@@ -1649,6 +1800,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'rewards_view_holdings_select') {
+      const settings = await getGuildSettings(interaction.guild.id);
+      const pointsLabel = getPointsLabel(settings);
       const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
       const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
       if (!walletAddresses.length) {
@@ -1662,12 +1815,12 @@ client.on('interactionCreate', async (interaction) => {
       if (mode === 'by_collection') {
         content = `Holdings by collection:\n${byCollectionLines.join('\n') || '- none'}`;
       } else if (mode === 'up_only') {
-        content = `Total UglyPoints: **${stats.totalUp}**`;
+        content = `Total ${pointsLabel}: **${stats.totalUp}**`;
       } else {
         content =
           `Holdings summary:\n` +
           `Total NFTs: **${stats.totalNfts}**\n` +
-          `Total UglyPoints: **${stats.totalUp}**\n` +
+          `Total ${pointsLabel}: **${stats.totalUp}**\n` +
           `By collection:\n${byCollectionLines.join('\n') || '- none'}`;
       }
       await interaction.update({ content, components: [] });
@@ -1699,6 +1852,33 @@ client.on('interactionCreate', async (interaction) => {
       modal.addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_tokens').setLabel('Min tokens (inclusive)').setRequired(true).setStyle(TextInputStyle.Short)),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_tokens').setLabel('Max tokens (optional)').setRequired(false).setStyle(TextInputStyle.Short)),
+      );
+      await interaction.showModal(modal);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_points_mapping_collection_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
+      if (!contractAddress) {
+        await interaction.update({ content: 'Invalid collection selection.', components: [] });
+        return;
+      }
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      globalThis.__PENDING_POINTS_MAPPING.set(key, { contractAddress, createdAt: Date.now() });
+
+      const modal = new ModalBuilder().setCustomId('setup_points_mapping_modal').setTitle('Set Points Mapping CSV');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('csv_input')
+            .setLabel('CSV content or URL')
+            .setRequired(true)
+            .setStyle(TextInputStyle.Paragraph)
+        )
       );
       await interaction.showModal(modal);
       return;
@@ -1834,6 +2014,8 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await interaction.deferReply({ flags: 64 });
+        const settings = await getGuildSettings(interaction.guild.id);
+        const pointsLabel = getPointsLabel(settings);
         const meta = await getNftMetadataAlchemy(tokenId);
         const { attrs } = await getTraitsForToken(meta, tokenId);
         const grouped = normalizeTraits(attrs);
@@ -1844,7 +2026,7 @@ client.on('interactionCreate', async (interaction) => {
           embeds: [
             new EmbedBuilder()
               .setTitle(`Squig #${tokenId}`)
-              .setDescription(`Total UP: **${hpAgg.total || 0}**\nRarity: **${tier}**`)
+              .setDescription(`Total ${pointsLabel}: **${hpAgg.total || 0}**\nRarity: **${tier}**`)
               .setImage(imageUrl)
               .setColor(0x7A83BF)
           ]
@@ -1905,12 +2087,68 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.customId === 'setup_points_mapping_modal') {
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        const pending = globalThis.__PENDING_POINTS_MAPPING.get(key);
+        if (!pending?.contractAddress) {
+          await interaction.reply({ content: 'No pending collection selection found. Click "Points Mapping" again.', flags: 64 });
+          return;
+        }
+
+        let csvInput = String(interaction.fields.getTextInputValue('csv_input') || '').trim();
+        if (!csvInput) {
+          await interaction.reply({ content: 'CSV content is required.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        if (/^https?:\/\//i.test(csvInput)) {
+          try {
+            const res = await fetchWithRetry(csvInput, 2, 700, {});
+            csvInput = await res.text();
+          } catch (err) {
+            await interaction.editReply({
+              content: `Could not load CSV from URL: ${String(err?.message || err || 'unknown error').slice(0, 180)}`
+            });
+            return;
+          }
+        }
+
+        try {
+          const parsed = parsePointsMappingCsv(csvInput);
+          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, parsed.table);
+          globalThis.__PENDING_POINTS_MAPPING.delete(key);
+          const collections = await getHolderCollections(interaction.guild.id);
+          const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(pending.contractAddress).toLowerCase());
+          await interaction.editReply({
+            content:
+              `Points mapping saved for **${selected?.name || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`).\n` +
+              `Rows imported: ${parsed.rowCount}\n` +
+              `Categories: ${parsed.categoryCount}\n` +
+              `Delimiter detected: \`${parsed.delimiter}\``
+          });
+        } catch (err) {
+          await interaction.editReply({
+            content:
+              `Invalid mapping format: ${String(err?.message || err || '').slice(0, 220)}\n` +
+              `Required format:\n` +
+              `\`category,trait,ugly_points\`\n` +
+              `\`Background,Blue,250\`\n` +
+              `or\n` +
+              `\`category|trait|points\`\n` +
+              `\`Background|Blue|250\``
+          });
+        }
+        return;
+      }
+
       const settingModalMap = {
         setup_drip_key_modal: 'drip_api_key',
         setup_client_id_modal: 'drip_client_id',
         setup_realm_id_modal: 'drip_realm_id',
         setup_currency_id_modal: 'currency_id',
         setup_receipt_channel_modal: 'receipt_channel_id',
+        setup_points_label_modal: 'points_label',
         setup_payout_amount_modal: 'payout_amount',
       };
       const field = settingModalMap[interaction.customId];
@@ -2536,8 +2774,10 @@ const HP_TABLE = {
 const UGLY_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'ugly_up.csv'));
 const MONSTER_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'monster_up.csv'));
 
-function hpTableForContract(contractAddress) {
+function hpTableForContract(contractAddress, guildPointMappings = null) {
   const c = String(contractAddress || '').toLowerCase();
+  const guildMap = guildPointMappings instanceof Map ? guildPointMappings.get(c) : null;
+  if (guildMap && typeof guildMap === 'object' && Object.keys(guildMap).length > 0) return guildMap;
   if (c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
   if (c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
   return HP_TABLE;
