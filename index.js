@@ -540,7 +540,10 @@ function setupButtons() {
       new ButtonBuilder().setCustomId('setup_receipt_channel').setLabel('Set Receipt Channel ID').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_type').setLabel('Set Payout Type').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_amount').setLabel('Set Payout Amount').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Success),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_verify_drip').setLabel('Verify DRIP Connection').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -579,44 +582,81 @@ function buildDripHeaders(settings, includeJson = false) {
   return headers;
 }
 
-async function searchDripMembers(realmId, type, values, settings) {
-  const url =
-    `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
-    `/members/search?type=${encodeURIComponent(type)}&values=${encodeURIComponent(values)}`;
-  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
-  if (!res.ok) {
-    if (res.status === 404) return [];
-    const body = await res.text().catch(() => '');
-    throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+async function searchDripMembers(realmId, type, value, settings) {
+  const typeCandidates =
+    type === 'discord' || type === 'discord-id'
+      ? ['discord', 'discord-id']
+      : [type];
+  const valueParamCandidates = ['value', 'values'];
+  const errors = [];
+
+  for (const typeCandidate of typeCandidates) {
+    for (const valueParam of valueParamCandidates) {
+      const url =
+        `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
+        `/members/search?type=${encodeURIComponent(typeCandidate)}&${valueParam}=${encodeURIComponent(value)}`;
+      const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        return Array.isArray(data?.data) ? data.data : [];
+      }
+      if (res.status === 404) return [];
+      const body = await res.text().catch(() => '');
+      if (res.status === 400 || res.status === 422) {
+        errors.push(`type=${typeCandidate},${valueParam}: HTTP ${res.status} ${body}`.slice(0, 220));
+        continue;
+      }
+      throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+    }
   }
-  const data = await res.json().catch(() => ({}));
-  return Array.isArray(data?.data) ? data.data : [];
+
+  if (errors.length > 0) {
+    throw new Error(`DRIP member search failed (all query variants rejected): ${errors.join(' | ')}`);
+  }
+  return [];
 }
 
 async function findDripAccountByDiscordId(discordId, settings) {
-  const url =
-    `https://api.drip.re/api/v1/accounts/find` +
-    `?type=discord-id&values=${encodeURIComponent(discordId)}`;
-  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
-  if (!res.ok) {
-    if (res.status === 404) return null;
-    const body = await res.text().catch(() => '');
-    throw new Error(`DRIP account lookup failed: HTTP ${res.status} ${body}`);
+  const typeCandidates = ['discord', 'discord-id'];
+  const valueParamCandidates = ['value', 'values'];
+  const errors = [];
+
+  for (const typeCandidate of typeCandidates) {
+    for (const valueParam of valueParamCandidates) {
+      const url =
+        `https://api.drip.re/api/v1/accounts/find` +
+        `?type=${encodeURIComponent(typeCandidate)}&${valueParam}=${encodeURIComponent(discordId)}`;
+      const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const out = data?.data;
+        if (!out) return null;
+        if (typeof out === 'string') return out;
+        if (typeof out?.id === 'string') return out.id;
+        if (typeof out?.accountId === 'string') return out.accountId;
+        if (typeof out?.memberId === 'string') return out.memberId;
+        return null;
+      }
+      if (res.status === 404) return null;
+      const body = await res.text().catch(() => '');
+      if (res.status === 400 || res.status === 422) {
+        errors.push(`type=${typeCandidate},${valueParam}: HTTP ${res.status} ${body}`.slice(0, 220));
+        continue;
+      }
+      throw new Error(`DRIP account lookup failed: HTTP ${res.status} ${body}`);
+    }
   }
-  const data = await res.json().catch(() => ({}));
-  const out = data?.data;
-  if (!out) return null;
-  if (typeof out === 'string') return out;
-  if (typeof out?.id === 'string') return out.id;
-  if (typeof out?.accountId === 'string') return out.accountId;
-  if (typeof out?.memberId === 'string') return out.memberId;
+
+  if (errors.length > 0) {
+    throw new Error(`DRIP account lookup failed (all query variants rejected): ${errors.join(' | ')}`);
+  }
   return null;
 }
 
 async function resolveDripMemberForDiscordUser(realmId, discordId, walletAddress, settings) {
   const details = [];
 
-  const byDiscord = await searchDripMembers(realmId, 'discord-id', discordId, settings);
+  const byDiscord = await searchDripMembers(realmId, 'discord', discordId, settings);
   if (byDiscord[0]?.id) {
     return { member: byDiscord[0], source: 'discord-id', details };
   }
@@ -651,7 +691,7 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
 
 async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
   const payload = { tokens: Number(tokens) };
-  if (currencyId) payload.currencyId = String(currencyId);
+  if (currencyId) payload.realmPointId = String(currencyId);
   const url = `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}/members/${encodeURIComponent(memberId)}/point-balance`;
   const res = await fetchWithTimeout(url, {
     timeoutMs: 15000,
@@ -664,6 +704,59 @@ async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) 
     throw new Error(`DRIP award failed: HTTP ${res.status} ${body}`);
   }
   return res.json().catch(() => ({}));
+}
+
+async function verifyDripConnection(settings, discordProbeId) {
+  const missing = [];
+  if (!settings?.drip_api_key) missing.push('DRIP API Key');
+  if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+  if (!settings?.currency_id) missing.push('Currency ID');
+  if (missing.length > 0) {
+    return { ok: false, reason: `Missing required settings: ${missing.join(', ')}` };
+  }
+
+  const pointsUrl = `https://api.drip.re/api/v1/realm/${encodeURIComponent(settings.drip_realm_id)}/points`;
+  const pointsRes = await fetchWithTimeout(pointsUrl, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+  if (!pointsRes.ok) {
+    const body = await pointsRes.text().catch(() => '');
+    return {
+      ok: false,
+      reason: `Points endpoint failed: HTTP ${pointsRes.status} ${body}`.slice(0, 320)
+    };
+  }
+
+  const pointsPayload = await pointsRes.json().catch(() => ({}));
+  const points = Array.isArray(pointsPayload?.data) ? pointsPayload.data : [];
+  const configuredCurrency = String(settings.currency_id);
+  const matchedCurrency = points.find(p => String(p?.id || '') === configuredCurrency);
+  if (!matchedCurrency) {
+    return {
+      ok: false,
+      reason: `Configured Currency ID not found in realm points (${configuredCurrency}).`
+    };
+  }
+
+  let memberProbe = null;
+  try {
+    const probeResults = await searchDripMembers(settings.drip_realm_id, 'discord', discordProbeId, settings);
+    memberProbe = {
+      ok: true,
+      count: probeResults.length
+    };
+  } catch (err) {
+    memberProbe = {
+      ok: false,
+      error: String(err?.message || err || '').slice(0, 260)
+    };
+  }
+
+  return {
+    ok: true,
+    pointsCount: points.length,
+    currencyName: matchedCurrency?.name || null,
+    currencyEmoji: matchedCurrency?.emoji || '',
+    memberProbe
+  };
 }
 
 async function handleClaim(interaction) {
@@ -683,7 +776,6 @@ async function handleClaim(interaction) {
   const payoutAmount = Number(settings.payout_amount || 0);
   const missing = [];
   if (!settings?.drip_api_key) missing.push('DRIP API Key');
-  if (!settings?.drip_client_id) missing.push('DRIP Client ID');
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
   if (!settings?.currency_id) missing.push('Currency ID');
   if (missing.length > 0) {
@@ -985,6 +1077,35 @@ client.on('interactionCreate', async (interaction) => {
             )
         );
         await interaction.reply({ content: 'Choose payout type:', components: [row], flags: 64 });
+        return;
+      }
+
+      if (interaction.customId === 'setup_verify_drip') {
+        const settings = await getGuildSettings(interaction.guild.id);
+        const result = await verifyDripConnection(settings, interaction.user.id);
+        if (!result.ok) {
+          await interaction.reply({
+            flags: 64,
+            content:
+              `DRIP verification failed.\n` +
+              `${result.reason}\n` +
+              `Check API key, realm, and currency settings in this panel.`
+          });
+          return;
+        }
+        const currencyLabel = `${result.currencyEmoji ? `${result.currencyEmoji} ` : ''}${result.currencyName || settings.currency_id}`;
+        const memberProbeText = result.memberProbe?.ok
+          ? `Member lookup endpoint reachable (probe matches: ${result.memberProbe.count}).`
+          : `Member lookup probe failed: ${result.memberProbe?.error || 'unknown error'}`;
+        await interaction.reply({
+          flags: 64,
+          content:
+            `DRIP verification passed.\n` +
+            `Realm: \`${settings.drip_realm_id}\`\n` +
+            `Currency: \`${settings.currency_id}\` (${currencyLabel})\n` +
+            `Realm points loaded: ${result.pointsCount}\n` +
+            `${memberProbeText}`
+        });
         return;
       }
 
