@@ -89,7 +89,8 @@ console.log('ENV CHECK:', {
   clientId: DISCORD_CLIENT_ID,
   guildId: GUILD_ID,
   hasAlchemy: !!ALCHEMY_API_KEY,
-  hasOpenSea: !!OPENSEA_API_KEY
+  hasOpenSea: !!OPENSEA_API_KEY,
+  hasPointsDb: !!DATABASE_URL_POINTS
 });
 
 // ===== CONTRACTS =====
@@ -150,6 +151,7 @@ async function mapLimit(items, limit, fn) {
 // ===== POSTGRES =====
 const DATABASE_URL_HOLDERS = process.env.DATABASE_URL_HOLDERS || process.env.DATABASE_URL || null;
 const DATABASE_URL_TEAM = process.env.DATABASE_URL_TEAM || process.env.DATABASE_URL || null;
+const DATABASE_URL_POINTS = process.env.DATABASE_URL_POINTS || null;
 const PGSSL = (process.env.PGSSL ?? 'true') !== 'false'; // default true on Railway
 
 const holdersPool = new Pool(
@@ -177,6 +179,12 @@ const teamPool = new Pool(
         ssl: PGSSL ? { rejectUnauthorized: false } : false
       }
 );
+
+const pointsPool = DATABASE_URL_POINTS
+  ? new Pool(
+      { connectionString: DATABASE_URL_POINTS, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+    )
+  : teamPool;
 
 async function ensureHoldersSchema() {
   await holdersPool.query(`
@@ -264,7 +272,11 @@ async function ensureTeamSchema() {
     );
   `);
   await teamPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS holder_collections_guild_contract_uidx ON holder_collections (guild_id, contract_address);`);
-  await teamPool.query(`
+  console.log('✅ team schema ready');
+}
+
+async function ensurePointsSchema() {
+  await pointsPool.query(`
     CREATE TABLE IF NOT EXISTS holder_point_mappings (
       guild_id TEXT NOT NULL,
       contract_address TEXT NOT NULL,
@@ -273,11 +285,12 @@ async function ensureTeamSchema() {
       PRIMARY KEY (guild_id, contract_address)
     );
   `);
-  console.log('✅ team schema ready');
+  console.log(`✅ points schema ready (${DATABASE_URL_POINTS ? 'DATABASE_URL_POINTS' : 'team database fallback'})`);
 }
 
 ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
 ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
+ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   await holdersPool.query(
@@ -559,7 +572,7 @@ async function upsertHolderCollection(guildId, name, contractAddress) {
 }
 
 async function setGuildPointMapping(guildId, contractAddress, mappingTable) {
-  await teamPool.query(
+  await pointsPool.query(
     `INSERT INTO holder_point_mappings (guild_id, contract_address, mapping_json, updated_at)
      VALUES ($1, $2, $3::jsonb, NOW())
      ON CONFLICT (guild_id, contract_address) DO UPDATE
@@ -569,7 +582,7 @@ async function setGuildPointMapping(guildId, contractAddress, mappingTable) {
 }
 
 async function getGuildPointMappings(guildId) {
-  const { rows } = await teamPool.query(
+  const { rows } = await pointsPool.query(
     `SELECT contract_address, mapping_json FROM holder_point_mappings WHERE guild_id = $1`,
     [guildId]
   );
