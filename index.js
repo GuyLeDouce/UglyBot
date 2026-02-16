@@ -323,6 +323,22 @@ function buildSlashCommands() {
       .setName('setup-verification')
       .setDescription('Create/open a private admin setup channel for verification config')
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('set-points-mapping')
+      .setDescription('Upload a CSV attachment to set points mapping for a collection')
+      .addStringOption((opt) =>
+        opt
+          .setName('collection')
+          .setDescription('Collection name or contract address')
+          .setRequired(true)
+      )
+      .addAttachmentOption((opt) =>
+        opt
+          .setName('csv_file')
+          .setDescription('CSV file with category/trait/points mapping')
+          .setRequired(true)
+      )
+      .toJSON(),
   ];
 }
 
@@ -1394,6 +1410,76 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Setup panel posted in <#${interaction.channel.id}>`, flags: 64 });
         return;
       }
+
+      if (interaction.commandName === 'set-points-mapping') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const collectionInput = String(interaction.options.getString('collection', true) || '').trim();
+        const file = interaction.options.getAttachment('csv_file', true);
+        if (!file?.url) {
+          await interaction.editReply({ content: 'CSV attachment is required.' });
+          return;
+        }
+        if (!/\.csv($|\?)/i.test(file.name || '') && !/text\/csv|application\/vnd\.ms-excel/i.test(file.contentType || '')) {
+          await interaction.editReply({ content: `Attachment must be a CSV file. Got: ${file.name || 'unknown file'}` });
+          return;
+        }
+
+        const collections = await getHolderCollections(interaction.guild.id);
+        const normalizedInputAddr = normalizeEthAddress(collectionInput);
+        const selected = collections.find((c) => {
+          const byAddress = normalizedInputAddr && String(c.contract_address).toLowerCase() === normalizedInputAddr;
+          const byName = String(c.name || '').trim().toLowerCase() === collectionInput.toLowerCase();
+          return byAddress || byName;
+        });
+        if (!selected) {
+          await interaction.editReply({
+            content:
+              `Collection not found: \`${collectionInput}\`.\n` +
+              `Use an existing collection name/address from setup, or add one via **Add Collection** first.`
+          });
+          return;
+        }
+
+        let csvInput = '';
+        try {
+          const res = await fetchWithRetry(file.url, 2, 700, {});
+          csvInput = await res.text();
+        } catch (err) {
+          await interaction.editReply({
+            content: `Could not read attached CSV: ${String(err?.message || err || 'unknown error').slice(0, 180)}`
+          });
+          return;
+        }
+
+        try {
+          const parsed = parsePointsMappingCsv(csvInput);
+          await setGuildPointMapping(interaction.guild.id, selected.contract_address, parsed.table);
+          await interaction.editReply({
+            content:
+              `Points mapping saved for **${selected.name}** (\`${selected.contract_address}\`).\n` +
+              `Rows imported: ${parsed.rowCount}\n` +
+              `Categories: ${parsed.categoryCount}\n` +
+              `Delimiter detected: \`${parsed.delimiter}\``
+          });
+        } catch (err) {
+          await interaction.editReply({
+            content:
+              `Invalid mapping format: ${String(err?.message || err || '').slice(0, 220)}\n` +
+              `Required format:\n` +
+              `\`category,trait,ugly_points\`\n` +
+              `\`Background,Blue,250\`\n` +
+              `or\n` +
+              `\`category|trait|points\`\n` +
+              `\`Background|Blue|250\``
+          });
+        }
+        return;
+      }
       return;
     }
 
@@ -1586,6 +1672,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({
           content:
             `Choose a collection, then paste CSV mapping data.\n` +
+            `For drag-and-drop CSV uploads, use: \`/set-points-mapping\`.\n` +
             `Required columns: \`category\`, \`trait\`, and \`ugly_points\` (or \`points\`).\n` +
             `Examples:\n` +
             `\`category,trait,ugly_points\`\n` +
