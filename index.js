@@ -281,10 +281,12 @@ async function ensurePointsSchema() {
       guild_id TEXT NOT NULL,
       contract_address TEXT NOT NULL,
       mapping_json JSONB NOT NULL,
+      created_by_discord_id TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (guild_id, contract_address)
     );
   `);
+  await pointsPool.query(`ALTER TABLE holder_point_mappings ADD COLUMN IF NOT EXISTS created_by_discord_id TEXT;`);
   console.log(`✅ points schema ready (${DATABASE_URL_POINTS ? 'DATABASE_URL_POINTS' : 'team database fallback'})`);
 }
 
@@ -349,6 +351,16 @@ function buildSlashCommands() {
         opt
           .setName('csv_file')
           .setDescription('CSV file with category/trait/points mapping')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('remove-points-mapping')
+      .setDescription('Remove points mapping for a collection')
+      .addStringOption((opt) =>
+        opt
+          .setName('collection')
+          .setDescription('Collection name or contract address')
           .setRequired(true)
       )
       .toJSON(),
@@ -478,14 +490,17 @@ async function postWalletReceipt(guild, settings, actorDiscordId, action, wallet
 }
 
 function isAdmin(interaction) {
-  const defaultAdmins = new Set(
+  if (getDefaultAdminIds().has(String(interaction.user?.id || ''))) return true;
+  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
+}
+
+function getDefaultAdminIds() {
+  return new Set(
     String(DEFAULT_ADMIN_USER)
       .split(',')
       .map(s => s.trim())
       .filter(Boolean)
   );
-  if (defaultAdmins.has(String(interaction.user?.id || ''))) return true;
-  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
 }
 
 async function getGuildSettings(guildId) {
@@ -571,13 +586,15 @@ async function upsertHolderCollection(guildId, name, contractAddress) {
   );
 }
 
-async function setGuildPointMapping(guildId, contractAddress, mappingTable) {
+async function setGuildPointMapping(guildId, contractAddress, mappingTable, actorDiscordId = null) {
   await pointsPool.query(
-    `INSERT INTO holder_point_mappings (guild_id, contract_address, mapping_json, updated_at)
-     VALUES ($1, $2, $3::jsonb, NOW())
+    `INSERT INTO holder_point_mappings (guild_id, contract_address, mapping_json, created_by_discord_id, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, NOW())
      ON CONFLICT (guild_id, contract_address) DO UPDATE
-     SET mapping_json = EXCLUDED.mapping_json, updated_at = NOW()`,
-    [guildId, String(contractAddress || '').toLowerCase(), JSON.stringify(mappingTable || {})]
+     SET mapping_json = EXCLUDED.mapping_json,
+         created_by_discord_id = COALESCE(holder_point_mappings.created_by_discord_id, EXCLUDED.created_by_discord_id),
+         updated_at = NOW()`,
+    [guildId, String(contractAddress || '').toLowerCase(), JSON.stringify(mappingTable || {}), actorDiscordId ? String(actorDiscordId) : null]
   );
 }
 
@@ -593,6 +610,44 @@ async function getGuildPointMappings(guildId) {
     out.set(c, (r.mapping_json && typeof r.mapping_json === 'object') ? r.mapping_json : {});
   }
   return out;
+}
+
+async function getGuildPointMappingsWithOwners(guildId) {
+  const { rows } = await pointsPool.query(
+    `SELECT contract_address, created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1`,
+    [guildId]
+  );
+  const out = [];
+  for (const r of rows) {
+    const contractAddress = normalizeEthAddress(r.contract_address);
+    if (!contractAddress) continue;
+    out.push({
+      contractAddress,
+      createdByDiscordId: r.created_by_discord_id ? String(r.created_by_discord_id) : null,
+    });
+  }
+  return out;
+}
+
+async function removeGuildPointMapping(guildId, contractAddress, actorDiscordId) {
+  const { rows } = await pointsPool.query(
+    `SELECT created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1 AND contract_address = $2`,
+    [guildId, String(contractAddress || '').toLowerCase()]
+  );
+  const row = rows[0] || null;
+  if (!row) return { ok: false, reason: 'not_found' };
+
+  const actorId = String(actorDiscordId || '');
+  const ownerId = row.created_by_discord_id ? String(row.created_by_discord_id) : null;
+  const isDefaultAdminUser = getDefaultAdminIds().has(actorId);
+  const canDelete = isDefaultAdminUser || (ownerId && actorId === ownerId);
+  if (!canDelete) return { ok: false, reason: 'forbidden', ownerId };
+
+  await pointsPool.query(
+    `DELETE FROM holder_point_mappings WHERE guild_id = $1 AND contract_address = $2`,
+    [guildId, String(contractAddress || '').toLowerCase()]
+  );
+  return { ok: true, ownerId };
 }
 
 async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens }) {
@@ -831,7 +886,7 @@ function setupMainEmbed() {
       `Choose a setup action.\n` +
       `• Collections: add collection name + contract for setup options.\n` +
       `• Holder roles: add/remove collection-based role rules.\n` +
-      `• Points Mapping: upload category/trait/points CSV per collection.\n` +
+      `• Points Mapping: upload or remove category/trait/points CSV per collection.\n` +
       `• Setup DRIP: open DRIP settings + connection checks.\n` +
       `• View Config: show current settings and rules.`
     )
@@ -860,6 +915,7 @@ function setupMainButtons() {
       new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_remove_points_mapping').setLabel('Remove Points Mapping').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -1471,7 +1527,7 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
           const parsed = parsePointsMappingCsv(csvInput);
-          await setGuildPointMapping(interaction.guild.id, selected.contract_address, parsed.table);
+          await setGuildPointMapping(interaction.guild.id, selected.contract_address, parsed.table, interaction.user.id);
           await interaction.editReply({
             content:
               `Points mapping saved for **${selected.name}** (\`${selected.contract_address}\`).\n` +
@@ -1491,6 +1547,59 @@ client.on('interactionCreate', async (interaction) => {
               `\`Background|Blue|250\``
           });
         }
+        return;
+      }
+
+      if (interaction.commandName === 'remove-points-mapping') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const collectionInput = String(interaction.options.getString('collection', true) || '').trim();
+        const collections = await getHolderCollections(interaction.guild.id);
+        const mappings = await getGuildPointMappingsWithOwners(interaction.guild.id);
+        const normalizedInputAddr = normalizeEthAddress(collectionInput);
+        const selectedByName = collections.find((c) => {
+          const byAddress = normalizedInputAddr && String(c.contract_address).toLowerCase() === normalizedInputAddr;
+          const byName = String(c.name || '').trim().toLowerCase() === collectionInput.toLowerCase();
+          return byAddress || byName;
+        });
+        const selectedContract = normalizedInputAddr && mappings.find((m) => String(m.contractAddress).toLowerCase() === normalizedInputAddr)
+          ? normalizedInputAddr
+          : (selectedByName ? String(selectedByName.contract_address).toLowerCase() : null);
+        if (!selectedContract) {
+          await interaction.editReply({
+            content:
+              `No points mapping found for: \`${collectionInput}\`.\n` +
+              `Use a mapped contract address or a collection name with an existing mapping.`
+          });
+          return;
+        }
+
+        const removed = await removeGuildPointMapping(interaction.guild.id, selectedContract, interaction.user.id);
+        if (!removed.ok) {
+          if (removed.reason === 'not_found') {
+            await interaction.editReply({ content: 'No points mapping exists for that collection.' });
+            return;
+          }
+          if (removed.reason === 'forbidden') {
+            const ownerText = removed.ownerId
+              ? `Only <@${removed.ownerId}> or DEFAULT_ADMIN_USER can remove it.`
+              : 'Only DEFAULT_ADMIN_USER can remove this legacy mapping.';
+            await interaction.editReply({
+              content: `You cannot remove this mapping. ${ownerText}`
+            });
+            return;
+          }
+          await interaction.editReply({ content: 'Could not remove points mapping.' });
+          return;
+        }
+
+        await interaction.editReply({
+          content: `Points mapping removed for **${selectedByName?.name || labelForContract(selectedContract)}** (\`${selectedContract}\`).`
+        });
         return;
       }
       return;
@@ -1710,6 +1819,41 @@ client.on('interactionCreate', async (interaction) => {
           ),
         );
         await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_points_mapping') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const mappings = await getGuildPointMappingsWithOwners(interaction.guild.id);
+        if (!mappings.length) {
+          await interaction.reply({ content: 'No points mappings to remove.', flags: 64 });
+          return;
+        }
+        const collections = await getHolderCollections(interaction.guild.id);
+        const nameByContract = new Map(collections.map((c) => [String(c.contract_address).toLowerCase(), c.name]));
+        const options = mappings.slice(0, 25).map((m) => {
+          const addr = String(m.contractAddress).toLowerCase();
+          const ownerLabel = m.createdByDiscordId ? `Owner: ${m.createdByDiscordId}` : 'Owner: legacy';
+          return {
+            label: `${String(nameByContract.get(addr) || labelForContract(addr)).slice(0, 72)}`.slice(0, 100),
+            value: addr,
+            description: ownerLabel.slice(0, 100),
+          };
+        });
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_remove_points_mapping_select')
+            .setPlaceholder('Select points mapping to remove')
+            .addOptions(options)
+        );
+        await interaction.reply({
+          content: 'Select the points mapping to remove. Only the mapping creator or DEFAULT_ADMIN_USER can remove it.',
+          components: [row],
+          flags: 64
+        });
         return;
       }
 
@@ -2006,6 +2150,45 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_remove_points_mapping_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
+      if (!contractAddress) {
+        await interaction.update({ content: 'Invalid mapping selection.', components: [] });
+        return;
+      }
+      const removed = await removeGuildPointMapping(interaction.guild.id, contractAddress, interaction.user.id);
+      if (!removed.ok) {
+        if (removed.reason === 'not_found') {
+          await interaction.update({ content: 'Mapping not found (it may already be removed).', components: [] });
+          return;
+        }
+        if (removed.reason === 'forbidden') {
+          const ownerText = removed.ownerId
+            ? `Only <@${removed.ownerId}> or DEFAULT_ADMIN_USER can remove it.`
+            : 'Only DEFAULT_ADMIN_USER can remove this legacy mapping.';
+          await interaction.update({
+            content: `You cannot remove this mapping. ${ownerText}`,
+            components: []
+          });
+          return;
+        }
+        await interaction.update({ content: 'Could not remove mapping.', components: [] });
+        return;
+      }
+
+      const collections = await getHolderCollections(interaction.guild.id);
+      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(contractAddress).toLowerCase());
+      await interaction.update({
+        content: `Removed points mapping for **${selected?.name || labelForContract(contractAddress)}** (\`${contractAddress}\`).`,
+        components: []
+      });
+      return;
+    }
+
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'verify_connect_modal') {
         const raw = interaction.fields.getTextInputValue('wallet_address');
@@ -2216,7 +2399,7 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
           const parsed = parsePointsMappingCsv(csvInput);
-          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, parsed.table);
+          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, parsed.table, interaction.user.id);
           globalThis.__PENDING_POINTS_MAPPING.delete(key);
           const collections = await getHolderCollections(interaction.guild.id);
           const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(pending.contractAddress).toLowerCase());
