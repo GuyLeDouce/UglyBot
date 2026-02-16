@@ -645,17 +645,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
           return;
         }
-        const adminChannel = await getOrCreateSetupChannel(interaction.guild);
-        if (!adminChannel) {
-          await interaction.reply({
-            content:
-              'I cannot create a private setup channel (Missing Permissions: Manage Channels).\n' +
-              'Either grant `Manage Channels` to the bot or create `#holder-verification-admin` manually and run this command there.',
-            flags: 64
-          });
-          return;
-        }
-        await adminChannel.send({
+        await interaction.channel.send({
           embeds: [
             new EmbedBuilder()
               .setTitle('Holder Verification Setup')
@@ -670,7 +660,7 @@ client.on('interactionCreate', async (interaction) => {
           ],
           components: setupButtons(),
         });
-        await interaction.reply({ content: `Setup panel posted in <#${adminChannel.id}>`, flags: 64 });
+        await interaction.reply({ content: `Setup panel posted in <#${interaction.channel.id}>`, flags: 64 });
         return;
       }
       return;
