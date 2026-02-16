@@ -483,20 +483,28 @@ async function computeWalletStatsForPayout(guildId, walletAddress, payoutType) {
   const totalNfts = counts.reduce((a, b) => a + b, 0);
 
   let totalUp = 0;
-  if (payoutType === 'per_up' && contracts.includes(SQUIGS_CONTRACT.toLowerCase())) {
-    const ids = await getOwnedTokenIdsForContract(walletAddress, SQUIGS_CONTRACT.toLowerCase());
-    const ups = await mapLimit(ids, 5, async (tokenId) => {
-      try {
-        const meta = await getNftMetadataAlchemy(tokenId);
-        const { attrs } = await getTraitsForToken(meta, tokenId);
-        const grouped = normalizeTraits(attrs);
-        const { total } = computeHpFromTraits(grouped);
-        return total || 0;
-      } catch {
-        return 0;
-      }
+  if (payoutType === 'per_up') {
+    const scorableContracts = contracts.filter((contractAddress) => {
+      const table = hpTableForContract(contractAddress);
+      return table && Object.keys(table).length > 0;
     });
-    totalUp = ups.reduce((a, b) => a + b, 0);
+    const perContractTotals = await mapLimit(scorableContracts, 2, async (contractAddress) => {
+      const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress);
+      const ups = await mapLimit(ids, 5, async (tokenId) => {
+        try {
+          const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
+          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
+          const grouped = normalizeTraits(attrs);
+          const table = hpTableForContract(contractAddress);
+          const { total } = computeHpFromTraits(grouped, table);
+          return total || 0;
+        } catch {
+          return 0;
+        }
+      });
+      return ups.reduce((a, b) => a + b, 0);
+    });
+    totalUp = perContractTotals.reduce((a, b) => a + b, 0);
   }
 
   return {
@@ -1428,10 +1436,10 @@ client.on('interactionCreate', async (interaction) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 // ===== Helper funcs (metadata) =====
-async function getNftMetadataAlchemy(tokenId) {
+async function getNftMetadataAlchemy(tokenId, contractAddress = SQUIGS_CONTRACT) {
   const url =
     `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
-    `?contractAddress=${SQUIGS_CONTRACT}&tokenId=${tokenId}&refreshCache=false`;
+    `?contractAddress=${contractAddress}&tokenId=${tokenId}&refreshCache=false`;
   const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
   return res.json();
 }
@@ -1517,7 +1525,7 @@ async function isSquigMintedStrict(tokenId) {
 }
 
 // -------- flexible trait extraction with OpenSea fallback --------
-async function getTraitsForToken(alchemyMeta, tokenId) {
+async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_CONTRACT) {
   // 1) Try Alchemy
   const attrsA = extractAttributesFlexible(alchemyMeta);
   if (attrsA.length > 0) {
@@ -1527,7 +1535,7 @@ async function getTraitsForToken(alchemyMeta, tokenId) {
   // 2) Fallback to OpenSea if we have an API key
   if (OPENSEA_API_KEY) {
     try {
-      const attrsB = await fetchOpenSeaTraits(tokenId);
+      const attrsB = await fetchOpenSeaTraits(tokenId, contractAddress);
       if (attrsB.length > 0) {
         console.log(`ℹ️ Traits from OpenSea fallback for #${tokenId}: ${attrsB.length}`);
         return { attrs: attrsB, source: 'opensea' };
@@ -1591,8 +1599,8 @@ function validAttrFilter(t) {
 }
 
 // OpenSea v2: fallback trait fetch (with headers + small retry)
-async function fetchOpenSeaTraits(tokenId) {
-  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${SQUIGS_CONTRACT}/nfts/${tokenId}`;
+async function fetchOpenSeaTraits(tokenId, contractAddress = SQUIGS_CONTRACT) {
+  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}/nfts/${tokenId}`;
   const headers = { 'X-API-KEY': OPENSEA_API_KEY };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -1624,7 +1632,7 @@ function normalizeTraits(attrs) {
     const valStr = String(t?.value ?? '').trim();
     if (!type || !valStr) continue;
     if (valStr.toLowerCase() === 'none' || valStr.toLowerCase() === 'none (ignore)') continue;
-    if (!Object.prototype.hasOwnProperty.call(groups, type)) continue;
+    if (!Object.prototype.hasOwnProperty.call(groups, type)) groups[type] = [];
     groups[type].push({ value: valStr });
   }
   return groups;
@@ -1703,6 +1711,34 @@ function hpToStripe(hp) { return stripeFromRarity(hpToTierLabel(hp)); }
 
 const FONT_REG = (typeof FONT_REGULAR_FAMILY !== 'undefined' ? FONT_REGULAR_FAMILY : 'sans-serif');
 const FONT_BOLD = (typeof FONT_BOLD_FAMILY !== 'undefined' ? FONT_BOLD_FAMILY : 'sans-serif');
+
+function parseSimpleCsvLine(line) {
+  const cells = String(line || '').split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+  return cells.map((cell) => {
+    let out = String(cell ?? '').trim();
+    if (out.startsWith('"') && out.endsWith('"')) out = out.slice(1, -1);
+    return out.replace(/""/g, '"').trim();
+  });
+}
+
+function loadHpTableFromCsv(csvFile) {
+  const table = {};
+  try {
+    const raw = fs.readFileSync(csvFile, 'utf8');
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    if (lines.length <= 1) return table;
+    for (let i = 1; i < lines.length; i++) {
+      const [category, trait, pointsRaw] = parseSimpleCsvLine(lines[i]);
+      const points = Number(pointsRaw);
+      if (!category || !trait || !Number.isFinite(points)) continue;
+      if (!table[category]) table[category] = {};
+      table[category][trait] = points;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Could not load HP mapping CSV (${csvFile}):`, err.message);
+  }
+  return table;
+}
 
 // ====== HP SCORE TABLE + helpers ======
 const HP_TABLE = {
@@ -1991,8 +2027,18 @@ const HP_TABLE = {
   }
 };
 
-function hpFor(cat, val) {
-  const group = HP_TABLE[cat];
+const UGLY_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'ugly_up.csv'));
+const MONSTER_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'monster_up.csv'));
+
+function hpTableForContract(contractAddress) {
+  const c = String(contractAddress || '').toLowerCase();
+  if (c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
+  if (c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
+  return HP_TABLE;
+}
+
+function hpFor(cat, val, table = HP_TABLE) {
+  const group = table?.[cat];
   if (!group) return 0;
   const key = Object.keys(group).find(
     k => k.toLowerCase() === String(val).trim().toLowerCase()
@@ -2000,12 +2046,12 @@ function hpFor(cat, val) {
   return key ? group[key] : 0;
 }
 
-function computeHpFromTraits(groupedTraits) {
+function computeHpFromTraits(groupedTraits, table = HP_TABLE) {
   let total = 0;
   const per = {};
   for (const cat of Object.keys(groupedTraits)) {
     for (const t of groupedTraits[cat]) {
-      const s = hpFor(cat, t.value);
+      const s = hpFor(cat, t.value, table);
       total += s;
       per[`${cat}::${t.value}`] = s;
     }
