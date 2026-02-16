@@ -939,15 +939,25 @@ async function verifyDripConnection(settings, discordProbeId) {
   };
 }
 
+async function respondInteraction(interaction, payload) {
+  if (interaction.deferred) {
+    const out = { ...(payload || {}) };
+    if (Object.prototype.hasOwnProperty.call(out, 'flags')) delete out.flags;
+    return interaction.editReply(out);
+  }
+  if (interaction.replied) return interaction.followUp(payload);
+  return interaction.reply(payload);
+}
+
 async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
   const link = await getWalletLink(guildId, interaction.user.id);
   if (!link?.wallet_address) {
-    await interaction.reply({ content: 'Connect your wallet first.', flags: 64 });
+    await respondInteraction(interaction, { content: 'Connect your wallet first.', flags: 64 });
     return;
   }
   if (await hasClaimedToday(guildId, interaction.user.id)) {
-    await interaction.reply({ content: 'You already claimed today. Try again after UTC midnight.', flags: 64 });
+    await respondInteraction(interaction, { content: 'You already claimed today. Try again after UTC midnight.', flags: 64 });
     return;
   }
 
@@ -959,7 +969,7 @@ async function handleClaim(interaction) {
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
   if (!settings?.currency_id) missing.push('Currency ID');
   if (missing.length > 0) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
       flags: 64
     });
@@ -969,7 +979,7 @@ async function handleClaim(interaction) {
   const amount = Math.max(0, Math.floor(stats.unitTotal * payoutAmount));
 
   if (amount <= 0) {
-    await interaction.reply({ content: 'No payout available. Check your holdings or payout settings.', flags: 64 });
+    await respondInteraction(interaction, { content: 'No payout available. Check your holdings or payout settings.', flags: 64 });
     return;
   }
 
@@ -994,7 +1004,7 @@ async function handleClaim(interaction) {
 
     const dripMemberIdCandidates = collectDripMemberIdCandidates(resolved?.member, dripMemberId);
     if (!dripMemberIdCandidates.length) {
-      await interaction.reply({
+      await respondInteraction(interaction, {
         content:
           'Claim unavailable: your DRIP profile is not linked in this realm yet.\n' +
           'Please ask an admin to verify your realm/member setup.',
@@ -1015,19 +1025,29 @@ async function handleClaim(interaction) {
     await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
 
     const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
-    const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
+    let receiptChannel = null;
     let receiptMessage = null;
-    if (receiptChannel?.isTextBased()) {
-      const earningBasis =
-        payoutType === 'per_nft'
-          ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
-          : `${stats.totalUp} UglyPoints`;
-      receiptMessage = await receiptChannel.send(
-        `🧾 Claim Receipt\n` +
-        `User: <@${interaction.user.id}>\n` +
-        `Earning Basis: ${earningBasis}\n` +
-        `Reward: **${amount} $CHARM**`
-      );
+    let receiptWarning = '';
+    try {
+      receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
+      if (receiptChannel?.isTextBased()) {
+        const earningBasis =
+          payoutType === 'per_nft'
+            ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
+            : `${stats.totalUp} UglyPoints`;
+        receiptMessage = await receiptChannel.send(
+          `🧾 Claim Receipt\n` +
+          `User: <@${interaction.user.id}>\n` +
+          `Earning Basis: ${earningBasis}\n` +
+          `Reward: **${amount} $CHARM**`
+        );
+      } else {
+        receiptWarning = '\n(Receipt channel unavailable or not text-based.)';
+      }
+    } catch (receiptErr) {
+      const rmsg = String(receiptErr?.message || receiptErr || '');
+      console.warn(`⚠️ Claim receipt send failed for guild ${guildId}:`, rmsg);
+      receiptWarning = '\n(Claim receipt could not be posted to the configured channel.)';
     }
 
     await holdersPool.query(
@@ -1036,7 +1056,7 @@ async function handleClaim(interaction) {
       [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
     );
 
-    await interaction.reply({ content: `Claim complete. You received **${amount} $CHARM**.`, flags: 64 });
+    await respondInteraction(interaction, { content: `Claim complete. You received **${amount} $CHARM**.${receiptWarning}`, flags: 64 });
   } catch (err) {
     console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
@@ -1044,7 +1064,7 @@ async function handleClaim(interaction) {
     if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
     else if (/DRIP award failed/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
     else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: `Claim failed: ${reason}`,
       flags: 64
     });
@@ -1133,6 +1153,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_claim') {
+        await interaction.deferReply({ flags: 64 });
         await handleClaim(interaction);
         return;
       }
@@ -1279,11 +1300,11 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'setup_verify_drip') {
+        await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
         const result = await verifyDripConnection(settings, interaction.user.id);
         if (!result.ok) {
-          await interaction.reply({
-            flags: 64,
+          await interaction.editReply({
             content:
               `DRIP verification failed.\n` +
               `${result.reason}\n` +
@@ -1295,8 +1316,7 @@ client.on('interactionCreate', async (interaction) => {
         const memberProbeText = result.memberProbe?.ok
           ? `Member lookup endpoint reachable (probe matches: ${result.memberProbe.count}).`
           : `Member lookup probe failed: ${result.memberProbe?.error || 'unknown error'}`;
-        await interaction.reply({
-          flags: 64,
+        await interaction.editReply({
           content:
             `DRIP verification passed.\n` +
             `Realm: \`${settings.drip_realm_id}\`\n` +
@@ -1431,6 +1451,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Invalid Ethereum address.', flags: 64 });
           return;
         }
+        await interaction.deferReply({ flags: 64 });
 
         const settings = await getGuildSettings(interaction.guild.id);
         let dripMemberId = null;
@@ -1457,8 +1478,7 @@ client.on('interactionCreate', async (interaction) => {
         await setWalletLink(interaction.guild.id, interaction.user.id, addr, false, dripMemberId);
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, addr);
-        await interaction.reply({
-          flags: 64,
+        await interaction.editReply({
           content:
             `Wallet connected successfully.\n` +
             `${dripStatus}\n` +
@@ -1475,14 +1495,14 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Token ID must be numeric.', flags: 64 });
           return;
         }
+        await interaction.deferReply({ flags: 64 });
         const meta = await getNftMetadataAlchemy(tokenId);
         const { attrs } = await getTraitsForToken(meta, tokenId);
         const grouped = normalizeTraits(attrs);
         const hpAgg = computeHpFromTraits(grouped);
         const tier = hpToTierLabel(hpAgg.total || 0);
         const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-        await interaction.reply({
-          flags: 64,
+        await interaction.editReply({
           embeds: [
             new EmbedBuilder()
               .setTitle(`Squig #${tokenId}`)
