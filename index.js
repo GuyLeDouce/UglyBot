@@ -186,11 +186,15 @@ async function ensureHoldersSchema() {
       wallet_address TEXT NOT NULL,
       drip_member_id TEXT,
       verified BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
   await holdersPool.query(`ALTER TABLE wallet_links ADD COLUMN IF NOT EXISTS drip_member_id TEXT;`);
-  await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_guild_user_idx ON wallet_links (guild_id, discord_id);`);
+  await holdersPool.query(`ALTER TABLE wallet_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+  await holdersPool.query(`DROP INDEX IF EXISTS wallet_links_guild_user_idx;`);
+  await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_guild_user_wallet_idx ON wallet_links (guild_id, discord_id, wallet_address);`);
+  await holdersPool.query(`CREATE INDEX IF NOT EXISTS wallet_links_guild_user_idx ON wallet_links (guild_id, discord_id);`);
   await holdersPool.query(`
     CREATE TABLE IF NOT EXISTS claims (
       id BIGSERIAL PRIMARY KEY,
@@ -257,18 +261,29 @@ async function setWalletLink(guildId, discordId, walletAddress, verified = false
   await holdersPool.query(
     `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified, drip_member_id)
      VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (guild_id, discord_id) DO UPDATE
-     SET wallet_address = EXCLUDED.wallet_address, verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
+     ON CONFLICT (guild_id, discord_id, wallet_address) DO UPDATE
+     SET verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
     [guildId, discordId, walletAddress, verified, dripMemberId]
   );
 }
 
-async function getWalletLink(guildId, discordId) {
+async function getWalletLinks(guildId, discordId) {
   const { rows } = await holdersPool.query(
-    `SELECT wallet_address, verified, drip_member_id FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
+    `SELECT wallet_address, verified, drip_member_id, created_at, updated_at
+     FROM wallet_links
+     WHERE guild_id = $1 AND discord_id = $2
+     ORDER BY updated_at DESC`,
     [guildId, discordId]
   );
-  return rows[0] || null;
+  return rows;
+}
+
+async function deleteWalletLink(guildId, discordId, walletAddress) {
+  const { rowCount } = await holdersPool.query(
+    `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2 AND wallet_address = $3`,
+    [guildId, discordId, walletAddress]
+  );
+  return rowCount || 0;
 }
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
@@ -277,6 +292,10 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('launch-verification')
       .setDescription('Post the public holder verification menu in this channel')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('launch-rewards')
+      .setDescription('Post the public holder rewards menu in this channel')
       .toJSON(),
     new SlashCommandBuilder()
       .setName('setup-verification')
@@ -325,6 +344,40 @@ function normalizeEthAddress(input) {
   const addr = String(input || '').trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) return null;
   return addr.toLowerCase();
+}
+
+function parseWalletAddressesInput(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  const matches = text.match(/0x[a-fA-F0-9]{40}/g) || [];
+  const out = [];
+  const seen = new Set();
+  for (const m of matches) {
+    const normalized = normalizeEthAddress(m);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+async function postWalletReceipt(guild, settings, actorDiscordId, action, walletAddress) {
+  const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
+  if (!receiptChannelId) return;
+  try {
+    const ch = await guild.channels.fetch(receiptChannelId).catch(() => null);
+    if (!ch?.isTextBased()) return;
+    const ts = Math.floor(Date.now() / 1000);
+    await ch.send(
+      `🧾 Wallet ${action}\n` +
+      `User: <@${actorDiscordId}>\n` +
+      `Wallet: \`${walletAddress}\`\n` +
+      `Etherscan: https://etherscan.io/address/${walletAddress}\n` +
+      `When: <t:${ts}:F>`
+    );
+  } catch (err) {
+    console.warn('⚠️ Wallet receipt post failed:', String(err?.message || err || ''));
+  }
 }
 
 function isAdmin(interaction) {
@@ -433,7 +486,28 @@ async function countOwnedForContract(walletAddress, contractAddress) {
   return ids.length;
 }
 
-async function syncHolderRoles(member, walletAddress) {
+async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress) {
+  const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
+  const normalized = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
+  if (!normalized.length) return [];
+  const tokenArrays = await mapLimit(normalized, 4, async (walletAddress) => {
+    try { return await getOwnedTokenIdsForContract(walletAddress, contractAddress); }
+    catch { return []; }
+  });
+  const seen = new Set();
+  const out = [];
+  for (const arr of tokenArrays) {
+    for (const tokenId of arr) {
+      const k = String(tokenId);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+    }
+  }
+  return out;
+}
+
+async function syncHolderRoles(member, walletAddresses) {
   const rules = await getHolderRules(member.guild.id);
   if (!rules.length) return { changed: 0, applied: [], granted: [] };
   const me = member.guild.members.me;
@@ -441,9 +515,16 @@ async function syncHolderRoles(member, walletAddress) {
     return { changed: 0, applied: ['Skipped: bot is missing Manage Roles permission.'], granted: [] };
   }
 
+  const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
+  const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   const byContract = new Map();
   for (const r of rules) {
-    if (!byContract.has(r.contract_address)) byContract.set(r.contract_address, await countOwnedForContract(walletAddress, r.contract_address));
+    if (byContract.has(r.contract_address)) continue;
+    let count = 0;
+    for (const walletAddress of normalizedAddresses) {
+      count += await countOwnedForContract(walletAddress, r.contract_address);
+    }
+    byContract.set(r.contract_address, count);
   }
 
   let changed = 0;
@@ -493,22 +574,28 @@ async function hasClaimedToday(guildId, discordId) {
   return rows.length > 0;
 }
 
-async function computeWalletStatsForPayout(guildId, walletAddress, payoutType) {
+async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType) {
+  const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
+  const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
+  if (!normalizedAddresses.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] };
+
   const rules = await getHolderRules(guildId);
   const contracts = [...new Set(rules.map(r => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
-  if (!contracts.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0 };
+  if (!contracts.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] };
 
-  const counts = await Promise.all(contracts.map(c => countOwnedForContract(walletAddress, c)));
-  const totalNfts = counts.reduce((a, b) => a + b, 0);
+  const byCollection = await mapLimit(contracts, 3, async (contractAddress) => {
+    const ids = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress);
+    return { contractAddress, ids };
+  });
+  const totalNfts = byCollection.reduce((sum, x) => sum + x.ids.length, 0);
 
   let totalUp = 0;
   if (payoutType === 'per_up') {
-    const scorableContracts = contracts.filter((contractAddress) => {
+    const scorableContracts = byCollection.filter(({ contractAddress }) => {
       const table = hpTableForContract(contractAddress);
       return table && Object.keys(table).length > 0;
     });
-    const perContractTotals = await mapLimit(scorableContracts, 2, async (contractAddress) => {
-      const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress);
+    const perContractTotals = await mapLimit(scorableContracts, 2, async ({ contractAddress, ids }) => {
       const ups = await mapLimit(ids, 5, async (tokenId) => {
         try {
           const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
@@ -530,6 +617,7 @@ async function computeWalletStatsForPayout(guildId, walletAddress, payoutType) {
     unitTotal: payoutType === 'per_nft' ? totalNfts : totalUp,
     totalNfts,
     totalUp,
+    byCollection: byCollection.map(({ contractAddress, ids }) => ({ contractAddress, count: ids.length })),
   };
 }
 
@@ -539,10 +627,9 @@ function verificationMenuEmbed(guildName) {
     .setDescription(
       `Welcome to **${guildName}**.\n\n` +
       `Use the buttons below:\n` +
-      `• **Connect Wallet**: link your wallet for holder verification.\n` +
-      `• **Claim Rewards**: collect your daily holder payout.\n` +
-      `• **Check NFT Stats**: view a Squig token's UP breakdown.\n` +
-      `• **Disconnect**: remove your verification data from this server.`
+      `• **Connect Wallet**: link one or more wallets for holder verification.\n` +
+      `• **Disconnect Wallet**: unlink one specific wallet or all wallets.\n` +
+      `• **Check Wallets Connected**: view all wallets currently linked.`
     )
     .setColor(0x7ADDC0);
 }
@@ -550,9 +637,29 @@ function verificationMenuEmbed(guildName) {
 function verificationButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect Wallet').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect Wallet').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('verify_wallets').setLabel('Check Wallets Connected').setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function rewardsMenuEmbed(guildName) {
+  return new EmbedBuilder()
+    .setTitle('Holder Rewards')
+    .setDescription(
+      `Welcome to **${guildName}** rewards.\n\n` +
+      `Use the buttons below:\n` +
+      `• **Claim Rewards**: collect your daily holder payout.\n` +
+      `• **Check NFT Status**: view a Squig token's UP breakdown.\n` +
+      `• **View Holdings**: see holdings by collection, UglyPoints, or full summary.`
+    )
+    .setColor(0xB0DEEE);
+}
+
+function rewardsButtons() {
+  return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('verify_claim').setLabel('Claim Rewards').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('verify_check_stats').setLabel('Check NFT Stats').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('verify_check_stats').setLabel('Check NFT Status').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('rewards_view_holdings').setLabel('View Holdings').setStyle(ButtonStyle.Primary),
   );
 }
 
@@ -951,8 +1058,9 @@ async function respondInteraction(interaction, payload) {
 
 async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
-  const link = await getWalletLink(guildId, interaction.user.id);
-  if (!link?.wallet_address) {
+  const links = await getWalletLinks(guildId, interaction.user.id);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
     await respondInteraction(interaction, { content: 'Connect your wallet first.', flags: 64 });
     return;
   }
@@ -975,7 +1083,7 @@ async function handleClaim(interaction) {
     });
     return;
   }
-  const stats = await computeWalletStatsForPayout(guildId, link.wallet_address, payoutType);
+  const stats = await computeWalletStatsForPayout(guildId, walletAddresses, payoutType);
   const amount = Math.max(0, Math.floor(stats.unitTotal * payoutAmount));
 
   if (amount <= 0) {
@@ -985,18 +1093,20 @@ async function handleClaim(interaction) {
 
   try {
     let resolved = null;
-    let dripMemberId = link.drip_member_id || null;
+    let dripMemberId = links[0]?.drip_member_id || null;
     try {
       resolved = await resolveDripMemberForDiscordUser(
         settings.drip_realm_id,
         interaction.user.id,
-        link.wallet_address,
+        walletAddresses[0],
         settings
       );
       const resolvedPrimary = resolved?.member?.id || null;
       if (resolvedPrimary && resolvedPrimary !== dripMemberId) {
         dripMemberId = resolvedPrimary;
-        await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
+        for (const row of links) {
+          await setWalletLink(guildId, interaction.user.id, row.wallet_address, Boolean(row.verified), dripMemberId);
+        }
       }
     } catch (resolveErr) {
       if (!dripMemberId) throw resolveErr;
@@ -1020,9 +1130,10 @@ async function handleClaim(interaction) {
       settings.currency_id,
       settings
     );
-    const dripResult = awardResult?.data || {};
     dripMemberId = awardResult?.usedMemberId || dripMemberIdCandidates[0];
-    await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
+    for (const row of links) {
+      await setWalletLink(guildId, interaction.user.id, row.wallet_address, Boolean(row.verified), dripMemberId);
+    }
 
     const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
     let receiptChannel = null;
@@ -1053,7 +1164,7 @@ async function handleClaim(interaction) {
     await holdersPool.query(
       `INSERT INTO claims (guild_id, discord_id, claim_day, amount, wallet_address, receipt_channel_id, receipt_message_id)
        VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)`,
-      [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
+      [guildId, interaction.user.id, amount, walletAddresses.join(','), receiptChannel?.id || null, receiptMessage?.id || null]
     );
 
     await respondInteraction(interaction, { content: `Claim complete. You received **${amount} $CHARM**.${receiptWarning}`, flags: 64 });
@@ -1071,16 +1182,12 @@ async function handleClaim(interaction) {
   }
 }
 
-async function deleteUserVerificationData(guildId, discordId) {
-  const deletedClaims = await holdersPool.query(
-    `DELETE FROM claims WHERE guild_id = $1 AND discord_id = $2`,
-    [guildId, discordId]
-  );
+async function deleteAllWalletLinks(guildId, discordId) {
   const deletedWallet = await holdersPool.query(
     `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
     [guildId, discordId]
   );
-  return { claims: deletedClaims.rowCount || 0, wallets: deletedWallet.rowCount || 0 };
+  return { wallets: deletedWallet.rowCount || 0 };
 }
 
 async function removeHolderRolesFromMember(member) {
@@ -1120,6 +1227,19 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.commandName === 'launch-rewards') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.channel.send({
+          embeds: [rewardsMenuEmbed(interaction.guild.name)],
+          components: [rewardsButtons()],
+        });
+        await interaction.reply({ content: 'Rewards menu launched.', flags: 64 });
+        return;
+      }
+
       if (interaction.commandName === 'setup-verification') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -1142,9 +1262,9 @@ client.on('interactionCreate', async (interaction) => {
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('wallet_address')
-              .setLabel('Ethereum wallet address')
+              .setLabel('Ethereum wallet address(es)')
               .setRequired(true)
-              .setPlaceholder('0x...')
+              .setPlaceholder('0x..., 0x... (multiple allowed)')
               .setStyle(TextInputStyle.Short)
           )
         );
@@ -1175,41 +1295,50 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_disconnect') {
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('verify_disconnect_confirm').setLabel('Confirm Disconnect').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('verify_disconnect_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+        const modal = new ModalBuilder().setCustomId('verify_disconnect_modal').setTitle('Disconnect Wallet');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('wallet_address')
+              .setLabel('Wallet address or ALL')
+              .setRequired(true)
+              .setPlaceholder('0x... or ALL')
+              .setStyle(TextInputStyle.Short)
+          )
         );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'verify_wallets') {
+        const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        if (!links.length) {
+          await interaction.reply({ content: 'No wallets connected yet.', flags: 64 });
+          return;
+        }
+        const lines = links.map((w, i) => `${i + 1}. \`${w.wallet_address}\` - https://etherscan.io/address/${w.wallet_address}`);
         await interaction.reply({
-          content:
-            'This will remove your verification data and holder roles for this server.\n' +
-            'Are you sure you want to continue?',
-          components: [row],
+          content: `Connected wallet(s):\n${lines.join('\n')}`,
           flags: 64
         });
         return;
       }
 
-      if (interaction.customId === 'verify_disconnect_cancel') {
-        await interaction.update({
-          content: 'Disconnect canceled.',
-          components: []
-        });
-        return;
-      }
-
-      if (interaction.customId === 'verify_disconnect_confirm') {
-        const result = await deleteUserVerificationData(interaction.guild.id, interaction.user.id);
-        let removedRoles = 0;
-        try {
-          const member = await interaction.guild.members.fetch(interaction.user.id);
-          removedRoles = await removeHolderRolesFromMember(member);
-        } catch {}
-        await interaction.update({
-          content:
-            `Disconnected successfully.\n` +
-            `Removed holder roles: ${removedRoles}\n` +
-            `Your verification records were cleared for this server.`,
-          components: []
+      if (interaction.customId === 'rewards_view_holdings') {
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('rewards_view_holdings_select')
+            .setPlaceholder('Select holdings view')
+            .addOptions(
+              { label: 'By Collection', value: 'by_collection', description: 'Counts per configured contract' },
+              { label: 'UglyPoints', value: 'up_only', description: 'Total UglyPoints across linked wallets' },
+              { label: 'All', value: 'all', description: 'Collection counts + total NFTs + total UP' },
+            )
+        );
+        await interaction.reply({
+          content: 'Choose holdings view:',
+          components: [row],
+          flags: 64
         });
         return;
       }
@@ -1421,6 +1550,32 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && interaction.customId === 'rewards_view_holdings_select') {
+      const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+      const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+      if (!walletAddresses.length) {
+        await interaction.update({ content: 'No wallets connected yet.', components: [] });
+        return;
+      }
+      const stats = await computeWalletStatsForPayout(interaction.guild.id, walletAddresses, 'per_up');
+      const byCollectionLines = (stats.byCollection || []).map((x) => `- \`${x.contractAddress}\`: ${x.count} NFT${x.count === 1 ? '' : 's'}`);
+      const mode = interaction.values?.[0] || 'all';
+      let content = '';
+      if (mode === 'by_collection') {
+        content = `Holdings by collection:\n${byCollectionLines.join('\n') || '- none'}`;
+      } else if (mode === 'up_only') {
+        content = `Total UglyPoints: **${stats.totalUp}**`;
+      } else {
+        content =
+          `Holdings summary:\n` +
+          `Total NFTs: **${stats.totalNfts}**\n` +
+          `Total UglyPoints: **${stats.totalUp}**\n` +
+          `By collection:\n${byCollectionLines.join('\n') || '- none'}`;
+      }
+      await interaction.update({ content, components: [] });
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'setup_remove_rule_select') {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -1446,9 +1601,9 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'verify_connect_modal') {
         const raw = interaction.fields.getTextInputValue('wallet_address');
-        const addr = normalizeEthAddress(raw);
-        if (!addr) {
-          await interaction.reply({ content: 'Invalid Ethereum address.', flags: 64 });
+        const addresses = parseWalletAddressesInput(raw);
+        if (!addresses.length) {
+          await interaction.reply({ content: 'Provide at least one valid Ethereum address.', flags: 64 });
           return;
         }
         await interaction.deferReply({ flags: 64 });
@@ -1461,7 +1616,7 @@ client.on('interactionCreate', async (interaction) => {
             const resolved = await resolveDripMemberForDiscordUser(
               settings.drip_realm_id,
               interaction.user.id,
-              addr,
+              addresses[0],
               settings
             );
             const dripMember = resolved.member;
@@ -1475,16 +1630,71 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
 
-        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false, dripMemberId);
+        const existing = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const existingSet = new Set(existing.map((x) => String(x.wallet_address).toLowerCase()));
+        const added = [];
+        for (const addr of addresses) {
+          await setWalletLink(interaction.guild.id, interaction.user.id, addr, false, dripMemberId);
+          if (!existingSet.has(addr)) {
+            added.push(addr);
+            await postWalletReceipt(interaction.guild, settings, interaction.user.id, 'Connected', addr);
+          }
+        }
+        const allLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const allAddresses = allLinks.map((x) => x.wallet_address);
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const sync = await syncHolderRoles(member, addr);
+        const sync = await syncHolderRoles(member, allAddresses);
         await interaction.editReply({
           content:
-            `Wallet connected successfully.\n` +
+            `Wallet connect processed.\n` +
+            `Added: ${added.length}\n` +
+            `Total linked wallets: ${allAddresses.length}\n` +
             `${dripStatus}\n` +
             `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
-            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}\n` : 'Roles granted: none\n'}` +
-            `${sync.applied.length ? sync.applied.join('\n') : 'No holder roles matched yet.'}`
+            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}`
+        });
+        return;
+      }
+
+      if (interaction.customId === 'verify_disconnect_modal') {
+        const raw = String(interaction.fields.getTextInputValue('wallet_address') || '').trim();
+        await interaction.deferReply({ flags: 64 });
+        const settings = await getGuildSettings(interaction.guild.id);
+        let removedWallets = [];
+        if (raw.toUpperCase() === 'ALL') {
+          const existing = await getWalletLinks(interaction.guild.id, interaction.user.id);
+          await deleteAllWalletLinks(interaction.guild.id, interaction.user.id);
+          removedWallets = existing.map((x) => x.wallet_address);
+        } else {
+          const addr = normalizeEthAddress(raw);
+          if (!addr) {
+            await interaction.editReply({ content: 'Invalid wallet address. Use a valid `0x...` address or `ALL`.' });
+            return;
+          }
+          const removed = await deleteWalletLink(interaction.guild.id, interaction.user.id, addr);
+          if (!removed) {
+            await interaction.editReply({ content: 'That wallet is not connected on this server.' });
+            return;
+          }
+          removedWallets = [addr];
+        }
+
+        for (const addr of removedWallets) {
+          await postWalletReceipt(interaction.guild, settings, interaction.user.id, 'Disconnected', addr);
+        }
+
+        let removedRoles = 0;
+        try {
+          const member = await interaction.guild.members.fetch(interaction.user.id);
+          const remainingLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
+          const remainingAddresses = remainingLinks.map((x) => x.wallet_address);
+          const sync = await syncHolderRoles(member, remainingAddresses);
+          removedRoles = sync.changed;
+        } catch {}
+        await interaction.editReply({
+          content:
+            `Disconnected wallet(s): ${removedWallets.length}\n` +
+            `Role sync changes: ${removedRoles}`
         });
         return;
       }
