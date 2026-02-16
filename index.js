@@ -90,7 +90,7 @@ console.log('ENV CHECK:', {
   guildId: GUILD_ID,
   hasAlchemy: !!ALCHEMY_API_KEY,
   hasOpenSea: !!OPENSEA_API_KEY,
-  hasPointsDb: !!DATABASE_URL_POINTS
+  hasPointsDb: !!process.env.DATABASE_URL_POINTS
 });
 
 // ===== CONTRACTS =====
