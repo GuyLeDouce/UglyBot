@@ -3125,10 +3125,8 @@ function hpTableForContract(contractAddress, guildPointMappings = null) {
 function hpFor(cat, val, table = HP_TABLE) {
   const group = table?.[cat];
   if (!group) return 0;
-  const key = Object.keys(group).find(
-    k => k.toLowerCase() === String(val).trim().toLowerCase()
-  );
-  return key ? group[key] : 0;
+  const key = String(val).trim();
+  return Object.prototype.hasOwnProperty.call(group, key) ? group[key] : 0;
 }
 
 function computeHpFromTraits(groupedTraits, table = HP_TABLE) {
