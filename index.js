@@ -413,6 +413,7 @@ client.once(Events.ClientReady, async (c) => {
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
 globalThis.__PENDING_HOLDER_RULES ||= new Map();
 globalThis.__PENDING_POINTS_MAPPING ||= new Map();
+globalThis.__PENDING_CHECK_STATS ||= new Map();
 
 function normalizeEthAddress(input) {
   const addr = String(input || '').trim();
@@ -1679,18 +1680,27 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_check_stats') {
-        const modal = new ModalBuilder().setCustomId('verify_check_stats_modal').setTitle('Check NFT Stats');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('token_id')
-              .setLabel('Squig token ID')
-              .setRequired(true)
-              .setPlaceholder('1234')
-              .setStyle(TextInputStyle.Short)
-          )
+        const collections = await getHolderCollections(interaction.guild.id);
+        if (!collections.length) {
+          await interaction.reply({ content: 'No collections configured yet.', flags: 64 });
+          return;
+        }
+        const options = collections.slice(0, 25).map((c) => ({
+          label: String(c.name).slice(0, 100),
+          value: c.contract_address,
+          description: String(c.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('verify_check_stats_collection_select')
+            .setPlaceholder('Select collection to check')
+            .addOptions(options)
         );
-        await interaction.showModal(modal);
+        await interaction.reply({
+          content: 'Select a collection, then you will enter token ID.',
+          components: [row],
+          flags: 64
+        });
         return;
       }
 
@@ -2122,6 +2132,35 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && interaction.customId === 'verify_check_stats_collection_select') {
+      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
+      if (!contractAddress) {
+        await interaction.update({ content: 'Invalid collection selection.', components: [] });
+        return;
+      }
+      const collections = await getHolderCollections(interaction.guild.id);
+      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      globalThis.__PENDING_CHECK_STATS.set(key, {
+        contractAddress,
+        collectionName: selected?.name || labelForContract(contractAddress),
+        createdAt: Date.now(),
+      });
+      const modal = new ModalBuilder().setCustomId('verify_check_stats_modal').setTitle('Check NFT Stats');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('token_id')
+            .setLabel(`${selected?.name || 'Collection'} token ID`)
+            .setRequired(true)
+            .setPlaceholder('1234')
+            .setStyle(TextInputStyle.Short)
+        )
+      );
+      await interaction.showModal(modal);
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'setup_add_rule_collection_select') {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -2347,23 +2386,60 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Token ID must be numeric.', flags: 64 });
           return;
         }
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        const pending = globalThis.__PENDING_CHECK_STATS.get(key) || null;
+        globalThis.__PENDING_CHECK_STATS.delete(key);
+        const contractAddress = normalizeEthAddress(pending?.contractAddress || '') || SQUIGS_CONTRACT.toLowerCase();
         await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
         const pointsLabel = getPointsLabel(settings);
-        const meta = await getNftMetadataAlchemy(tokenId);
-        const { attrs } = await getTraitsForToken(meta, tokenId);
+        const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
+        const table = hpTableForContract(contractAddress, guildPointMappings);
+        const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
+        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
         const grouped = normalizeTraits(attrs);
-        const hpAgg = computeHpFromTraits(grouped);
+        const hpAgg = computeHpFromTraits(grouped, table);
         const tier = hpToTierLabel(hpAgg.total || 0);
-        const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+        const collectionName = String(pending?.collectionName || labelForContract(contractAddress));
+        const imageUrlRaw = String(
+          meta?.image?.cachedUrl ||
+          meta?.image?.pngUrl ||
+          meta?.image?.thumbnailUrl ||
+          meta?.raw?.metadata?.image ||
+          ''
+        ).trim();
+        const imageUrl = /^https?:\/\//i.test(imageUrlRaw)
+          ? imageUrlRaw
+          : (contractAddress === SQUIGS_CONTRACT.toLowerCase()
+            ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`
+            : null);
+
+        const traitLines = [];
+        for (const cat of Object.keys(grouped)) {
+          for (const t of grouped[cat]) {
+            const pts = hpAgg.per[`${cat}::${t.value}`] ?? 0;
+            traitLines.push(`• ${cat} | ${t.value}: **${pts}**`);
+          }
+        }
+        let traitsText = traitLines.join('\n');
+        if (!traitsText) traitsText = '- none';
+        const maxTraitsChars = 3200;
+        if (traitsText.length > maxTraitsChars) {
+          traitsText = `${traitsText.slice(0, maxTraitsChars)}\n... (truncated)`;
+        }
+        const desc =
+          `Collection: **${collectionName}**\n` +
+          `Contract: \`${contractAddress}\`\n` +
+          `Total ${pointsLabel}: **${hpAgg.total || 0}**\n` +
+          `Rarity: **${tier}**\n\n` +
+          `Trait ${pointsLabel} breakdown:\n${traitsText}`;
+        const embed = new EmbedBuilder()
+          .setTitle(`${collectionName} #${tokenId}`)
+          .setDescription(desc)
+          .setColor(0x7A83BF);
+        if (imageUrl) embed.setImage(imageUrl);
         await interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle(`Squig #${tokenId}`)
-              .setDescription(`Total ${pointsLabel}: **${hpAgg.total || 0}**\nRarity: **${tier}**`)
-              .setImage(imageUrl)
-              .setColor(0x7A83BF)
-          ]
+          embeds: [embed]
         });
         return;
       }
