@@ -582,37 +582,53 @@ function buildDripHeaders(settings, includeJson = false) {
   return headers;
 }
 
+function dripRealmBaseUrls(realmId) {
+  const encoded = encodeURIComponent(realmId);
+  return [
+    `https://api.drip.re/api/v1/realm/${encoded}`,
+    `https://api.drip.re/api/v1/realms/${encoded}`,
+  ];
+}
+
 async function searchDripMembers(realmId, type, value, settings) {
   const typeCandidates =
     type === 'discord' || type === 'discord-id'
       ? ['discord', 'discord-id']
       : [type];
   const valueParamCandidates = ['value', 'values'];
+  const baseUrls = dripRealmBaseUrls(realmId);
+  let saw404 = false;
   const errors = [];
 
-  for (const typeCandidate of typeCandidates) {
-    for (const valueParam of valueParamCandidates) {
+  for (const baseUrl of baseUrls) {
+    for (const typeCandidate of typeCandidates) {
+      for (const valueParam of valueParamCandidates) {
       const url =
-        `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
+        `${baseUrl}` +
         `/members/search?type=${encodeURIComponent(typeCandidate)}&${valueParam}=${encodeURIComponent(value)}`;
       const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         return Array.isArray(data?.data) ? data.data : [];
       }
-      if (res.status === 404) return [];
+      if (res.status === 404) {
+        saw404 = true;
+        continue;
+      }
       const body = await res.text().catch(() => '');
       if (res.status === 400 || res.status === 422) {
-        errors.push(`type=${typeCandidate},${valueParam}: HTTP ${res.status} ${body}`.slice(0, 220));
+        errors.push(`path=${baseUrl},type=${typeCandidate},${valueParam}: HTTP ${res.status} ${body}`.slice(0, 260));
         continue;
       }
       throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+    }
     }
   }
 
   if (errors.length > 0) {
     throw new Error(`DRIP member search failed (all query variants rejected): ${errors.join(' | ')}`);
   }
+  if (saw404) return [];
   return [];
 }
 
@@ -692,18 +708,32 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
 async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
   const payload = { tokens: Number(tokens) };
   if (currencyId) payload.realmPointId = String(currencyId);
-  const url = `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}/members/${encodeURIComponent(memberId)}/point-balance`;
-  const res = await fetchWithTimeout(url, {
-    timeoutMs: 15000,
-    headers: buildDripHeaders(settings, true),
-    method: 'PATCH',
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
+  const baseUrls = dripRealmBaseUrls(realmId);
+  let last404 = false;
+
+  for (const baseUrl of baseUrls) {
+    const url = `${baseUrl}/members/${encodeURIComponent(memberId)}/point-balance`;
+    const res = await fetchWithTimeout(url, {
+      timeoutMs: 15000,
+      headers: buildDripHeaders(settings, true),
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      return res.json().catch(() => ({}));
+    }
+    if (res.status === 404) {
+      last404 = true;
+      continue;
+    }
     const body = await res.text().catch(() => '');
     throw new Error(`DRIP award failed: HTTP ${res.status} ${body}`);
   }
-  return res.json().catch(() => ({}));
+
+  if (last404) {
+    throw new Error('DRIP award failed: member or endpoint not found (HTTP 404 on all realm path variants).');
+  }
+  throw new Error('DRIP award failed: no endpoint accepted the request.');
 }
 
 async function verifyDripConnection(settings, discordProbeId) {
@@ -715,17 +745,21 @@ async function verifyDripConnection(settings, discordProbeId) {
     return { ok: false, reason: `Missing required settings: ${missing.join(', ')}` };
   }
 
-  const pointsUrl = `https://api.drip.re/api/v1/realm/${encodeURIComponent(settings.drip_realm_id)}/points`;
-  const pointsRes = await fetchWithTimeout(pointsUrl, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
-  if (!pointsRes.ok) {
+  const pointsUrls = dripRealmBaseUrls(settings.drip_realm_id).map((baseUrl) => `${baseUrl}/points`);
+  let pointsPayload = null;
+  let pointsErr = null;
+  for (const pointsUrl of pointsUrls) {
+    const pointsRes = await fetchWithTimeout(pointsUrl, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+    if (pointsRes.ok) {
+      pointsPayload = await pointsRes.json().catch(() => ({}));
+      pointsErr = null;
+      break;
+    }
     const body = await pointsRes.text().catch(() => '');
-    return {
-      ok: false,
-      reason: `Points endpoint failed: HTTP ${pointsRes.status} ${body}`.slice(0, 320)
-    };
+    pointsErr = `Points endpoint failed: HTTP ${pointsRes.status} ${body}`.slice(0, 320);
   }
+  if (!pointsPayload) return { ok: false, reason: pointsErr || 'Points endpoint failed for unknown reason.' };
 
-  const pointsPayload = await pointsRes.json().catch(() => ({}));
   const points = Array.isArray(pointsPayload?.data) ? pointsPayload.data : [];
   const configuredCurrency = String(settings.currency_id);
   const matchedCurrency = points.find(p => String(p?.id || '') === configuredCurrency);
