@@ -35,6 +35,7 @@ const GUILD_ID           = process.env.GUILD_ID;
 const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
+const DEFAULT_ADMIN_USER = process.env.DEFAULT_ADMIN_USER || '';
 
 // Visual/render tunables
 const RENDER_SCALE = 3; // 1 = 750x1050. 2 = 1500x2100. 3 = 2250x3150
@@ -327,6 +328,13 @@ function normalizeEthAddress(input) {
 }
 
 function isAdmin(interaction) {
+  const defaultAdmins = new Set(
+    String(DEFAULT_ADMIN_USER)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+  );
+  if (defaultAdmins.has(String(interaction.user?.id || ''))) return true;
   return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
 }
 
