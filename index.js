@@ -512,6 +512,7 @@ function verificationButtons() {
     new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('verify_claim').setLabel('Claim').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('verify_check_stats').setLabel('Check NFT Stats').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect').setStyle(ButtonStyle.Danger),
   );
 }
 
@@ -584,22 +585,6 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
   return member;
 }
 
-async function findDripMemberByWallet(realmId, walletAddress, settings) {
-  const url =
-    `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
-    `/members/search?type=wallet&values=${encodeURIComponent(walletAddress)}`;
-  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
-  if (!res.ok) {
-    if (res.status === 404) return null;
-    const body = await res.text().catch(() => '');
-    throw new Error(`DRIP wallet member search failed: HTTP ${res.status} ${body}`);
-  }
-  const data = await res.json();
-  const member = data?.data?.[0];
-  if (!member?.id) return null;
-  return member;
-}
-
 async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
   const payload = { tokens: Number(tokens) };
   if (currencyId) payload.currencyId = String(currencyId);
@@ -653,15 +638,12 @@ async function handleClaim(interaction) {
   }
 
   try {
-    let member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
-    if (!member && link?.wallet_address) {
-      member = await findDripMemberByWallet(settings.drip_realm_id, link.wallet_address, settings);
-    }
+    const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
     if (!member) {
       await interaction.reply({
         content:
-          'Claim failed: no DRIP member found for your Discord ID or connected wallet in this realm.\n' +
-          'Ask an admin to verify DRIP Realm ID and your DRIP account links.',
+          'Claim failed: no DRIP member found for your Discord ID in this realm.\n' +
+          'Ask an admin to verify DRIP Realm ID and your DRIP Discord member link.',
         flags: 64
       });
       return;
@@ -696,7 +678,7 @@ async function handleClaim(interaction) {
   } catch (err) {
     const msg = String(err?.message || err || '').trim();
     let reason = 'Unknown error during claim.';
-    if (/DRIP member search failed|DRIP wallet member search failed/i.test(msg)) reason = `DRIP member lookup failed (${msg}).`;
+    if (/DRIP member search failed/i.test(msg)) reason = `DRIP member lookup failed (${msg}).`;
     else if (/DRIP award failed/i.test(msg)) reason = `DRIP transfer failed (${msg}).`;
     else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = `Database error while recording claim (${msg}).`;
     await interaction.reply({
@@ -704,6 +686,35 @@ async function handleClaim(interaction) {
       flags: 64
     });
   }
+}
+
+async function deleteUserVerificationData(guildId, discordId) {
+  const deletedClaims = await holdersPool.query(
+    `DELETE FROM claims WHERE guild_id = $1 AND discord_id = $2`,
+    [guildId, discordId]
+  );
+  const deletedWallet = await holdersPool.query(
+    `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
+    [guildId, discordId]
+  );
+  return { claims: deletedClaims.rowCount || 0, wallets: deletedWallet.rowCount || 0 };
+}
+
+async function removeHolderRolesFromMember(member) {
+  const rules = await getHolderRules(member.guild.id);
+  if (!rules.length) return 0;
+  let removed = 0;
+  for (const r of rules) {
+    const role = member.guild.roles.cache.get(r.role_id);
+    if (!role) continue;
+    if (!member.roles.cache.has(role.id)) continue;
+    if (!role.editable) continue;
+    try {
+      await member.roles.remove(role, 'User disconnected verification data');
+      removed++;
+    } catch {}
+  }
+  return removed;
 }
 
 client.on('interactionCreate', async (interaction) => {
@@ -759,16 +770,8 @@ client.on('interactionCreate', async (interaction) => {
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('wallet_address')
-              .setLabel('Primary wallet (DRIP-linked)')
+              .setLabel('Ethereum wallet address')
               .setRequired(true)
-              .setPlaceholder('0x...')
-              .setStyle(TextInputStyle.Short)
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('backup_wallet_address')
-              .setLabel('Backup wallet (optional)')
-              .setRequired(false)
               .setPlaceholder('0x...')
               .setStyle(TextInputStyle.Short)
           )
@@ -795,6 +798,47 @@ client.on('interactionCreate', async (interaction) => {
           )
         );
         await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'verify_disconnect') {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('verify_disconnect_confirm').setLabel('Confirm Disconnect').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('verify_disconnect_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.reply({
+          content:
+            '⚠️ This will delete your saved wallet + claim history for this server and remove holder roles that were assigned by verification.\n' +
+            'Are you sure?',
+          components: [row],
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.customId === 'verify_disconnect_cancel') {
+        await interaction.update({
+          content: 'Disconnect canceled. Your saved data is unchanged.',
+          components: []
+        });
+        return;
+      }
+
+      if (interaction.customId === 'verify_disconnect_confirm') {
+        const result = await deleteUserVerificationData(interaction.guild.id, interaction.user.id);
+        let removedRoles = 0;
+        try {
+          const member = await interaction.guild.members.fetch(interaction.user.id);
+          removedRoles = await removeHolderRolesFromMember(member);
+        } catch {}
+        await interaction.update({
+          content:
+            `Disconnected successfully.\n` +
+            `Deleted wallet records: ${result.wallets}\n` +
+            `Deleted claim records: ${result.claims}\n` +
+            `Removed holder roles: ${removedRoles}`,
+          components: []
+        });
         return;
       }
 
@@ -953,53 +997,20 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'verify_connect_modal') {
-        const primaryRaw = interaction.fields.getTextInputValue('wallet_address');
-        const backupRaw = String(interaction.fields.getTextInputValue('backup_wallet_address') || '').trim();
-        const primaryAddr = normalizeEthAddress(primaryRaw);
-        const backupAddr = backupRaw ? normalizeEthAddress(backupRaw) : null;
-        if (!primaryAddr) {
-          await interaction.reply({ content: 'Invalid primary wallet address.', flags: 64 });
-          return;
-        }
-        if (backupRaw && !backupAddr) {
-          await interaction.reply({ content: 'Backup wallet is invalid. Use a valid 0x address or leave it blank.', flags: 64 });
+        const raw = interaction.fields.getTextInputValue('wallet_address');
+        const addr = normalizeEthAddress(raw);
+        if (!addr) {
+          await interaction.reply({ content: 'Invalid Ethereum address.', flags: 64 });
           return;
         }
 
-        const settings = await getGuildSettings(interaction.guild.id);
-        if (!settings?.drip_api_key || !settings?.drip_client_id || !settings?.drip_realm_id) {
-          await interaction.reply({
-            content: 'Connect is not configured yet. Admin must set DRIP API Key, DRIP Client ID, and DRIP Realm ID.',
-            flags: 64
-          });
-          return;
-        }
-
-        let verifiedAddr = null;
-        let dripMember = await findDripMemberByWallet(settings.drip_realm_id, primaryAddr, settings);
-        if (dripMember) verifiedAddr = primaryAddr;
-        if (!dripMember && backupAddr) {
-          dripMember = await findDripMemberByWallet(settings.drip_realm_id, backupAddr, settings);
-          if (dripMember) verifiedAddr = backupAddr;
-        }
-        if (!dripMember || !verifiedAddr) {
-          await interaction.reply({
-            content:
-              'Connect failed: neither primary nor backup wallet was found in DRIP for this realm.\n' +
-              'Make sure your wallet is linked in DRIP, then try again.',
-            flags: 64
-          });
-          return;
-        }
-
-        await setWalletLink(interaction.guild.id, interaction.user.id, verifiedAddr, true);
+        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false);
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const sync = await syncHolderRoles(member, verifiedAddr);
+        const sync = await syncHolderRoles(member, addr);
         await interaction.reply({
           flags: 64,
           content:
-            `Wallet connected and DRIP-verified: \`${verifiedAddr}\`\n` +
-            `DRIP Member: \`${dripMember.id}\`\n` +
+            `Wallet connected: \`${addr}\`\n` +
             `Role sync complete (${sync.changed} role changes).\n` +
             `${sync.applied.length ? sync.applied.join('\n') : 'No holder role rules configured yet.'}`
         });
