@@ -8,11 +8,16 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  AttachmentBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  StringSelectMenuBuilder,
   SlashCommandBuilder,
   REST,
   Routes,
   Events,
+  PermissionFlagsBits,
+  ChannelType,
 } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require('fs');
@@ -140,13 +145,14 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
-// ===== POSTGRES (wallet storage) =====
-const DATABASE_URL = process.env.DATABASE_URL || null; // e.g. postgres://user:pass@host:5432/db
+// ===== POSTGRES =====
+const DATABASE_URL_HOLDERS = process.env.DATABASE_URL_HOLDERS || process.env.DATABASE_URL || null;
+const DATABASE_URL_TEAM = process.env.DATABASE_URL_TEAM || process.env.DATABASE_URL || null;
 const PGSSL = (process.env.PGSSL ?? 'true') !== 'false'; // default true on Railway
 
-const pgPool = new Pool(
-  DATABASE_URL
-    ? { connectionString: DATABASE_URL, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+const holdersPool = new Pool(
+  DATABASE_URL_HOLDERS
+    ? { connectionString: DATABASE_URL_HOLDERS, ssl: PGSSL ? { rejectUnauthorized: false } : false }
     : {
         host: process.env.PGHOST,
         user: process.env.PGUSER,
@@ -157,34 +163,106 @@ const pgPool = new Pool(
       }
 );
 
-async function ensureSchema() {
-  await pgPool.query(`
+const teamPool = new Pool(
+  DATABASE_URL_TEAM
+    ? { connectionString: DATABASE_URL_TEAM, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+    : {
+        host: process.env.PGHOST,
+        user: process.env.PGUSER,
+        password: process.env.PGPASSWORD,
+        port: Number(process.env.PGPORT || 5432),
+        database: process.env.PGDATABASE,
+        ssl: PGSSL ? { rejectUnauthorized: false } : false
+      }
+);
+
+async function ensureHoldersSchema() {
+  await holdersPool.query(`
     CREATE TABLE IF NOT EXISTS wallet_links (
-      discord_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
+      verified BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  console.log('✅ wallet_links table ready');
+  await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_guild_user_idx ON wallet_links (guild_id, discord_id);`);
+  await holdersPool.query(`
+    CREATE TABLE IF NOT EXISTS claims (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
+      claim_day DATE NOT NULL,
+      amount NUMERIC NOT NULL,
+      wallet_address TEXT NOT NULL,
+      receipt_channel_id TEXT,
+      receipt_message_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS claims_guild_user_day_idx ON claims (guild_id, discord_id, claim_day);`);
+  await holdersPool.query(`
+    CREATE TABLE IF NOT EXISTS verification_panels (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  console.log('✅ holders schema ready');
 }
-ensureSchema().catch(e => console.error('PG ensureSchema error:', e.message));
 
-async function setWalletLink(discordId, walletAddress) {
-  await pgPool.query(
-    `INSERT INTO wallet_links (discord_id, wallet_address)
-     VALUES ($1, $2)
-     ON CONFLICT (discord_id) DO UPDATE
-     SET wallet_address = EXCLUDED.wallet_address, updated_at = NOW()`,
-    [discordId, walletAddress]
+async function ensureTeamSchema() {
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS guild_settings (
+      guild_id TEXT PRIMARY KEY,
+      drip_api_key TEXT,
+      drip_client_id TEXT,
+      drip_realm_id TEXT,
+      currency_id TEXT,
+      payout_type TEXT NOT NULL DEFAULT 'per_up',
+      payout_amount NUMERIC NOT NULL DEFAULT 1,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS drip_client_id TEXT;`);
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS holder_rules (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      role_name TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      min_tokens INTEGER NOT NULL DEFAULT 1,
+      max_tokens INTEGER,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  console.log('✅ team schema ready');
+}
+
+ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
+ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
+
+async function setWalletLink(guildId, discordId, walletAddress, verified = false) {
+  await holdersPool.query(
+    `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (guild_id, discord_id) DO UPDATE
+     SET wallet_address = EXCLUDED.wallet_address, verified = EXCLUDED.verified, updated_at = NOW()`,
+    [guildId, discordId, walletAddress, verified]
   );
 }
 
-async function getWalletLink(discordId) {
-  const { rows } = await pgPool.query(
-    `SELECT wallet_address FROM wallet_links WHERE discord_id = $1`,
-    [discordId]
+async function getWalletLink(guildId, discordId) {
+  const { rows } = await holdersPool.query(
+    `SELECT wallet_address, verified FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
+    [guildId, discordId]
   );
-  return rows[0]?.wallet_address || null;
+  return rows[0] || null;
 }
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
@@ -198,25 +276,12 @@ async function registerSlashCommands() {
 
     const commands = [
       new SlashCommandBuilder()
-        .setName('card')
-        .setDescription(`Create a Squigs trading card JPEG (${Date.now()})`)
-        .addIntegerOption(o => o.setName('token_id').setDescription('Squig token ID').setRequired(true))
-        .addStringOption(o => o.setName('name').setDescription('Optional display name').setRequired(false))
+        .setName('launch-verification')
+        .setDescription('Post the public holder verification menu in this channel')
         .toJSON(),
       new SlashCommandBuilder()
-        .setName('linkwallet')
-        .setDescription('Link your Ethereum wallet for Ugly Bot')
-        .addStringOption(o => o.setName('address').setDescription('Ethereum address (0x...)').setRequired(true))
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('mycard')
-        .setDescription('Create a random Squig Card from an NFT in your linked wallet')
-        .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
-        .toJSON(),
-      new SlashCommandBuilder()
-        .setName('myup')
-        .setDescription('Get total UP (Ugly Points) for all of your Squigs')
-        .addStringOption(o => o.setName('address').setDescription('Optional override wallet address').setRequired(false))
+        .setName('setup-verification')
+        .setDescription('Create/open a private admin setup channel for verification config')
         .toJSON(),
     ];
 
@@ -241,625 +306,580 @@ client.once(Events.ClientReady, async (c) => {
   }
 });
 
-// ===== RANDOM CHARM REWARD =====
-function weightedPick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+const RECEIPT_CHANNEL_ID = '1403005536982794371';
+
+function normalizeEthAddress(input) {
+  const addr = String(input || '').trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) return null;
+  return addr.toLowerCase();
 }
 
-function maybeRewardCharm(userId, username) {
-  const roll = Math.floor(Math.random() * CHARM_REWARD_CHANCE);
-  if (roll !== 0) return null;
-
-  const reward = weightedPick(CHARM_REWARDS);
-  const loreMessages = [
-    "A Squig blinked and $CHARM fell out of the sky.",
-    "The spirals aligned. You’ve been dripped on.",
-    "You weren’t supposed to find this... but the Squigs don’t care.",
-    "A whisper reached your wallet: ‘take it, fast.’",
-    "This reward was meant for someone else. The Squigs disagreed.",
-    "The Charmkeeper slipped. You caught it.",
-    "A Squig coughed up $CHARM. Please wash your hands.",
-    "This token came from *somewhere very wet*. Don’t ask."
-  ];
-  const lore = loreMessages[Math.floor(Math.random() * loreMessages.length)];
-  return { reward, lore };
+function isAdmin(interaction) {
+  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
 }
 
-// ===== PREFIX COMMANDS =====
-client.on('messageCreate', async (message) => {
-  if (!message.content.startsWith('!') || message.author.bot) return;
+async function getGuildSettings(guildId) {
+  const { rows } = await teamPool.query(`SELECT * FROM guild_settings WHERE guild_id = $1`, [guildId]);
+  return rows[0] || null;
+}
 
-  const args = message.content.slice(1).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
+async function upsertGuildSetting(guildId, field, value) {
+  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'payout_type', 'payout_amount']);
+  if (!allowed.has(field)) throw new Error(`Invalid setting field: ${field}`);
+  await teamPool.query(
+    `INSERT INTO guild_settings (guild_id, ${field}, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (guild_id) DO UPDATE
+     SET ${field} = EXCLUDED.${field}, updated_at = NOW()`,
+    [guildId, value]
+  );
+}
 
-  // !linkwallet — deprecated in favor of /linkwallet (still stores if used)
-  if (command === 'linkwallet') {
-    const address = args[0];
-    if (!address) return message.reply('ℹ️ `!linkwallet` is deprecated. Use **/linkwallet** instead.');
-    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      return message.reply('❌ Please enter a valid Ethereum wallet address.\nUse **/linkwallet** instead.');
+async function getHolderRules(guildId) {
+  const { rows } = await teamPool.query(
+    `SELECT * FROM holder_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
+    [guildId]
+  );
+  return rows;
+}
+
+async function addHolderRule(guild, { roleName, contractAddress, minTokens, maxTokens }) {
+  const role = guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+  if (!role) throw new Error(`Role "${roleName}" not found`);
+  await teamPool.query(
+    `INSERT INTO holder_rules (guild_id, role_id, role_name, contract_address, min_tokens, max_tokens, enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
+    [guild.id, role.id, role.name, contractAddress.toLowerCase(), minTokens, maxTokens]
+  );
+  return role;
+}
+
+async function getOwnedTokenIdsForContract(walletAddress, contractAddress) {
+  if (!ALCHEMY_API_KEY) return [];
+  const out = [];
+  let pageKey = null;
+  do {
+    const u = new URL(`https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTsForOwner`);
+    u.searchParams.set('owner', walletAddress);
+    u.searchParams.append('contractAddresses[]', contractAddress);
+    u.searchParams.set('withMetadata', 'false');
+    u.searchParams.set('pageSize', '100');
+    if (pageKey) u.searchParams.set('pageKey', pageKey);
+    const res = await fetchWithRetry(u.toString(), 3, 500);
+    const data = await res.json();
+    for (const nft of (data?.ownedNfts || [])) {
+      const tid = String(nft.tokenId || '').trim();
+      if (!tid) continue;
+      try {
+        out.push(tid.startsWith('0x') ? BigInt(tid).toString(10) : tid);
+      } catch {
+        out.push(tid);
+      }
     }
-    try {
-      await setWalletLink(message.author.id, address);
-      try { await message.delete(); } catch (err) { console.warn(`⚠️ Could not delete message from ${message.author.tag}:`, err.message); }
-      return message.channel.send({ content: '✅ Wallet linked (legacy). Prefer **/linkwallet** next time.', allowedMentions: { repliedUser: false } });
-    } catch (e) {
-      console.error('PG legacy setWalletLink error:', e);
-      return message.reply('⚠️ Could not save your wallet right now. Try **/linkwallet** shortly.');
-    }
+    pageKey = data?.pageKey || null;
+  } while (pageKey);
+  return out;
+}
+
+async function countOwnedForContract(walletAddress, contractAddress) {
+  const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress);
+  return ids.length;
+}
+
+async function syncHolderRoles(member, walletAddress) {
+  const rules = await getHolderRules(member.guild.id);
+  if (!rules.length) return { changed: 0, applied: [] };
+  const byContract = new Map();
+  for (const r of rules) {
+    if (!byContract.has(r.contract_address)) byContract.set(r.contract_address, await countOwnedForContract(walletAddress, r.contract_address));
   }
-
-  // !ugly
-  if (command === 'ugly') {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${UGLY_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      if (owned.size === 0) return message.reply('😢 You don’t own any Charm of the Ugly NFTs.');
-
-      const tokenArray = Array.from(owned);
-      const randomToken = tokenArray[Math.floor(Math.random() * tokenArray.length)];
-      const imgUrl = `https://ipfs.io/ipfs/bafybeie5o7afc4yxyv3xx4jhfjzqugjwl25wuauwn3554jrp26mlcmprhe/${randomToken}`;
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🧟 Charm of the Ugly`)
-        .setDescription(`Token ID: **${randomToken}**`)
-        .setImage(imgUrl)
-        .setColor(0x8c52ff)
-        .setFooter({ text: `Ugly Bot summoned this one from your wallet.` });
-
-      return message.reply({ embeds: [embed] });
-    } catch (err) {
-      console.error('❌ Fetch failed (ugly):', err.message);
-      return message.reply('⚠️ Error fetching your Uglies. Please try again later.');
+  let changed = 0;
+  const applied = [];
+  for (const r of rules) {
+    const count = byContract.get(r.contract_address) || 0;
+    const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
+    const role = member.guild.roles.cache.get(r.role_id);
+    if (!role) continue;
+    const hasRole = member.roles.cache.has(role.id);
+    if (shouldHave && !hasRole) {
+      await member.roles.add(role, `Holder verification (${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
+      changed++;
     }
+    if (!shouldHave && hasRole) {
+      await member.roles.remove(role, `Holder verification (${count} outside range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
+      changed++;
+    }
+    applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
-
-  // !monster
-  if (command === 'monster') {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${MONSTER_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      if (owned.size === 0) return message.reply('😢 You don’t own any Ugly Monster NFTs.');
-
-      const tokenArray = Array.from(owned);
-      const randomToken = tokenArray[Math.floor(Math.random() * tokenArray.length)];
-      const imgUrl = `https://gateway.pinata.cloud/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${randomToken}.webp`;
-
-      const embed = new EmbedBuilder()
-        .setTitle(`👹 Ugly Monster`)
-        .setDescription(`Token ID: **${randomToken}**`)
-        .setImage(imgUrl)
-        .setColor(0xff4444)
-        .setFooter({ text: `Spawned from your Ugly Monster collection.` });
-
-      return message.reply({ embeds: [embed] });
-    } catch (err) {
-      console.error('❌ Fetch failed (monster):', err.message);
-      return message.reply('⚠️ Error fetching your Monsters. Please try again later.');
-    }
-  }
-
-  // !myuglys with pagination
-  if (command === 'myuglys') {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${UGLY_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      const tokenArray = Array.from(owned);
-      if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Charm of the Ugly NFTs.');
-
-      const itemsPerPage = 5;
-      let page = 0;
-      const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
-      const generateEmbeds = (page) => {
-        const start = page * itemsPerPage;
-        const tokens = tokenArray.slice(start, start + itemsPerPage);
-        return tokens.map(tokenId =>
-          new EmbedBuilder()
-            .setTitle(`🧟 Ugly #${tokenId}`)
-            .setImage(`https://ipfs.io/ipfs/bafybeie5o7afc4yxyv3xx4jhfjzqugjwl25wuauwn3554jrp26mlcmprhe/${tokenId}`)
-            .setColor(0x8c52ff)
-            .setFooter({ text: `Page ${page + 1} of ${totalPages}` })
-        );
-      };
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('prev').setLabel('◀️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('next').setLabel('▶️').setStyle(ButtonStyle.Secondary)
-      );
-
-      const messageReply = await message.reply({ embeds: generateEmbeds(page), components: [row] });
-      const collector = messageReply.createMessageComponentCollector({ time: 120000 });
-
-      collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
-      });
-
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-      });
-
-    } catch (err) {
-      console.error('❌ Fetch failed (myuglys):', err.message);
-      return message.reply('⚠️ Error fetching your Uglies. Please try again later.');
-    }
-  }
-
-  // !mymonsters with pagination
-  if (command === 'mymonsters') {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${MONSTER_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      const tokenArray = Array.from(owned);
-      if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Ugly Monster NFTs.');
-
-      const itemsPerPage = 5;
-      let page = 0;
-      const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
-      const generateEmbeds = (page) => {
-        const start = page * itemsPerPage;
-        const tokens = tokenArray.slice(start, start + itemsPerPage);
-        return tokens.map(tokenId =>
-          new EmbedBuilder()
-            .setTitle(`👹 Monster #${tokenId}`)
-            .setImage(`https://gateway.pinata.cloud/ipfs/bafybeicydaui66527mumvml5ushq5ngloqklh6rh7hv3oki2ieo6q25ns4/${tokenId}.webp`)
-            .setColor(0xff4444)
-            .setFooter({ text: `Page ${page + 1} of ${totalPages}` })
-        );
-      };
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('prev').setLabel('◀️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('next').setLabel('▶️').setStyle(ButtonStyle.Secondary)
-      );
-
-      const messageReply = await message.reply({ embeds: generateEmbeds(page), components: [row] });
-      const collector = messageReply.createMessageComponentCollector({ time: 120000 });
-
-      collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
-      });
-
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-      });
-
-    } catch (err) {
-      console.error('❌ Fetch failed (mymonsters):', err.message);
-      return message.reply('⚠️ Error fetching your Monsters. Please try again later.');
-    }
-  }
-
-  // !squig (random from linked wallet)
-  if (command === 'squig' && args.length === 0) {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      if (owned.size === 0) return message.reply('😢 You don’t own any Squigs.');
-
-      const tokenArray = Array.from(owned);
-      const randomToken = tokenArray[Math.floor(Math.random() * tokenArray.length)];
-      const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${randomToken}`;
-      const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${randomToken}`;
-
-      const embed = new EmbedBuilder()
-        .setTitle(`👁️ Squig #${randomToken}`)
-        .setDescription(`[View on OpenSea](${openseaUrl})`)
-        .setImage(imgUrl)
-        .setColor(0xffa500)
-        .setFooter({ text: `A Squig has revealed itself... briefly.` });
-
-      await message.reply({ embeds: [embed] });
-
-      const charmDrop = maybeRewardCharm(message.author.id, message.author.username);
-      if (charmDrop) {
-        message.channel.send(`🎁 **${message.author.username}** just got **${charmDrop.reward} $CHARM**!\n*${charmDrop.lore}*\n👉 <@826581856400179210> to get your $CHARM`);
-        console.log(`CHARM REWARD: ${message.author.username} (${message.author.id}) got ${charmDrop.reward} $CHARM.`);
-      }
-    } catch (err) {
-      console.error('❌ Fetch failed (squig):', err.message);
-      return message.reply('⚠️ Error fetching your Squigs. Please try again later.');
-    }
-  }
-
-  // !squig [tokenId]
-  if (command === 'squig' && args.length === 1 && /^\d+$/.test(args[0])) {
-    const tokenId = args[0];
-
-    // Strict mint gate
-    const minted = await isSquigMintedStrict(tokenId);
-    if (minted !== true) {
-      if (minted === 'UNVERIFIED') {
-        return message.reply(`⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`);
-      }
-      return message.reply(notMintedLine(tokenId));
-    }
-
-    const imgUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-    const openseaUrl = `https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId}`;
-
-    const embed = new EmbedBuilder()
-      .setTitle(`👁️ Squig #${tokenId}`)
-      .setDescription(`[View on OpenSea](${openseaUrl})`)
-      .setImage(imgUrl)
-      .setColor(0xffa500)
-      .setFooter({ text: `Squig #${tokenId} is watching you...` });
-
-    return message.reply({ embeds: [embed] });
-  }
-
-  // !mysquigs with pagination
-  if (command === 'mysquigs') {
-    const wallet = await getWalletLink(message.author.id);
-    if (!wallet) return message.reply('❌ Please link your wallet first using `/linkwallet`');
-
-    const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    try {
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-
-      const tokenArray = Array.from(owned);
-      if (tokenArray.length === 0) return message.reply('😢 You don’t currently own any Squigs.');
-
-      const itemsPerPage = 5;
-      let page = 0;
-      const totalPages = Math.ceil(tokenArray.length / itemsPerPage);
-
-      const generateEmbeds = (page) => {
-        const start = page * itemsPerPage;
-        const tokens = tokenArray.slice(start, start + itemsPerPage);
-        return tokens.map(tokenId =>
-          new EmbedBuilder()
-            .setTitle(`👁️ Squig #${tokenId}`)
-            .setImage(`https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`)
-            .setDescription(`[View on OpenSea](https://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${tokenId})`)
-            .setColor(0xffa500)
-            .setFooter({ text: `Page ${page + 1} of ${totalPages}` })
-        );
-      };
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('prev').setLabel('◀️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('stop').setLabel('⏹️').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('next').setLabel('▶️').setStyle(ButtonStyle.Secondary)
-      );
-
-      const messageReply = await message.reply({ embeds: generateEmbeds(page), components: [row] });
-      const collector = messageReply.createMessageComponentCollector({ time: 120000 });
-
-      collector.on('collect', async (interaction) => {
-        if (interaction.user.id !== message.author.id) {
-          return interaction.reply({ content: '❌ Only the original user can use these buttons.', ephemeral: true });
-        }
-        if (interaction.customId === 'prev') {
-          page = page > 0 ? page - 1 : totalPages - 1;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'next') {
-          page = page < totalPages - 1 ? page + 1 : 0;
-          await interaction.update({ embeds: generateEmbeds(page) });
-        }
-        if (interaction.customId === 'stop') {
-          collector.stop();
-          await interaction.update({ components: [] });
-        }
-      });
-
-      collector.on('end', async () => {
-        try { await messageReply.edit({ components: [] }); } catch (e) {}
-
-      });
-
-      const charmDrop = maybeRewardCharm(message.author.id, message.author.username);
-      if (charmDrop) {
-        message.channel.send(`🎁 **${message.author.username}** just got **${charmDrop.reward} $CHARM**!\n*${charmDrop.lore}*\n👉 Ping <@826581856400179210> to get your $CHARM`);
-        console.log(`CHARM REWARD: ${message.author.username} (${message.author.id}) got ${charmDrop.reward} $CHARM.`);
-      }
-
-    } catch (err) {
-      console.error('❌ Fetch failed (mysquigs):', err.message);
-      return message.reply('⚠️ Error fetching your Squigs. Please try again later.');
-    }
-  }
-});
-
-// ===== SLASH HANDLER: /card + new commands =====
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  // /linkwallet
-  if (interaction.commandName === 'linkwallet') {
-    await interaction.deferReply({ ephemeral: true });
-    const address = interaction.options.getString('address');
-    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      return interaction.editReply({ content: '❌ Invalid Ethereum address. Please paste a 0x… address.' });
-    }
-    try {
-      await setWalletLink(interaction.user.id, address);
-      return interaction.editReply({ content: `✅ Linked wallet: \`${address}\`` });
-    } catch (e) {
-      console.error('PG setWalletLink error:', e);
-      return interaction.editReply({ content: '⚠️ Could not save your wallet right now. Try again soon.' });
-    }
-  }
-
-  // /mycard (random Squig card from linked wallet or override)
-  if (interaction.commandName === 'mycard') {
-    try {
-      await interaction.deferReply();
-      const override = interaction.options.getString('address') || null;
-      const linked = await getWalletLink(interaction.user.id);
-      const wallet = override || linked;
-      if (!wallet) {
-        await interaction.editReply('❌ Please link your wallet first with `/linkwallet 0x...`');
-        return;
-      }
-
-      const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=100&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-      const tokenArray = Array.from(owned);
-      if (tokenArray.length === 0) {
-        await interaction.editReply('😢 No Squigs found in that wallet.');
-        return;
-      }
-      const tokenId = tokenArray[Math.floor(Math.random() * tokenArray.length)];
-
-      const minted = await isSquigMintedStrict(tokenId);
-      if (minted !== true) {
-        const msg = minted === 'UNVERIFIED'
-          ? `⏳ I can’t verify Squig #${tokenId} right now. Try again soon—or mint at **https://squigs.io**`
-          : notMintedLine(tokenId);
-        await interaction.editReply(msg);
-        return;
-      }
-
-      const meta = await getNftMetadataAlchemy(tokenId);
-      const { attrs } = await getTraitsForToken(meta, tokenId);
-      const traits = normalizeTraits(attrs);
-
-      const displayName = meta?.metadata?.name || `Squig #${tokenId}`;
-      const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
-
-      const hpAgg   = computeHpFromTraits(traits);
-      const hpTotal = hpAgg.total || 0;
-      const tier    = hpToTierLabel(hpTotal);
-      const stripe  = hpToStripe(hpTotal);
-
-      const buffer = await renderSquigCardExact({
-        name: displayName,
-        tokenId,
-        imageUrl,
-        traits,
-        rankInfo: { hpTotal, per: hpAgg.per },
-        tierLabel: tier,
-        rarityLabel: tier,
-        headerStripe: stripe,
-        bgSources: CARD_BG_SOURCES,
-        hpForFn: hpFor,
-        fonts: { reg: FONT_REG, bold: FONT_BOLD },
-        scale: RENDER_SCALE
-      });
-
-      const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.png` });
-      await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
-
-    } catch (err) {
-      console.error('❌ /mycard error:', err);
-      if (interaction.deferred) {
-        await interaction.editReply('⚠️ Something went wrong building that card.');
-      } else {
-        await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
-      }
-    }
-    return;
-  }
-
-  // /myup (sum HP of all Squigs in linked/override wallet)
-  if (interaction.commandName === 'myup') {
-    try {
-      await interaction.deferReply();
-      const override = interaction.options.getString('address') || null;
-      const linked = await getWalletLink(interaction.user.id);
-      const wallet = override || linked;
-      if (!wallet) {
-        await interaction.editReply('❌ Please link your wallet first with `/linkwallet 0x...`');
-        return;
-      }
-
-      const url = `https://api.etherscan.io/api?module=account&action=tokennfttx&address=${wallet}&contractaddress=${SQUIGS_CONTRACT}&page=1&offset=200&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-      const res = await fetchWithRetry(url);
-      const data = await res.json();
-      const owned = new Set();
-      for (const tx of data.result) {
-        if (tx.to.toLowerCase() === wallet.toLowerCase()) owned.add(tx.tokenID);
-        else if (tx.from.toLowerCase() === wallet.toLowerCase()) owned.delete(tx.tokenID);
-      }
-      const tokenArray = Array.from(owned);
-      if (tokenArray.length === 0) {
-        await interaction.editReply('😢 No Squigs found in that wallet.');
-        return;
-      }
-
-      let totalHp = 0;
-      const hpList = await mapLimit(tokenArray, 6, async (tokenId) => {
+  return { changed, applied };
+}
+
+async function hasClaimedToday(guildId, discordId) {
+  const { rows } = await holdersPool.query(
+    `SELECT id FROM claims WHERE guild_id = $1 AND discord_id = $2 AND claim_day = CURRENT_DATE LIMIT 1`,
+    [guildId, discordId]
+  );
+  return rows.length > 0;
+}
+
+async function computeWalletStatsForPayout(guildId, walletAddress, payoutType) {
+  const rules = await getHolderRules(guildId);
+  const contracts = [...new Set(rules.map(r => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
+  if (!contracts.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0 };
+
+  const counts = await Promise.all(contracts.map(c => countOwnedForContract(walletAddress, c)));
+  const totalNfts = counts.reduce((a, b) => a + b, 0);
+
+  let totalUp = 0;
+  if (payoutType === 'per_up' && contracts.includes(SQUIGS_CONTRACT.toLowerCase())) {
+    const ids = await getOwnedTokenIdsForContract(walletAddress, SQUIGS_CONTRACT.toLowerCase());
+    const ups = await mapLimit(ids, 5, async (tokenId) => {
+      try {
         const meta = await getNftMetadataAlchemy(tokenId);
         const { attrs } = await getTraitsForToken(meta, tokenId);
-        const traits = normalizeTraits(attrs);
-        const { total } = computeHpFromTraits(traits);
+        const grouped = normalizeTraits(attrs);
+        const { total } = computeHpFromTraits(grouped);
         return total || 0;
-      });
-      for (const hp of hpList) totalHp += hp;
-
-      await interaction.editReply(`💪 Total Ugly Points for \`${wallet}\`: **${totalHp}** (across ${tokenArray.length} Squig${tokenArray.length === 1 ? '' : 's'})`);
-    } catch (err) {
-      console.error('❌ /myup error:', err);
-      if (interaction.deferred) {
-        await interaction.editReply('⚠️ Error calculating total UP.');
-      } else {
-        await interaction.reply({ content: '⚠️ Error calculating total UP.', ephemeral: true });
+      } catch {
+        return 0;
       }
-    }
+    });
+    totalUp = ups.reduce((a, b) => a + b, 0);
+  }
+
+  return {
+    unitTotal: payoutType === 'per_nft' ? totalNfts : totalUp,
+    totalNfts,
+    totalUp,
+  };
+}
+
+function verificationMenuEmbed(guildName) {
+  return new EmbedBuilder()
+    .setTitle('Squig Holder Verification Portal')
+    .setDescription(
+      `Welcome to **${guildName}** verification.\n\n` +
+      `Use the buttons below:\n` +
+      `• **Connect**: link your wallet (address-only for now; signature flow can be added later).\n` +
+      `• **Claim**: claim your daily $CHARM payout based on server settings.\n` +
+      `• **Check NFT Stats**: inspect a Squig token and view its UP breakdown.`
+    )
+    .setColor(0x7ADDC0);
+}
+
+function verificationButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('verify_claim').setLabel('Claim').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('verify_check_stats').setLabel('Check NFT Stats').setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function setupButtons() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role Rule').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup_drip_key').setLabel('Set DRIP API Key').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_client_id').setLabel('Set DRIP Client ID').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_realm_id').setLabel('Set DRIP Realm ID').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_currency_id').setLabel('Set Currency ID').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_payout_type').setLabel('Set Payout Type').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_payout_amount').setLabel('Set Payout Amount').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Success),
+    ),
+  ];
+}
+
+async function getOrCreateSetupChannel(guild) {
+  let ch = guild.channels.cache.find(c => c.name === 'holder-verification-admin' && c.type === ChannelType.GuildText);
+  if (ch) return ch;
+  ch = await guild.channels.create({
+    name: 'holder-verification-admin',
+    type: ChannelType.GuildText,
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      {
+        id: guild.members.me.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels],
+      },
+    ],
+    reason: 'Verification setup channel',
+  });
+  return ch;
+}
+
+function buildDripHeaders(settings, includeJson = false) {
+  const headers = {
+    'Authorization': `Bearer ${settings.drip_api_key}`,
+  };
+  if (settings.drip_client_id) headers['X-Client-Id'] = String(settings.drip_client_id);
+  if (includeJson) headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
+async function findDripMemberByDiscordId(realmId, discordId, settings) {
+  const url =
+    `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
+    `/members/search?type=discord-id&values=${encodeURIComponent(discordId)}`;
+  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+  if (!res.ok) throw new Error(`DRIP member search failed: HTTP ${res.status}`);
+  const data = await res.json();
+  const member = data?.data?.[0];
+  if (!member?.id) return null;
+  return member;
+}
+
+async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
+  const payload = { tokens: Number(tokens) };
+  if (currencyId) payload.currencyId = String(currencyId);
+  const url = `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}/members/${encodeURIComponent(memberId)}/point-balance`;
+  const res = await fetchWithTimeout(url, {
+    timeoutMs: 15000,
+    headers: buildDripHeaders(settings, true),
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`DRIP award failed: HTTP ${res.status} ${body}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+async function handleClaim(interaction) {
+  const guildId = interaction.guild.id;
+  const link = await getWalletLink(guildId, interaction.user.id);
+  if (!link?.wallet_address) {
+    await interaction.reply({ content: 'Connect your wallet first.', ephemeral: true });
+    return;
+  }
+  if (await hasClaimedToday(guildId, interaction.user.id)) {
+    await interaction.reply({ content: 'You already claimed today. Try again after UTC midnight.', ephemeral: true });
     return;
   }
 
-  // ORIGINAL /card
-  if (interaction.commandName !== 'card') return;
+  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1 };
+  const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
+  const payoutAmount = Number(settings.payout_amount || 0);
+  if (!settings?.drip_api_key || !settings?.drip_client_id || !settings?.drip_realm_id || !settings?.currency_id) {
+    await interaction.reply({
+      content: 'Claim is not configured yet. Admin must set DRIP API Key, DRIP Client ID, DRIP Realm ID, and Currency ID.',
+      ephemeral: true
+    });
+    return;
+  }
+  const stats = await computeWalletStatsForPayout(guildId, link.wallet_address, payoutType);
+  const amount = Math.max(0, Math.floor(stats.unitTotal * payoutAmount));
 
-  const tokenId = interaction.options.getInteger('token_id');
-  const customName = interaction.options.getString('name') || null;
+  if (amount <= 0) {
+    await interaction.reply({ content: 'No payout available. Check your holdings or payout settings.', ephemeral: true });
+    return;
+  }
 
+  const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
+  if (!member) {
+    await interaction.reply({
+      content: 'You are not registered as a DRIP member in this realm for your Discord ID.',
+      ephemeral: true
+    });
+    return;
+  }
+  const dripResult = await awardDripPoints(settings.drip_realm_id, member.id, amount, settings.currency_id, settings);
+
+  const receiptChannel = await interaction.guild.channels.fetch(RECEIPT_CHANNEL_ID).catch(() => null);
+  let receiptMessage = null;
+  if (receiptChannel?.isTextBased()) {
+    receiptMessage = await receiptChannel.send(
+      `🧾 Claim Receipt\n` +
+      `User: <@${interaction.user.id}>\n` +
+      `DRIP Member: \`${member.id}\`\n` +
+      `Wallet: \`${link.wallet_address}\`\n` +
+      `Type: ${payoutType}\n` +
+      `Units: ${stats.unitTotal}\n` +
+      `Payout: **${amount} $CHARM**\n` +
+      `DRIP Realm: \`${settings.drip_realm_id}\` | Currency: \`${settings.currency_id}\`\n` +
+      `Result: \`${JSON.stringify(dripResult).slice(0, 300)}\``
+    );
+  }
+
+  await holdersPool.query(
+    `INSERT INTO claims (guild_id, discord_id, claim_day, amount, wallet_address, receipt_channel_id, receipt_message_id)
+     VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)`,
+    [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
+  );
+
+  await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, ephemeral: true });
+}
+
+client.on('interactionCreate', async (interaction) => {
   try {
-    await interaction.deferReply();
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === 'launch-verification') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+        const msg = await interaction.channel.send({
+          embeds: [verificationMenuEmbed(interaction.guild.name)],
+          components: [verificationButtons()],
+        });
+        await holdersPool.query(
+          `INSERT INTO verification_panels (guild_id, channel_id, message_id, created_by) VALUES ($1, $2, $3, $4)`,
+          [interaction.guild.id, interaction.channel.id, msg.id, interaction.user.id]
+        );
+        await interaction.reply({ content: 'Verification menu launched.', ephemeral: true });
+        return;
+      }
 
-    const minted = await isSquigMintedStrict(tokenId);
-    if (minted !== true) {
-      const msg = minted === 'UNVERIFIED'
-        ? `⏳ I can’t verify Squig #${tokenId} right now. Please try again in a moment—or mint at **https://squigs.io**`
-        : notMintedLine(tokenId);
-      await interaction.editReply(msg);
+      if (interaction.commandName === 'setup-verification') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+        const adminChannel = await getOrCreateSetupChannel(interaction.guild);
+        await adminChannel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle('Holder Verification Setup')
+              .setDescription(
+                `Configure holder rules and DRIP settings.\n` +
+                `• Role rules: role + contract + min/max holdings.\n` +
+                `• DRIP settings: API key, realm, currency.\n` +
+                `• Payout type: per NFT or per UP.\n` +
+                `• Payout amount: multiplier for the selected payout type.`
+              )
+              .setColor(0xB0DEEE)
+          ],
+          components: setupButtons(),
+        });
+        await interaction.reply({ content: `Setup panel posted in <#${adminChannel.id}>`, ephemeral: true });
+        return;
+      }
       return;
     }
 
-    const meta = await getNftMetadataAlchemy(tokenId);
-    const { attrs, source } = await getTraitsForToken(meta, tokenId);
-    const traits = normalizeTraits(attrs);
+    if (interaction.isButton()) {
+      if (interaction.customId === 'verify_connect') {
+        const modal = new ModalBuilder().setCustomId('verify_connect_modal').setTitle('Connect Wallet');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('wallet_address')
+              .setLabel('Ethereum wallet address')
+              .setRequired(true)
+              .setPlaceholder('0x...')
+              .setStyle(TextInputStyle.Short)
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
 
-    console.log(`Traits debug #${tokenId}: { source: ${source}, count: ${attrs.length}, sample: ${JSON.stringify(attrs.slice(0,3))} }`);
+      if (interaction.customId === 'verify_claim') {
+        await handleClaim(interaction);
+        return;
+      }
 
-    const displayName = customName || meta?.metadata?.name || `Squig #${tokenId}`;
-    const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+      if (interaction.customId === 'verify_check_stats') {
+        const modal = new ModalBuilder().setCustomId('verify_check_stats_modal').setTitle('Check NFT Stats');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('token_id')
+              .setLabel('Squig token ID')
+              .setRequired(true)
+              .setPlaceholder('1234')
+              .setStyle(TextInputStyle.Short)
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
 
-    const hpAgg   = computeHpFromTraits(traits);
-    const hpTotal = hpAgg.total || 0;
-    const tier    = hpToTierLabel(hpTotal);
-    const stripe  = hpToStripe(hpTotal);
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        return;
+      }
 
-    const buffer = await renderSquigCardExact({
-      name: displayName,
-      tokenId,
-      imageUrl,
-      traits,
-      rankInfo: { hpTotal, per: hpAgg.per },
-      tierLabel: tier,
-      rarityLabel: tier,
-      headerStripe: stripe,
-      bgSources: CARD_BG_SOURCES,
-      hpForFn: hpFor,
-      fonts: { reg: FONT_REG, bold: FONT_BOLD },
-      scale: RENDER_SCALE
-    });
+      if (interaction.customId === 'setup_add_rule') {
+        const modal = new ModalBuilder().setCustomId('setup_add_rule_modal').setTitle('Add Holder Role Rule');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('role_name').setLabel('Role name').setRequired(true).setStyle(TextInputStyle.Short)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_tokens').setLabel('Min tokens (inclusive)').setRequired(true).setStyle(TextInputStyle.Short)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_tokens').setLabel('Max tokens (optional)').setRequired(false).setStyle(TextInputStyle.Short)),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
 
-    const file = new AttachmentBuilder(buffer, { name: `squig-${tokenId}-card.png` });
-    await interaction.editReply({ content: `🪪 **${displayName}**`, files: [file] });
+      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_payout_amount') {
+        const fieldMap = {
+          setup_drip_key: ['setup_drip_key_modal', 'DRIP API Key', 'drip_api_key', 'API key'],
+          setup_client_id: ['setup_client_id_modal', 'DRIP Client ID', 'drip_client_id', 'Client ID'],
+          setup_realm_id: ['setup_realm_id_modal', 'DRIP Realm ID', 'drip_realm_id', 'Realm ID'],
+          setup_currency_id: ['setup_currency_id_modal', 'Currency ID', 'currency_id', 'Currency ID'],
+          setup_payout_amount: ['setup_payout_amount_modal', 'Payout Amount', 'payout_amount', 'Number'],
+        };
+        const [id, title, field, label] = fieldMap[interaction.customId];
+        const modal = new ModalBuilder().setCustomId(id).setTitle(title);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(field).setLabel(label).setRequired(true).setStyle(TextInputStyle.Short))
+        );
+        await interaction.showModal(modal);
+        return;
+      }
 
+      if (interaction.customId === 'setup_payout_type') {
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_payout_type_select')
+            .setPlaceholder('Select payout type')
+            .addOptions(
+              { label: 'Per NFT', value: 'per_nft', description: 'Payout = owned NFT count x payout amount' },
+              { label: 'Per UglyPoint', value: 'per_up', description: 'Payout = total UP x payout amount' },
+            )
+        );
+        await interaction.reply({ content: 'Choose payout type:', components: [row], ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId === 'setup_view') {
+        const settings = await getGuildSettings(interaction.guild.id);
+        const rules = await getHolderRules(interaction.guild.id);
+        await interaction.reply({
+          ephemeral: true,
+          content:
+            `Settings:\n` +
+            `- DRIP API Key: ${settings?.drip_api_key ? 'set' : 'not set'}\n` +
+            `- DRIP Client ID: ${settings?.drip_client_id ? 'set' : 'not set'}\n` +
+            `- DRIP Realm ID: ${settings?.drip_realm_id || 'not set'}\n` +
+            `- Currency ID: ${settings?.currency_id || 'not set'}\n` +
+            `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
+            `- Payout Amount: ${settings?.payout_amount || 1}\n\n` +
+            `Rules (${rules.length}):\n` +
+            `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}`
+        });
+        return;
+      }
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_payout_type_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        return;
+      }
+      await upsertGuildSetting(interaction.guild.id, 'payout_type', interaction.values[0]);
+      await interaction.update({ content: `Payout type set to \`${interaction.values[0]}\`.`, components: [] });
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'verify_connect_modal') {
+        const raw = interaction.fields.getTextInputValue('wallet_address');
+        const addr = normalizeEthAddress(raw);
+        if (!addr) {
+          await interaction.reply({ content: 'Invalid Ethereum address.', ephemeral: true });
+          return;
+        }
+        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false);
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        const sync = await syncHolderRoles(member, addr);
+        await interaction.reply({
+          ephemeral: true,
+          content:
+            `Wallet connected: \`${addr}\`\n` +
+            `Role sync complete (${sync.changed} role changes).\n` +
+            `${sync.applied.length ? sync.applied.join('\n') : 'No holder role rules configured yet.'}`
+        });
+        return;
+      }
+
+      if (interaction.customId === 'verify_check_stats_modal') {
+        const tokenId = String(interaction.fields.getTextInputValue('token_id') || '').trim();
+        if (!/^\d+$/.test(tokenId)) {
+          await interaction.reply({ content: 'Token ID must be numeric.', ephemeral: true });
+          return;
+        }
+        const meta = await getNftMetadataAlchemy(tokenId);
+        const { attrs } = await getTraitsForToken(meta, tokenId);
+        const grouped = normalizeTraits(attrs);
+        const hpAgg = computeHpFromTraits(grouped);
+        const tier = hpToTierLabel(hpAgg.total || 0);
+        const imageUrl = `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`;
+        await interaction.reply({
+          ephemeral: true,
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`Squig #${tokenId}`)
+              .setDescription(`Total UP: **${hpAgg.total || 0}**\nRarity: **${tier}**`)
+              .setImage(imageUrl)
+              .setColor(0x7A83BF)
+          ]
+        });
+        return;
+      }
+
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId === 'setup_add_rule_modal') {
+        const roleName = interaction.fields.getTextInputValue('role_name').trim();
+        const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
+        const minTokens = Number(interaction.fields.getTextInputValue('min_tokens'));
+        const maxRaw = String(interaction.fields.getTextInputValue('max_tokens') || '').trim();
+        const maxTokens = maxRaw === '' ? null : Number(maxRaw);
+        if (!contractAddress) {
+          await interaction.reply({ content: 'Invalid contract address.', ephemeral: true });
+          return;
+        }
+        if (!Number.isInteger(minTokens) || minTokens < 0 || (maxTokens != null && (!Number.isInteger(maxTokens) || maxTokens < minTokens))) {
+          await interaction.reply({ content: 'Invalid min/max token values.', ephemeral: true });
+          return;
+        }
+        const role = await addHolderRule(interaction.guild, { roleName, contractAddress, minTokens, maxTokens });
+        await interaction.reply({ content: `Rule added for role **${role.name}** on \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}).`, ephemeral: true });
+        return;
+      }
+
+      const settingModalMap = {
+        setup_drip_key_modal: 'drip_api_key',
+        setup_client_id_modal: 'drip_client_id',
+        setup_realm_id_modal: 'drip_realm_id',
+        setup_currency_id_modal: 'currency_id',
+        setup_payout_amount_modal: 'payout_amount',
+      };
+      const field = settingModalMap[interaction.customId];
+      if (field) {
+        const value = interaction.fields.getTextInputValue(field).trim();
+        if (field === 'payout_amount') {
+          const n = Number(value);
+          if (!Number.isFinite(n) || n < 0) {
+            await interaction.reply({ content: 'Payout amount must be a non-negative number.', ephemeral: true });
+            return;
+          }
+          await upsertGuildSetting(interaction.guild.id, field, n);
+        } else {
+          await upsertGuildSetting(interaction.guild.id, field, value);
+        }
+        await interaction.reply({ content: `Updated \`${field}\`.`, ephemeral: true });
+        return;
+      }
+    }
   } catch (err) {
-    console.error('❌ /card error:', err);
-    if (interaction.deferred) {
-      await interaction.editReply('⚠️ Something went wrong building that card.');
+    console.error('❌ Verification interaction error:', err);
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: '⚠️ Something went wrong handling that action.', ephemeral: true }).catch(() => {});
     } else {
-      await interaction.reply({ content: '⚠️ Something went wrong building that card.', ephemeral: true });
+      await interaction.reply({ content: '⚠️ Something went wrong handling that action.', ephemeral: true }).catch(() => {});
     }
   }
 });
-
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 // ===== Helper funcs (metadata) =====
@@ -1787,3 +1807,4 @@ ctx.drawImage(img, AX + dx, AY + dy, dw, dh);
   return canvas.toBuffer('image/jpeg', { quality: 92 });
 
 }
+
