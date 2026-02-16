@@ -573,7 +573,27 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
     `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
     `/members/search?type=discord-id&values=${encodeURIComponent(discordId)}`;
   const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
-  if (!res.ok) throw new Error(`DRIP member search failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    const body = await res.text().catch(() => '');
+    throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+  }
+  const data = await res.json();
+  const member = data?.data?.[0];
+  if (!member?.id) return null;
+  return member;
+}
+
+async function findDripMemberByWallet(realmId, walletAddress, settings) {
+  const url =
+    `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
+    `/members/search?type=wallet&values=${encodeURIComponent(walletAddress)}`;
+  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    const body = await res.text().catch(() => '');
+    throw new Error(`DRIP wallet member search failed: HTTP ${res.status} ${body}`);
+  }
   const data = await res.json();
   const member = data?.data?.[0];
   if (!member?.id) return null;
@@ -612,9 +632,14 @@ async function handleClaim(interaction) {
   const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1 };
   const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
   const payoutAmount = Number(settings.payout_amount || 0);
-  if (!settings?.drip_api_key || !settings?.drip_client_id || !settings?.drip_realm_id || !settings?.currency_id) {
+  const missing = [];
+  if (!settings?.drip_api_key) missing.push('DRIP API Key');
+  if (!settings?.drip_client_id) missing.push('DRIP Client ID');
+  if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+  if (!settings?.currency_id) missing.push('Currency ID');
+  if (missing.length > 0) {
     await interaction.reply({
-      content: 'Claim is not configured yet. Admin must set DRIP API Key, DRIP Client ID, DRIP Realm ID, and Currency ID.',
+      content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
       flags: 64
     });
     return;
@@ -627,40 +652,58 @@ async function handleClaim(interaction) {
     return;
   }
 
-  const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
-  if (!member) {
+  try {
+    let member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
+    if (!member && link?.wallet_address) {
+      member = await findDripMemberByWallet(settings.drip_realm_id, link.wallet_address, settings);
+    }
+    if (!member) {
+      await interaction.reply({
+        content:
+          'Claim failed: no DRIP member found for your Discord ID or connected wallet in this realm.\n' +
+          'Ask an admin to verify DRIP Realm ID and your DRIP account links.',
+        flags: 64
+      });
+      return;
+    }
+
+    const dripResult = await awardDripPoints(settings.drip_realm_id, member.id, amount, settings.currency_id, settings);
+
+    const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
+    const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
+    let receiptMessage = null;
+    if (receiptChannel?.isTextBased()) {
+      receiptMessage = await receiptChannel.send(
+        `🧾 Claim Receipt\n` +
+        `User: <@${interaction.user.id}>\n` +
+        `DRIP Member: \`${member.id}\`\n` +
+        `Wallet: \`${link.wallet_address}\`\n` +
+        `Type: ${payoutType}\n` +
+        `Units: ${stats.unitTotal}\n` +
+        `Payout: **${amount} $CHARM**\n` +
+        `DRIP Realm: \`${settings.drip_realm_id}\` | Currency: \`${settings.currency_id}\`\n` +
+        `Result: \`${JSON.stringify(dripResult).slice(0, 300)}\``
+      );
+    }
+
+    await holdersPool.query(
+      `INSERT INTO claims (guild_id, discord_id, claim_day, amount, wallet_address, receipt_channel_id, receipt_message_id)
+       VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)`,
+      [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
+    );
+
+    await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, flags: 64 });
+  } catch (err) {
+    const msg = String(err?.message || err || '').trim();
+    let reason = 'Unknown error during claim.';
+    if (/DRIP member search failed|DRIP wallet member search failed/i.test(msg)) reason = `DRIP member lookup failed (${msg}).`;
+    else if (/DRIP award failed/i.test(msg)) reason = `DRIP transfer failed (${msg}).`;
+    else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = `Database error while recording claim (${msg}).`;
     await interaction.reply({
-      content: 'You are not registered as a DRIP member in this realm for your Discord ID.',
+      content: `Claim failed: ${reason}`,
       flags: 64
     });
-    return;
   }
-  const dripResult = await awardDripPoints(settings.drip_realm_id, member.id, amount, settings.currency_id, settings);
-
-  const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
-  const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
-  let receiptMessage = null;
-  if (receiptChannel?.isTextBased()) {
-    receiptMessage = await receiptChannel.send(
-      `🧾 Claim Receipt\n` +
-      `User: <@${interaction.user.id}>\n` +
-      `DRIP Member: \`${member.id}\`\n` +
-      `Wallet: \`${link.wallet_address}\`\n` +
-      `Type: ${payoutType}\n` +
-      `Units: ${stats.unitTotal}\n` +
-      `Payout: **${amount} $CHARM**\n` +
-      `DRIP Realm: \`${settings.drip_realm_id}\` | Currency: \`${settings.currency_id}\`\n` +
-      `Result: \`${JSON.stringify(dripResult).slice(0, 300)}\``
-    );
-  }
-
-  await holdersPool.query(
-    `INSERT INTO claims (guild_id, discord_id, claim_day, amount, wallet_address, receipt_channel_id, receipt_message_id)
-     VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)`,
-    [guildId, interaction.user.id, amount, link.wallet_address, receiptChannel?.id || null, receiptMessage?.id || null]
-  );
-
-  await interaction.reply({ content: `Claim sent via DRIP and recorded: **${amount} $CHARM**.`, flags: 64 });
 }
 
 client.on('interactionCreate', async (interaction) => {
@@ -716,8 +759,16 @@ client.on('interactionCreate', async (interaction) => {
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('wallet_address')
-              .setLabel('Ethereum wallet address')
+              .setLabel('Primary wallet (DRIP-linked)')
               .setRequired(true)
+              .setPlaceholder('0x...')
+              .setStyle(TextInputStyle.Short)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('backup_wallet_address')
+              .setLabel('Backup wallet (optional)')
+              .setRequired(false)
               .setPlaceholder('0x...')
               .setStyle(TextInputStyle.Short)
           )
@@ -902,19 +953,53 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'verify_connect_modal') {
-        const raw = interaction.fields.getTextInputValue('wallet_address');
-        const addr = normalizeEthAddress(raw);
-        if (!addr) {
-          await interaction.reply({ content: 'Invalid Ethereum address.', flags: 64 });
+        const primaryRaw = interaction.fields.getTextInputValue('wallet_address');
+        const backupRaw = String(interaction.fields.getTextInputValue('backup_wallet_address') || '').trim();
+        const primaryAddr = normalizeEthAddress(primaryRaw);
+        const backupAddr = backupRaw ? normalizeEthAddress(backupRaw) : null;
+        if (!primaryAddr) {
+          await interaction.reply({ content: 'Invalid primary wallet address.', flags: 64 });
           return;
         }
-        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false);
+        if (backupRaw && !backupAddr) {
+          await interaction.reply({ content: 'Backup wallet is invalid. Use a valid 0x address or leave it blank.', flags: 64 });
+          return;
+        }
+
+        const settings = await getGuildSettings(interaction.guild.id);
+        if (!settings?.drip_api_key || !settings?.drip_client_id || !settings?.drip_realm_id) {
+          await interaction.reply({
+            content: 'Connect is not configured yet. Admin must set DRIP API Key, DRIP Client ID, and DRIP Realm ID.',
+            flags: 64
+          });
+          return;
+        }
+
+        let verifiedAddr = null;
+        let dripMember = await findDripMemberByWallet(settings.drip_realm_id, primaryAddr, settings);
+        if (dripMember) verifiedAddr = primaryAddr;
+        if (!dripMember && backupAddr) {
+          dripMember = await findDripMemberByWallet(settings.drip_realm_id, backupAddr, settings);
+          if (dripMember) verifiedAddr = backupAddr;
+        }
+        if (!dripMember || !verifiedAddr) {
+          await interaction.reply({
+            content:
+              'Connect failed: neither primary nor backup wallet was found in DRIP for this realm.\n' +
+              'Make sure your wallet is linked in DRIP, then try again.',
+            flags: 64
+          });
+          return;
+        }
+
+        await setWalletLink(interaction.guild.id, interaction.user.id, verifiedAddr, true);
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const sync = await syncHolderRoles(member, addr);
+        const sync = await syncHolderRoles(member, verifiedAddr);
         await interaction.reply({
           flags: 64,
           content:
-            `Wallet connected: \`${addr}\`\n` +
+            `Wallet connected and DRIP-verified: \`${verifiedAddr}\`\n` +
+            `DRIP Member: \`${dripMember.id}\`\n` +
             `Role sync complete (${sync.changed} role changes).\n` +
             `${sync.applied.length ? sync.applied.join('\n') : 'No holder role rules configured yet.'}`
         });
