@@ -416,10 +416,10 @@ async function countOwnedForContract(walletAddress, contractAddress) {
 
 async function syncHolderRoles(member, walletAddress) {
   const rules = await getHolderRules(member.guild.id);
-  if (!rules.length) return { changed: 0, applied: [] };
+  if (!rules.length) return { changed: 0, applied: [], granted: [] };
   const me = member.guild.members.me;
   if (!me?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
-    return { changed: 0, applied: ['Skipped: bot is missing Manage Roles permission.'] };
+    return { changed: 0, applied: ['Skipped: bot is missing Manage Roles permission.'], granted: [] };
   }
 
   const byContract = new Map();
@@ -429,6 +429,7 @@ async function syncHolderRoles(member, walletAddress) {
 
   let changed = 0;
   const applied = [];
+  const granted = [];
   for (const r of rules) {
     const count = byContract.get(r.contract_address) || 0;
     const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
@@ -447,6 +448,7 @@ async function syncHolderRoles(member, walletAddress) {
       if (shouldHave && !hasRole) {
         await member.roles.add(role, `Holder verification (${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
         changed++;
+        granted.push(role.name);
       }
       if (!shouldHave && hasRole) {
         await member.roles.remove(role, `Holder verification (${count} outside range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
@@ -461,7 +463,7 @@ async function syncHolderRoles(member, walletAddress) {
     }
     applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
-  return { changed, applied };
+  return { changed, applied, granted };
 }
 
 async function hasClaimedToday(guildId, discordId) {
@@ -1323,6 +1325,7 @@ client.on('interactionCreate', async (interaction) => {
             `Wallet connected successfully.\n` +
             `${dripStatus}\n` +
             `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
+            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}\n` : 'Roles granted: none\n'}` +
             `${sync.applied.length ? sync.applied.join('\n') : 'No holder roles matched yet.'}`
         });
         return;
