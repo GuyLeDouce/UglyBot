@@ -12,6 +12,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
+  RoleSelectMenuBuilder,
   SlashCommandBuilder,
   REST,
   Routes,
@@ -307,6 +308,7 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
+globalThis.__PENDING_HOLDER_RULES ||= new Map();
 
 function normalizeEthAddress(input) {
   const addr = String(input || '').trim();
@@ -343,15 +345,23 @@ async function getHolderRules(guildId) {
   return rows;
 }
 
-async function addHolderRule(guild, { roleName, contractAddress, minTokens, maxTokens }) {
-  const role = guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
-  if (!role) throw new Error(`Role "${roleName}" not found`);
+async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens }) {
+  const role = guild.roles.cache.get(roleId);
+  if (!role) throw new Error(`Role not found: ${roleId}`);
   await teamPool.query(
     `INSERT INTO holder_rules (guild_id, role_id, role_name, contract_address, min_tokens, max_tokens, enabled)
      VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
     [guild.id, role.id, role.name, contractAddress.toLowerCase(), minTokens, maxTokens]
   );
   return role;
+}
+
+async function disableHolderRule(guildId, ruleId) {
+  const { rows } = await teamPool.query(
+    `UPDATE holder_rules SET enabled = FALSE WHERE guild_id = $1 AND id = $2 AND enabled = TRUE RETURNING id, role_name, contract_address, min_tokens, max_tokens`,
+    [guildId, ruleId]
+  );
+  return rows[0] || null;
 }
 
 async function getOwnedTokenIdsForContract(walletAddress, contractAddress) {
@@ -389,25 +399,47 @@ async function countOwnedForContract(walletAddress, contractAddress) {
 async function syncHolderRoles(member, walletAddress) {
   const rules = await getHolderRules(member.guild.id);
   if (!rules.length) return { changed: 0, applied: [] };
+  const me = member.guild.members.me;
+  if (!me?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+    return { changed: 0, applied: ['Skipped: bot is missing Manage Roles permission.'] };
+  }
+
   const byContract = new Map();
   for (const r of rules) {
     if (!byContract.has(r.contract_address)) byContract.set(r.contract_address, await countOwnedForContract(walletAddress, r.contract_address));
   }
+
   let changed = 0;
   const applied = [];
   for (const r of rules) {
     const count = byContract.get(r.contract_address) || 0;
     const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
     const role = member.guild.roles.cache.get(r.role_id);
-    if (!role) continue;
-    const hasRole = member.roles.cache.has(role.id);
-    if (shouldHave && !hasRole) {
-      await member.roles.add(role, `Holder verification (${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
-      changed++;
+    if (!role) {
+      applied.push(`${r.role_name || r.role_id}: skipped (role not found)`);
+      continue;
     }
-    if (!shouldHave && hasRole) {
-      await member.roles.remove(role, `Holder verification (${count} outside range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
-      changed++;
+    if (!role.editable) {
+      applied.push(`${role.name}: skipped (bot cannot manage this role/hierarchy)`);
+      continue;
+    }
+
+    const hasRole = member.roles.cache.has(role.id);
+    try {
+      if (shouldHave && !hasRole) {
+        await member.roles.add(role, `Holder verification (${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
+        changed++;
+      }
+      if (!shouldHave && hasRole) {
+        await member.roles.remove(role, `Holder verification (${count} outside range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
+        changed++;
+      }
+    } catch (err) {
+      if (err?.code === 50001 || err?.code === 50013) {
+        applied.push(`${role.name}: skipped (missing access/permissions)`); 
+        continue;
+      }
+      throw err;
     }
     applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
@@ -479,6 +511,7 @@ function setupButtons() {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role Rule').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role Rule').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_drip_key').setLabel('Set DRIP API Key').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_client_id').setLabel('Set DRIP Client ID').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_realm_id').setLabel('Set DRIP Realm ID').setStyle(ButtonStyle.Secondary),
@@ -712,12 +745,32 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'setup_add_rule') {
         const modal = new ModalBuilder().setCustomId('setup_add_rule_modal').setTitle('Add Holder Role Rule');
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('role_name').setLabel('Role name').setRequired(true).setStyle(TextInputStyle.Short)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_tokens').setLabel('Min tokens (inclusive)').setRequired(true).setStyle(TextInputStyle.Short)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_tokens').setLabel('Max tokens (optional)').setRequired(false).setStyle(TextInputStyle.Short)),
         );
         await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_rule') {
+        const rules = await getHolderRules(interaction.guild.id);
+        if (!rules.length) {
+          await interaction.reply({ content: 'No holder rules to remove.', flags: 64 });
+          return;
+        }
+        const options = rules.slice(0, 25).map((r) => ({
+          label: `${r.role_name} (${r.min_tokens}-${r.max_tokens ?? '∞'})`.slice(0, 100),
+          value: String(r.id),
+          description: String(r.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_remove_rule_select')
+            .setPlaceholder('Select a holder rule to remove')
+            .addOptions(options)
+        );
+        await interaction.reply({ content: 'Select the holder role rule to remove:', components: [row], flags: 64 });
         return;
       }
 
@@ -773,6 +826,36 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isRoleSelectMenu() && interaction.customId === 'setup_add_rule_role_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      const pending = globalThis.__PENDING_HOLDER_RULES.get(key);
+      if (!pending) {
+        await interaction.reply({ content: 'No pending holder rule found. Click "Add Holder Role Rule" again.', flags: 64 });
+        return;
+      }
+      const roleId = interaction.values?.[0];
+      if (!roleId) {
+        await interaction.reply({ content: 'No role selected.', flags: 64 });
+        return;
+      }
+      const role = await addHolderRule(interaction.guild, {
+        roleId,
+        contractAddress: pending.contractAddress,
+        minTokens: pending.minTokens,
+        maxTokens: pending.maxTokens
+      });
+      globalThis.__PENDING_HOLDER_RULES.delete(key);
+      await interaction.update({
+        content: `Rule added for role **${role.name}** on \`${pending.contractAddress}\` (${pending.minTokens}-${pending.maxTokens ?? '∞'}).`,
+        components: []
+      });
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'setup_payout_type_select') {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -780,6 +863,28 @@ client.on('interactionCreate', async (interaction) => {
       }
       await upsertGuildSetting(interaction.guild.id, 'payout_type', interaction.values[0]);
       await interaction.update({ content: `Payout type set to \`${interaction.values[0]}\`.`, components: [] });
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_remove_rule_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const ruleId = Number(interaction.values?.[0]);
+      if (!Number.isInteger(ruleId) || ruleId <= 0) {
+        await interaction.update({ content: 'Invalid rule selection.', components: [] });
+        return;
+      }
+      const removed = await disableHolderRule(interaction.guild.id, ruleId);
+      if (!removed) {
+        await interaction.update({ content: 'Rule not found or already removed.', components: [] });
+        return;
+      }
+      await interaction.update({
+        content: `Removed holder rule: **${removed.role_name}** on \`${removed.contract_address}\` (${removed.min_tokens}-${removed.max_tokens ?? '∞'}).`,
+        components: []
+      });
       return;
     }
 
@@ -835,7 +940,6 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'setup_add_rule_modal') {
-        const roleName = interaction.fields.getTextInputValue('role_name').trim();
         const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
         const minTokens = Number(interaction.fields.getTextInputValue('min_tokens'));
         const maxRaw = String(interaction.fields.getTextInputValue('max_tokens') || '').trim();
@@ -848,8 +952,20 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Invalid min/max token values.', flags: 64 });
           return;
         }
-        const role = await addHolderRule(interaction.guild, { roleName, contractAddress, minTokens, maxTokens });
-        await interaction.reply({ content: `Rule added for role **${role.name}** on \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}).`, flags: 64 });
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        globalThis.__PENDING_HOLDER_RULES.set(key, { contractAddress, minTokens, maxTokens, createdAt: Date.now() });
+        const row = new ActionRowBuilder().addComponents(
+          new RoleSelectMenuBuilder()
+            .setCustomId('setup_add_rule_role_select')
+            .setPlaceholder('Select the holder role')
+            .setMinValues(1)
+            .setMaxValues(1)
+        );
+        await interaction.reply({
+          content: `Now select which role should be assigned for \`${contractAddress}\` (${minTokens}-${maxTokens ?? '∞'}):`,
+          components: [row],
+          flags: 64
+        });
         return;
       }
 
