@@ -355,6 +355,25 @@ async function upsertGuildSetting(guildId, field, value) {
   );
 }
 
+async function clearDripSettings(guildId) {
+  await teamPool.query(
+    `INSERT INTO guild_settings (
+       guild_id, drip_api_key, drip_client_id, drip_realm_id, currency_id, receipt_channel_id, payout_type, payout_amount, updated_at
+     )
+     VALUES ($1, NULL, NULL, NULL, NULL, NULL, 'per_up', 1, NOW())
+     ON CONFLICT (guild_id) DO UPDATE
+     SET drip_api_key = NULL,
+         drip_client_id = NULL,
+         drip_realm_id = NULL,
+         currency_id = NULL,
+         receipt_channel_id = NULL,
+         payout_type = 'per_up',
+         payout_amount = 1,
+         updated_at = NOW()`,
+    [guildId]
+  );
+}
+
 async function getHolderRules(guildId) {
   const { rows } = await teamPool.query(
     `SELECT * FROM holder_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
@@ -587,6 +606,7 @@ function setupDripButtons() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_verify_drip').setLabel('Verify DRIP Connection').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('setup_remove_drip').setLabel('Remove DRIP').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_back_main').setLabel('Back to Main Setup').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -1243,6 +1263,38 @@ client.on('interactionCreate', async (interaction) => {
             `Currency: \`${settings.currency_id}\` (${currencyLabel})\n` +
             `Realm points loaded: ${result.pointsCount}\n` +
             `${memberProbeText}`
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_drip') {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('setup_remove_drip_confirm').setLabel('Yes, Remove DRIP').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('setup_remove_drip_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.reply({
+          flags: 64,
+          content:
+            `Are you sure?\n` +
+            `This will clear DRIP API key, client ID, realm ID, currency, receipt channel, and reset payout settings.`,
+          components: [row],
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_drip_cancel') {
+        await interaction.update({
+          content: 'DRIP removal canceled.',
+          components: [],
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_drip_confirm') {
+        await clearDripSettings(interaction.guild.id);
+        await interaction.update({
+          content: 'DRIP settings removed and payout settings reset to defaults.',
+          components: [],
         });
         return;
       }
