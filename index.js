@@ -579,20 +579,74 @@ function buildDripHeaders(settings, includeJson = false) {
   return headers;
 }
 
-async function findDripMemberByDiscordId(realmId, discordId, settings) {
+async function searchDripMembers(realmId, type, values, settings) {
   const url =
     `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}` +
-    `/members/search?type=discord-id&values=${encodeURIComponent(discordId)}`;
+    `/members/search?type=${encodeURIComponent(type)}&values=${encodeURIComponent(values)}`;
+  const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
+  if (!res.ok) {
+    if (res.status === 404) return [];
+    const body = await res.text().catch(() => '');
+    throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  return Array.isArray(data?.data) ? data.data : [];
+}
+
+async function findDripAccountByDiscordId(discordId, settings) {
+  const url =
+    `https://api.drip.re/api/v1/accounts/find` +
+    `?type=discord-id&values=${encodeURIComponent(discordId)}`;
   const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
   if (!res.ok) {
     if (res.status === 404) return null;
     const body = await res.text().catch(() => '');
-    throw new Error(`DRIP member search failed: HTTP ${res.status} ${body}`);
+    throw new Error(`DRIP account lookup failed: HTTP ${res.status} ${body}`);
   }
-  const data = await res.json();
-  const member = data?.data?.[0];
-  if (!member?.id) return null;
-  return member;
+  const data = await res.json().catch(() => ({}));
+  const out = data?.data;
+  if (!out) return null;
+  if (typeof out === 'string') return out;
+  if (typeof out?.id === 'string') return out.id;
+  if (typeof out?.accountId === 'string') return out.accountId;
+  if (typeof out?.memberId === 'string') return out.memberId;
+  return null;
+}
+
+async function resolveDripMemberForDiscordUser(realmId, discordId, walletAddress, settings) {
+  const details = [];
+
+  const byDiscord = await searchDripMembers(realmId, 'discord-id', discordId, settings);
+  if (byDiscord[0]?.id) {
+    return { member: byDiscord[0], source: 'discord-id', details };
+  }
+  details.push('discord-id search returned no members');
+
+  if (walletAddress) {
+    const byWallet = await searchDripMembers(realmId, 'wallet', walletAddress, settings);
+    if (byWallet[0]?.id) {
+      return { member: byWallet[0], source: 'wallet', details };
+    }
+    details.push('wallet search returned no members');
+  }
+
+  const accountId = await findDripAccountByDiscordId(discordId, settings);
+  if (accountId) {
+    const byDripId = await searchDripMembers(realmId, 'drip-id', accountId, settings);
+    if (byDripId[0]?.id) {
+      return { member: byDripId[0], source: 'drip-id(account)', details };
+    }
+    details.push('account found but not a member of this realm');
+  } else {
+    details.push('accounts/find by discord-id returned no account');
+  }
+
+  return { member: null, source: null, details };
+}
+
+async function findDripMemberByDiscordId(realmId, discordId, settings) {
+  const resolved = await resolveDripMemberForDiscordUser(realmId, discordId, null, settings);
+  return resolved.member || null;
 }
 
 async function awardDripPoints(realmId, memberId, tokens, currencyId, settings) {
@@ -650,8 +704,13 @@ async function handleClaim(interaction) {
   try {
     let dripMemberId = link.drip_member_id || null;
     if (!dripMemberId) {
-      const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
-      dripMemberId = member?.id || null;
+      const resolved = await resolveDripMemberForDiscordUser(
+        settings.drip_realm_id,
+        interaction.user.id,
+        link.wallet_address,
+        settings
+      );
+      dripMemberId = resolved.member?.id || null;
       if (dripMemberId) {
         await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
       }
@@ -1027,11 +1086,17 @@ client.on('interactionCreate', async (interaction) => {
         let dripStatus = 'DRIP lookup skipped (realm/API key not configured).';
         if (settings?.drip_api_key && settings?.drip_realm_id) {
           try {
-            const dripMember = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
+            const resolved = await resolveDripMemberForDiscordUser(
+              settings.drip_realm_id,
+              interaction.user.id,
+              addr,
+              settings
+            );
+            const dripMember = resolved.member;
             dripMemberId = dripMember?.id || null;
             dripStatus = dripMemberId
-              ? `DRIP member linked: \`${dripMemberId}\``
-              : 'No DRIP member found for your Discord ID in this realm.';
+              ? `DRIP member linked: \`${dripMemberId}\` (via ${resolved.source})`
+              : `No DRIP member found (${resolved.details.join('; ') || 'no match'}).`;
           } catch (err) {
             const msg = String(err?.message || err || '').slice(0, 220);
             dripStatus = `DRIP lookup failed: ${msg}`;
