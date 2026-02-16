@@ -183,10 +183,12 @@ async function ensureHoldersSchema() {
       guild_id TEXT NOT NULL,
       discord_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
+      drip_member_id TEXT,
       verified BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await holdersPool.query(`ALTER TABLE wallet_links ADD COLUMN IF NOT EXISTS drip_member_id TEXT;`);
   await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_guild_user_idx ON wallet_links (guild_id, discord_id);`);
   await holdersPool.query(`
     CREATE TABLE IF NOT EXISTS claims (
@@ -250,19 +252,19 @@ async function ensureTeamSchema() {
 ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
 ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 
-async function setWalletLink(guildId, discordId, walletAddress, verified = false) {
+async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   await holdersPool.query(
-    `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified, drip_member_id)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (guild_id, discord_id) DO UPDATE
-     SET wallet_address = EXCLUDED.wallet_address, verified = EXCLUDED.verified, updated_at = NOW()`,
-    [guildId, discordId, walletAddress, verified]
+     SET wallet_address = EXCLUDED.wallet_address, verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
+    [guildId, discordId, walletAddress, verified, dripMemberId]
   );
 }
 
 async function getWalletLink(guildId, discordId) {
   const { rows } = await holdersPool.query(
-    `SELECT wallet_address, verified FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
+    `SELECT wallet_address, verified, drip_member_id FROM wallet_links WHERE guild_id = $1 AND discord_id = $2`,
     [guildId, discordId]
   );
   return rows[0] || null;
@@ -638,8 +640,16 @@ async function handleClaim(interaction) {
   }
 
   try {
-    const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
-    if (!member) {
+    let dripMemberId = link.drip_member_id || null;
+    if (!dripMemberId) {
+      const member = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
+      dripMemberId = member?.id || null;
+      if (dripMemberId) {
+        await setWalletLink(guildId, interaction.user.id, link.wallet_address, Boolean(link.verified), dripMemberId);
+      }
+    }
+
+    if (!dripMemberId) {
       await interaction.reply({
         content:
           'Claim failed: no DRIP member found for your Discord ID in this realm.\n' +
@@ -649,7 +659,7 @@ async function handleClaim(interaction) {
       return;
     }
 
-    const dripResult = await awardDripPoints(settings.drip_realm_id, member.id, amount, settings.currency_id, settings);
+    const dripResult = await awardDripPoints(settings.drip_realm_id, dripMemberId, amount, settings.currency_id, settings);
 
     const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
     const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
@@ -658,7 +668,7 @@ async function handleClaim(interaction) {
       receiptMessage = await receiptChannel.send(
         `🧾 Claim Receipt\n` +
         `User: <@${interaction.user.id}>\n` +
-        `DRIP Member: \`${member.id}\`\n` +
+        `DRIP Member: \`${dripMemberId}\`\n` +
         `Wallet: \`${link.wallet_address}\`\n` +
         `Type: ${payoutType}\n` +
         `Units: ${stats.unitTotal}\n` +
@@ -1004,13 +1014,30 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false);
+        const settings = await getGuildSettings(interaction.guild.id);
+        let dripMemberId = null;
+        let dripStatus = 'DRIP lookup skipped (realm/API key not configured).';
+        if (settings?.drip_api_key && settings?.drip_realm_id) {
+          try {
+            const dripMember = await findDripMemberByDiscordId(settings.drip_realm_id, interaction.user.id, settings);
+            dripMemberId = dripMember?.id || null;
+            dripStatus = dripMemberId
+              ? `DRIP member linked: \`${dripMemberId}\``
+              : 'No DRIP member found for your Discord ID in this realm.';
+          } catch (err) {
+            const msg = String(err?.message || err || '').slice(0, 220);
+            dripStatus = `DRIP lookup failed: ${msg}`;
+          }
+        }
+
+        await setWalletLink(interaction.guild.id, interaction.user.id, addr, false, dripMemberId);
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, addr);
         await interaction.reply({
           flags: 64,
           content:
             `Wallet connected: \`${addr}\`\n` +
+            `${dripStatus}\n` +
             `Role sync complete (${sync.changed} role changes).\n` +
             `${sync.applied.length ? sync.applied.join('\n') : 'No holder role rules configured yet.'}`
         });
