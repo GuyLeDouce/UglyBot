@@ -888,6 +888,7 @@ function verificationMenuEmbed(guildName) {
       `• **Disconnect Wallet**: unlink one specific wallet or all wallets.\n` +
       `• **Check Wallets Connected**: view all wallets currently linked.`
     )
+    .setImage('https://i.imgur.com/HxdVgDc.png')
     .setColor(0x7ADDC0);
 }
 
@@ -909,6 +910,7 @@ function rewardsMenuEmbed(guildName, pointsLabel = 'UglyPoints') {
       `• **Check NFT Status**: view a Squig token's ${pointsLabel} breakdown.\n` +
       `• **View Holdings**: see holdings by collection, ${pointsLabel}, or full summary.`
     )
+    .setImage('https://i.imgur.com/WY5enXM.png')
     .setColor(0xB0DEEE);
 }
 
