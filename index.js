@@ -1240,6 +1240,89 @@ async function getConnectedCollectionCounts(guildId, walletAddresses) {
   return out;
 }
 
+function extractDripCurrencyAmountFromPayload(payload, currencyId) {
+  const targetCurrency = String(currencyId || '').trim();
+  if (!targetCurrency) return null;
+
+  const parseNumeric = (value) => {
+    if (value == null) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  };
+
+  const matchCurrencyAndExtract = (entry) => {
+    if (!entry || typeof entry !== 'object') return null;
+    const realmPoint = entry.realmPoint && typeof entry.realmPoint === 'object' ? entry.realmPoint : null;
+    const entryIds = [
+      entry.id,
+      entry.currencyId,
+      entry.realmPointId,
+      entry.pointId,
+      realmPoint?.id,
+      realmPoint?.currencyId,
+      realmPoint?.realmPointId,
+    ]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    if (entryIds.length && !entryIds.includes(targetCurrency)) return null;
+    const values = [
+      entry.amount,
+      entry.balance,
+      entry.tokens,
+      entry.value,
+      entry.pointBalance,
+      entry.currentBalance,
+      realmPoint?.balance,
+    ];
+    for (const value of values) {
+      const parsed = parseNumeric(value);
+      if (parsed != null) return parsed;
+    }
+    return null;
+  };
+
+  const arrays = [
+    payload?.data?.balances,
+    payload?.data?.pointBalances,
+    payload?.data?.currencies,
+    payload?.balances,
+    payload?.pointBalances,
+    payload?.currencies,
+  ].filter(Array.isArray);
+  for (const arr of arrays) {
+    for (const entry of arr) {
+      const matched = matchCurrencyAndExtract(entry);
+      if (matched != null) return matched;
+    }
+  }
+
+  const candidates = [
+    payload?.data,
+    payload?.data?.balance,
+    payload?.data?.pointBalance,
+    payload?.balance,
+    payload?.pointBalance,
+    payload,
+  ];
+  for (const item of candidates) {
+    if (item == null) continue;
+    const direct = parseNumeric(item);
+    if (direct != null) return direct;
+    if (typeof item === 'object') {
+      const matched = matchCurrencyAndExtract(item);
+      if (matched != null) return matched;
+      const valueCandidates = [item.amount, item.balance, item.tokens, item.value, item.pointBalance, item.currentBalance];
+      for (const value of valueCandidates) {
+        const parsed = parseNumeric(value);
+        if (parsed != null) return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
 async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, settings) {
   const ids = [...new Set((Array.isArray(memberIds) ? memberIds : [memberIds]).map((v) => String(v || '').trim()).filter(Boolean))];
   if (!ids.length || !realmId || !currencyId || !settings?.drip_api_key) return null;
@@ -1253,74 +1336,6 @@ async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, sett
     { suffix: '/balance', queryKey: 'realmPointId' },
   ];
 
-  const parseNumeric = (value) => {
-    if (value == null) return null;
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
-    return null;
-  };
-
-  const extractAmount = (payload) => {
-    const targetCurrency = String(currencyId).trim();
-    const matchCurrencyAndExtract = (entry) => {
-      if (!entry || typeof entry !== 'object') return null;
-      const entryIds = [entry.id, entry.currencyId, entry.realmPointId, entry.pointId]
-        .map((v) => String(v || '').trim())
-        .filter(Boolean);
-      if (entryIds.length && !entryIds.includes(targetCurrency)) return null;
-      const values = [
-        entry.amount,
-        entry.balance,
-        entry.tokens,
-        entry.value,
-        entry.pointBalance,
-        entry.currentBalance,
-      ];
-      for (const value of values) {
-        const parsed = parseNumeric(value);
-        if (parsed != null) return parsed;
-      }
-      return null;
-    };
-
-    const arrays = [
-      payload?.data?.balances,
-      payload?.data?.pointBalances,
-      payload?.data?.currencies,
-      payload?.balances,
-      payload?.pointBalances,
-      payload?.currencies,
-    ].filter(Array.isArray);
-    for (const arr of arrays) {
-      for (const entry of arr) {
-        const matched = matchCurrencyAndExtract(entry);
-        if (matched != null) return matched;
-      }
-    }
-
-    const candidates = [
-      payload?.data,
-      payload?.data?.balance,
-      payload?.data?.pointBalance,
-      payload?.balance,
-      payload?.pointBalance,
-      payload,
-    ];
-    for (const item of candidates) {
-      if (item == null) continue;
-      const direct = parseNumeric(item);
-      if (direct != null) return direct;
-      if (typeof item === 'object') {
-        const valueCandidates = [item.amount, item.balance, item.tokens, item.value, item.pointBalance, item.currentBalance];
-        for (const value of valueCandidates) {
-          const parsed = parseNumeric(value);
-          if (parsed != null) return parsed;
-        }
-      }
-    }
-    return null;
-  };
-
   const failedAttempts = [];
   for (const memberId of ids) {
     for (const baseUrl of baseUrls) {
@@ -1333,7 +1348,7 @@ async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, sett
         });
         if (res.ok) {
           const payload = await res.json().catch(() => ({}));
-          const amount = extractAmount(payload);
+          const amount = extractDripCurrencyAmountFromPayload(payload, currencyId);
           if (amount != null) return amount;
           failedAttempts.push(`200 ${variant.suffix || '/'} (no parseable balance)`);
           continue;
@@ -2793,16 +2808,22 @@ client.on('interactionCreate', async (interaction) => {
             walletAddresses[0],
             settings || {}
           ).catch(() => ({ member: null }));
+          const memberPayloadBalance = extractDripCurrencyAmountFromPayload(
+            resolved?.member || null,
+            settings?.currency_id
+          );
           const dripMemberIdCandidates = collectDripMemberIdCandidates(
             resolved?.member,
             links.find((x) => x.drip_member_id)?.drip_member_id || null
           );
-          const dripBalance = await getDripMemberCurrencyBalance(
-            settings?.drip_realm_id,
-            dripMemberIdCandidates,
-            settings?.currency_id,
-            settings || {}
-          );
+          const dripBalance = memberPayloadBalance != null
+            ? memberPayloadBalance
+            : await getDripMemberCurrencyBalance(
+                settings?.drip_realm_id,
+                dripMemberIdCandidates,
+                settings?.currency_id,
+                settings || {}
+              );
           if (dripBalance != null) dripBalanceText = String(Math.floor(Number(dripBalance) || 0));
         } catch {}
 
