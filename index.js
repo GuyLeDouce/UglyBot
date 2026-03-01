@@ -2431,6 +2431,78 @@ async function respondInteraction(interaction, payload) {
   return interaction.reply(payload);
 }
 
+function claimConfirmButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('verify_claim_execute').setLabel('Claim').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('verify_claim_cancel').setLabel('No Claim').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('verify_drip_status').setLabel('Check DRIP Status').setStyle(ButtonStyle.Primary),
+  );
+}
+
+async function handleClaimPrompt(interaction) {
+  const guildId = interaction.guild.id;
+  const links = await getWalletLinks(guildId, interaction.user.id);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
+    await interaction.reply({
+      content:
+        `Connect your wallet first.\n` +
+        `Use **Connect Wallet** in Holder Verification before claiming rewards.`,
+      flags: 64
+    });
+    return;
+  }
+
+  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
+  const missing = [];
+  if (!settings?.drip_api_key) missing.push('DRIP API Key');
+  if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+  if (!settings?.currency_id) missing.push('Currency ID');
+  if (missing.length > 0) {
+    await interaction.reply({
+      content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
+      flags: 64
+    });
+    return;
+  }
+
+  const rewardQuote = await getPassiveClaimQuote(guildId, links, settings);
+  const amount = rewardQuote.claimableAmount;
+  if (amount <= 0) {
+    await interaction.reply({
+      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      flags: 64
+    });
+    return;
+  }
+
+  const unverifiedLinks = links.filter((x) => !x?.verified).map((x) => normalizeEthAddress(x.wallet_address) || x.wallet_address);
+  const hasPenalty = rewardQuote.unverifiedPenaltyAmount > 0 && unverifiedLinks.length > 0;
+  const amountSummary = hasPenalty
+    ? `Base accrued: **${rewardQuote.baseAmount} $CHARM**\n` +
+      `DRIP penalty: **-${rewardQuote.unverifiedPenaltyAmount} $CHARM**\n` +
+      `You will receive: **${amount} $CHARM**`
+    : `You will receive: **${amount} $CHARM**`;
+  const penaltyBlock = hasPenalty
+    ? `\n\nSome linked wallets are not verified in DRIP yet, so those wallets only earn **50%** rewards until they are linked to the same DRIP profile.\n` +
+      `Unverified wallet${unverifiedLinks.length === 1 ? '' : 's'}:\n${unverifiedLinks.map((x) => `• \`${x}\``).join('\n')}\n\n` +
+      `To fix this:\n` +
+      `1. Open https://app.drip.re/user\n` +
+      `2. Sign in with the same Discord account\n` +
+      `3. Add the same wallet address${unverifiedLinks.length === 1 ? '' : 'es'} to your DRIP profile\n` +
+      `4. Click **Check DRIP Status** below to confirm the wallet is connected`
+    : '';
+
+  await interaction.reply({
+    content:
+      `You are about to claim rewards. Are you sure?\n\n` +
+      `${amountSummary}` +
+      penaltyBlock,
+    components: [claimConfirmButtons()],
+    flags: 64
+  });
+}
+
 async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
   const links = await getWalletLinks(guildId, interaction.user.id);
@@ -3060,8 +3132,21 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_claim') {
+        await handleClaimPrompt(interaction);
+        return;
+      }
+
+      if (interaction.customId === 'verify_claim_execute') {
         await interaction.deferReply({ flags: 64 });
         await handleClaim(interaction);
+        return;
+      }
+
+      if (interaction.customId === 'verify_claim_cancel') {
+        await interaction.update({
+          content: 'Claim canceled.',
+          components: []
+        });
         return;
       }
 
