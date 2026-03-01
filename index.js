@@ -90,7 +90,8 @@ console.log('ENV CHECK:', {
   guildId: GUILD_ID,
   hasAlchemy: !!ALCHEMY_API_KEY,
   hasOpenSea: !!OPENSEA_API_KEY,
-  hasPointsDb: !!process.env.DATABASE_URL_POINTS
+  hasPointsDb: !!process.env.DATABASE_URL_POINTS,
+  hasClaimsDb: !!process.env.DATABASE_URL_CLAIMS
 });
 
 // ===== CONTRACTS =====
@@ -154,6 +155,7 @@ async function mapLimit(items, limit, fn) {
 const DATABASE_URL_HOLDERS = process.env.DATABASE_URL_HOLDERS || process.env.DATABASE_URL || null;
 const DATABASE_URL_TEAM = process.env.DATABASE_URL_TEAM || process.env.DATABASE_URL || null;
 const DATABASE_URL_POINTS = process.env.DATABASE_URL_POINTS || null;
+const DATABASE_URL_CLAIMS = process.env.DATABASE_URL_CLAIMS || null;
 const PGSSL = (process.env.PGSSL ?? 'true') !== 'false'; // default true on Railway
 
 const holdersPool = new Pool(
@@ -188,6 +190,12 @@ const pointsPool = DATABASE_URL_POINTS
     )
   : teamPool;
 
+const claimsPool = DATABASE_URL_CLAIMS
+  ? new Pool(
+      { connectionString: DATABASE_URL_CLAIMS, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+    )
+  : holdersPool;
+
 async function ensureHoldersSchema() {
   await holdersPool.query(`
     CREATE TABLE IF NOT EXISTS wallet_links (
@@ -205,20 +213,6 @@ async function ensureHoldersSchema() {
   await holdersPool.query(`DROP INDEX IF EXISTS wallet_links_guild_user_idx;`);
   await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_guild_user_wallet_idx ON wallet_links (guild_id, discord_id, wallet_address);`);
   await holdersPool.query(`CREATE INDEX IF NOT EXISTS wallet_links_guild_user_idx ON wallet_links (guild_id, discord_id);`);
-  await holdersPool.query(`
-    CREATE TABLE IF NOT EXISTS claims (
-      id BIGSERIAL PRIMARY KEY,
-      guild_id TEXT NOT NULL,
-      discord_id TEXT NOT NULL,
-      claim_day DATE NOT NULL,
-      amount NUMERIC NOT NULL,
-      wallet_address TEXT NOT NULL,
-      receipt_channel_id TEXT,
-      receipt_message_id TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-  await holdersPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS claims_guild_user_day_idx ON claims (guild_id, discord_id, claim_day);`);
   await holdersPool.query(`
     CREATE TABLE IF NOT EXISTS verification_panels (
       id BIGSERIAL PRIMARY KEY,
@@ -307,9 +301,43 @@ async function ensurePointsSchema() {
   console.log(`✅ points schema ready (${DATABASE_URL_POINTS ? 'DATABASE_URL_POINTS' : 'team database fallback'})`);
 }
 
+async function ensureClaimsSchema() {
+  await claimsPool.query(`
+    CREATE TABLE IF NOT EXISTS nft_claims (
+      guild_id TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      token_id TEXT NOT NULL,
+      last_claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_owner_wallet TEXT,
+      last_seen_discord_id TEXT,
+      last_payout_type TEXT NOT NULL DEFAULT 'per_up',
+      last_unit_value NUMERIC NOT NULL DEFAULT 0,
+      last_payout_amount NUMERIC NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, contract_address, token_id)
+    );
+  `);
+  await claimsPool.query(`
+    CREATE TABLE IF NOT EXISTS claim_events (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
+      amount NUMERIC NOT NULL,
+      nft_count INTEGER NOT NULL DEFAULT 0,
+      payout_type TEXT NOT NULL,
+      wallet_addresses TEXT NOT NULL,
+      receipt_channel_id TEXT,
+      receipt_message_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  console.log(`✅ claims schema ready (${DATABASE_URL_CLAIMS ? 'DATABASE_URL_CLAIMS' : 'holders database fallback'})`);
+}
+
 ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
 ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
+ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   try {
@@ -1114,38 +1142,6 @@ async function syncHolderRoles(member, walletAddresses) {
   return { changed, applied, granted };
 }
 
-async function hasClaimedToday(guildId, discordId) {
-  const { rows } = await holdersPool.query(
-    `SELECT id FROM claims WHERE guild_id = $1 AND discord_id = $2 AND claim_day = CURRENT_DATE LIMIT 1`,
-    [guildId, discordId]
-  );
-  return rows.length > 0;
-}
-
-async function getClaimStreakBeforeToday(guildId, discordId) {
-  const { rows } = await holdersPool.query(
-    `SELECT claim_day
-     FROM claims
-     WHERE guild_id = $1 AND discord_id = $2 AND claim_day < CURRENT_DATE
-     ORDER BY claim_day DESC`,
-    [guildId, discordId]
-  );
-
-  let expected = new Date();
-  expected.setUTCHours(0, 0, 0, 0);
-  expected.setUTCDate(expected.getUTCDate() - 1);
-
-  let streak = 0;
-  for (const row of rows) {
-    const claimDate = new Date(row.claim_day);
-    claimDate.setUTCHours(0, 0, 0, 0);
-    if (claimDate.getTime() !== expected.getTime()) break;
-    streak++;
-    expected.setUTCDate(expected.getUTCDate() - 1);
-  }
-  return streak;
-}
-
 async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType) {
   const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
   const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
@@ -1224,6 +1220,261 @@ async function computeDailyRewardQuote(guildId, links, settings) {
     totalNfts: verifiedStats.totalNfts + unverifiedStats.totalNfts,
     totalUp: verifiedStats.totalUp + unverifiedStats.totalUp,
   };
+}
+
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+function nftClaimKey(contractAddress, tokenId) {
+  return `${String(contractAddress || '').toLowerCase()}:${String(tokenId || '')}`;
+}
+
+function formatNumber(value, digits = 2) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return '0';
+  if (Number.isInteger(num)) return String(num);
+  return num.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+async function getStoredNftClaimStates(guildId, nftEntries) {
+  const tokenIdsByContract = new Map();
+  for (const entry of nftEntries) {
+    const contractAddress = String(entry.contractAddress || '').toLowerCase();
+    const tokenId = String(entry.tokenId || '');
+    if (!contractAddress || !tokenId) continue;
+    const bucket = tokenIdsByContract.get(contractAddress) || [];
+    bucket.push(tokenId);
+    tokenIdsByContract.set(contractAddress, bucket);
+  }
+
+  const out = new Map();
+  await Promise.all(
+    [...tokenIdsByContract.entries()].map(async ([contractAddress, tokenIds]) => {
+      const { rows } = await claimsPool.query(
+        `SELECT contract_address, token_id, last_claimed_at
+         FROM nft_claims
+         WHERE guild_id = $1 AND contract_address = $2 AND token_id = ANY($3::TEXT[])`,
+        [guildId, contractAddress, [...new Set(tokenIds)]]
+      );
+      for (const row of rows) {
+        out.set(nftClaimKey(row.contract_address, row.token_id), row);
+      }
+    })
+  );
+  return out;
+}
+
+async function getPassiveClaimQuote(guildId, links, settings) {
+  const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
+  const payoutAmount = Number(settings?.payout_amount || 0);
+  const linkMap = new Map();
+  for (const link of (links || [])) {
+    const walletAddress = normalizeEthAddress(link?.wallet_address);
+    if (!walletAddress) continue;
+    const existing = linkMap.get(walletAddress);
+    linkMap.set(walletAddress, {
+      wallet_address: walletAddress,
+      verified: existing ? (existing.verified || Boolean(link?.verified)) : Boolean(link?.verified),
+    });
+  }
+  const normalizedLinks = [...linkMap.values()];
+  const rules = await getHolderRules(guildId);
+  const contracts = [...new Set(rules.map((r) => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
+  if (!normalizedLinks.length || !contracts.length || payoutAmount <= 0) {
+    return {
+      payoutType,
+      payoutAmount,
+      nftEntries: [],
+      totalNfts: 0,
+      totalUnits: 0,
+      baseAmount: 0,
+      unverifiedPenaltyAmount: 0,
+      claimableAmount: 0,
+    };
+  }
+
+  const nftEntries = [];
+  const seenNfts = new Set();
+  await mapLimit(normalizedLinks, 3, async (link) => {
+    await mapLimit(contracts, 3, async (contractAddress) => {
+      const tokenIds = await getOwnedTokenIdsForContract(link.wallet_address, contractAddress);
+      for (const tokenId of tokenIds) {
+        const key = nftClaimKey(contractAddress, tokenId);
+        if (seenNfts.has(key)) continue;
+        seenNfts.add(key);
+        nftEntries.push({
+          contractAddress,
+          tokenId: String(tokenId),
+          walletAddress: link.wallet_address,
+          verified: Boolean(link.verified),
+          unitValue: payoutType === 'per_nft' ? 1 : 0,
+        });
+      }
+    });
+  });
+
+  if (!nftEntries.length) {
+    return {
+      payoutType,
+      payoutAmount,
+      nftEntries: [],
+      totalNfts: 0,
+      totalUnits: 0,
+      baseAmount: 0,
+      unverifiedPenaltyAmount: 0,
+      claimableAmount: 0,
+    };
+  }
+
+  if (payoutType === 'per_up') {
+    const guildPointMappings = await getGuildPointMappings(guildId);
+    await mapLimit(nftEntries, 5, async (entry) => {
+      const table = hpTableForContract(entry.contractAddress, guildPointMappings);
+      if (!table || !Object.keys(table).length) {
+        entry.unitValue = 0;
+        return;
+      }
+      try {
+        const meta = await getNftMetadataAlchemy(entry.tokenId, entry.contractAddress);
+        const { attrs } = await getTraitsForToken(meta, entry.tokenId, entry.contractAddress);
+        const grouped = normalizeTraits(attrs);
+        const { total } = computeHpFromTraits(grouped, table);
+        entry.unitValue = total || 0;
+      } catch {
+        entry.unitValue = 0;
+      }
+    });
+  }
+
+  const eligibleNftEntries = nftEntries.filter((entry) => Number(entry.unitValue || 0) > 0);
+  if (!eligibleNftEntries.length) {
+    return {
+      payoutType,
+      payoutAmount,
+      nftEntries: [],
+      totalNfts: 0,
+      totalUnits: 0,
+      baseAmount: 0,
+      unverifiedPenaltyAmount: 0,
+      claimableAmount: 0,
+    };
+  }
+
+  const stateByNft = await getStoredNftClaimStates(guildId, eligibleNftEntries);
+  const now = new Date();
+  let totalUnits = 0;
+  let baseAmount = 0;
+  let unverifiedPenaltyAmount = 0;
+  let rawClaimableAmount = 0;
+
+  for (const entry of eligibleNftEntries) {
+    const state = stateByNft.get(nftClaimKey(entry.contractAddress, entry.tokenId));
+    let lastClaimedAt = state?.last_claimed_at ? new Date(state.last_claimed_at) : null;
+    if (!lastClaimedAt || !Number.isFinite(lastClaimedAt.getTime())) {
+      lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
+    }
+    const elapsedMs = Math.max(0, now.getTime() - lastClaimedAt.getTime());
+    const unitValue = Number(entry.unitValue || 0);
+    const fullAmount = (elapsedMs / DAY_IN_MS) * unitValue * payoutAmount;
+    const walletPenalty = entry.verified ? 0 : fullAmount * 0.5;
+    const claimableForNft = fullAmount - walletPenalty;
+    entry.elapsedMs = elapsedMs;
+    entry.claimableAmount = claimableForNft;
+    totalUnits += unitValue;
+    baseAmount += fullAmount;
+    unverifiedPenaltyAmount += walletPenalty;
+    rawClaimableAmount += claimableForNft;
+  }
+
+  return {
+    payoutType,
+    payoutAmount,
+    nftEntries: eligibleNftEntries,
+    totalNfts: eligibleNftEntries.length,
+    totalUnits,
+    baseAmount: Math.max(0, Math.floor(baseAmount)),
+    unverifiedPenaltyAmount: Math.max(0, Math.floor(unverifiedPenaltyAmount)),
+    claimableAmount: Math.max(0, Math.floor(rawClaimableAmount)),
+  };
+}
+
+async function recordPassiveClaim(guildId, discordId, rewardQuote, receiptChannelId, receiptMessageId) {
+  const claimTimestamp = new Date();
+  await Promise.all(
+    rewardQuote.nftEntries.map((entry) =>
+      claimsPool.query(
+        `INSERT INTO nft_claims (
+           guild_id, contract_address, token_id, last_claimed_at, last_seen_owner_wallet, last_seen_discord_id, last_payout_type, last_unit_value, last_payout_amount, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+         ON CONFLICT (guild_id, contract_address, token_id) DO UPDATE
+         SET last_claimed_at = EXCLUDED.last_claimed_at,
+             last_seen_owner_wallet = EXCLUDED.last_seen_owner_wallet,
+             last_seen_discord_id = EXCLUDED.last_seen_discord_id,
+             last_payout_type = EXCLUDED.last_payout_type,
+             last_unit_value = EXCLUDED.last_unit_value,
+             last_payout_amount = EXCLUDED.last_payout_amount,
+             updated_at = NOW()`,
+        [
+          guildId,
+          entry.contractAddress,
+          entry.tokenId,
+          claimTimestamp.toISOString(),
+          entry.walletAddress,
+          discordId,
+          rewardQuote.payoutType,
+          Number(entry.unitValue || 0),
+          Number(rewardQuote.payoutAmount || 0),
+        ]
+      )
+    )
+  );
+
+  await claimsPool.query(
+    `INSERT INTO claim_events (guild_id, discord_id, amount, nft_count, payout_type, wallet_addresses, receipt_channel_id, receipt_message_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      guildId,
+      discordId,
+      rewardQuote.claimableAmount,
+      rewardQuote.totalNfts,
+      rewardQuote.payoutType,
+      [...new Set(rewardQuote.nftEntries.map((entry) => entry.walletAddress).filter(Boolean))].join(','),
+      receiptChannelId || null,
+      receiptMessageId || null,
+    ]
+  );
+}
+
+async function getClaimableAmountForNft(guildId, contractAddress, tokenId, settings, unitValueOverride = null) {
+  const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
+  const payoutAmount = Number(settings?.payout_amount || 0);
+  const unitValue = payoutType === 'per_nft'
+    ? 1
+    : Number(unitValueOverride == null ? 0 : unitValueOverride);
+
+  if (payoutAmount <= 0 || unitValue <= 0) {
+    return { claimableAmount: 0, elapsedMs: 0 };
+  }
+
+  const normalizedContract = String(contractAddress || '').toLowerCase();
+  const normalizedTokenId = String(tokenId || '');
+  const { rows } = await claimsPool.query(
+    `SELECT last_claimed_at
+     FROM nft_claims
+     WHERE guild_id = $1 AND contract_address = $2 AND token_id = $3
+     LIMIT 1`,
+    [guildId, normalizedContract, normalizedTokenId]
+  );
+
+  const now = new Date();
+  let lastClaimedAt = rows[0]?.last_claimed_at ? new Date(rows[0].last_claimed_at) : null;
+  if (!lastClaimedAt || !Number.isFinite(lastClaimedAt.getTime())) {
+    lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
+  }
+
+  const elapsedMs = Math.max(0, now.getTime() - lastClaimedAt.getTime());
+  const claimableAmount = Math.max(0, Math.floor((elapsedMs / DAY_IN_MS) * unitValue * payoutAmount));
+  return { claimableAmount, elapsedMs };
 }
 
 async function getConnectedCollectionCounts(guildId, walletAddresses) {
@@ -1401,7 +1652,7 @@ function rewardsMenuEmbed(guildName, pointsLabel = 'UglyPoints') {
     .setDescription(
       `Welcome to **${guildName}** rewards.\n\n` +
       `Use the buttons below:\n` +
-      `• **Claim Rewards**: collect your daily holder payout.\n` +
+      `• **Claim Rewards**: collect holder rewards accrued by each NFT.\n` +
       `• **Check NFT Status**: view a Squig token's ${pointsLabel} breakdown.\n` +
       `• **View Holdings**: see holdings by collection, ${pointsLabel}, or full summary.`
     )
@@ -1457,7 +1708,7 @@ function infoEmbeds(guildName, settings = null) {
         `• The bot checks what NFTs those wallets hold.\n` +
         `• It gives or removes Discord roles based on your rules.\n` +
         `• It can score NFTs using trait-to-points mappings.\n` +
-        `• Users can claim daily rewards through DRIP.\n` +
+        `• Users can claim passively accrued rewards through DRIP.\n` +
         `• Admins can override links, inspect users, and monitor failures.`
       ),
     new EmbedBuilder()
@@ -1479,7 +1730,7 @@ function infoEmbeds(guildName, settings = null) {
         {
           name: 'Claim Rewards',
           value:
-            `Users can claim once per UTC day.\n` +
+            `Users claim rewards accrued by each NFT since that NFT's last claim.\n` +
             `Verified wallets count at full value.\n` +
             `Unverified wallets only count at **50%**.\n` +
             `If a user is docked, they get a hidden note telling them to verify in DRIP or open a support ticket.`
@@ -1546,7 +1797,8 @@ function infoEmbeds(guildName, settings = null) {
         {
           name: '5. Configure DRIP',
           value:
-            `Set DRIP API key, optional client ID, realm ID, currency ID, receipt channel, points label, payout type, payout amount, and claim streak bonus.\n` +
+            `Set DRIP API key, optional client ID, realm ID, currency ID, receipt channel, points label, payout type, and payout amount.\n` +
+            `The claim streak bonus field is now legacy and is no longer applied.\n` +
             `Then use **Verify DRIP Connection** to confirm the setup works.`
         },
         {
@@ -1579,7 +1831,7 @@ function infoEmbeds(guildName, settings = null) {
             `Rewards are based on the configured payout type.\n` +
             `Per NFT = eligible NFT count x payout amount.\n` +
             `Per ${pointsLabel} = total ${pointsLabel} x payout amount.\n` +
-            `A claim streak bonus can add a flat extra amount on continued streaks.`
+            `Each NFT accrues over time and resets its own timer when claimed.`
         },
         {
           name: 'Support Flow',
@@ -1609,10 +1861,10 @@ function infoUserEmbeds(guildName, settings = null) {
       .setColor(0xB0DEEE)
       .addFields(
         {
-          name: 'Daily Claim',
+          name: 'Passive Claim',
           value:
-            `You can claim once per UTC day from the rewards menu.\n` +
-            `The bot calculates your reward based on your eligible NFTs and/or total ${pointsLabel}, depending on server settings.`
+            `You can claim whenever you want from the rewards menu.\n` +
+            `The bot calculates accrued rewards based on each eligible NFT and/or total ${pointsLabel}, depending on server settings.`
         },
         {
           name: 'Verified vs Unverified Wallets',
@@ -1621,9 +1873,10 @@ function infoUserEmbeds(guildName, settings = null) {
             `If your wallet is not verified through DRIP yet, it still counts, but only at **50%** for rewards.`
         },
         {
-          name: 'Claim Streaks',
+          name: 'NFT Timers',
           value:
-            `If this server has streak bonuses enabled, claiming on consecutive days can add an extra bonus to your reward.`
+            `Each NFT tracks its own claim timer.\n` +
+            `When you claim, only the NFTs included in that claim have their accrual reset.`
         }
       ),
     new EmbedBuilder()
@@ -2093,15 +2346,9 @@ async function handleClaim(interaction) {
     await respondInteraction(interaction, { content: 'Connect your wallet first.', flags: 64 });
     return;
   }
-  if (await hasClaimedToday(guildId, interaction.user.id)) {
-    await respondInteraction(interaction, { content: 'You already claimed today. Try again after UTC midnight.', flags: 64 });
-    return;
-  }
 
   const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
   const pointsLabel = getPointsLabel(settings);
-  const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
-  const claimStreakBonus = Number(settings.claim_streak_bonus || 0);
   const missing = [];
   if (!settings?.drip_api_key) missing.push('DRIP API Key');
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
@@ -2113,21 +2360,16 @@ async function handleClaim(interaction) {
     });
     return;
   }
-  const rewardQuote = await computeDailyRewardQuote(guildId, links, settings);
-  const { verifiedStats, unverifiedStats, unverifiedPenaltyAmount } = rewardQuote;
-  const stats = {
-    unitTotal: verifiedStats.unitTotal + unverifiedStats.unitTotal,
-    totalNfts: rewardQuote.totalNfts,
-    totalUp: rewardQuote.totalUp,
-  };
-  const streakBeforeToday = await getClaimStreakBeforeToday(guildId, interaction.user.id);
-  const streakAfterClaim = streakBeforeToday + 1;
-  const streakBonusApplied = streakBeforeToday >= 1 ? claimStreakBonus : 0;
-  const baseAmount = rewardQuote.dailyReward;
-  const amount = Math.max(0, Math.floor(baseAmount + streakBonusApplied));
+  const rewardQuote = await getPassiveClaimQuote(guildId, links, settings);
+  const payoutType = rewardQuote.payoutType;
+  const baseAmount = rewardQuote.baseAmount;
+  const amount = rewardQuote.claimableAmount;
 
   if (amount <= 0) {
-    await respondInteraction(interaction, { content: 'No payout available. Check your holdings or payout settings.', flags: 64 });
+    await respondInteraction(interaction, {
+      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      flags: 64
+    });
     return;
   }
 
@@ -2182,23 +2424,21 @@ async function handleClaim(interaction) {
     try {
       receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
       if (receiptChannel?.isTextBased()) {
-      const earningBasis =
-        payoutType === 'per_nft'
-          ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
-          : `${stats.totalUp} ${pointsLabel}`;
-        const streakLine = streakBonusApplied > 0
-          ? `\nStreak: ${streakAfterClaim} day${streakAfterClaim === 1 ? '' : 's'} (+${streakBonusApplied} $CHARM bonus)`
-          : `\nStreak: ${streakAfterClaim} day${streakAfterClaim === 1 ? '' : 's'}`;
-        const verificationPenaltyLine = unverifiedPenaltyAmount > 0
-          ? `\nUnverified wallet dock: -${Math.floor(unverifiedPenaltyAmount)} $CHARM (50%)`
+        const earningBasis =
+          payoutType === 'per_nft'
+            ? `${rewardQuote.totalNfts} eligible NFT${rewardQuote.totalNfts === 1 ? '' : 's'}`
+            : `${formatNumber(rewardQuote.totalUnits)} ${pointsLabel}`;
+        const accrualLine = `\nClaimed NFTs: ${rewardQuote.totalNfts}`;
+        const verificationPenaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
+          ? `\nUnverified wallet dock: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM (50%)`
           : '';
         receiptMessage = await receiptChannel.send(
           `🧾 Claim Receipt\n` +
           `User: <@${interaction.user.id}>\n` +
           `Earning Basis: ${earningBasis}\n` +
-          `Base Reward: **${baseAmount} $CHARM**` +
+          `Accrued Reward: **${baseAmount} $CHARM**` +
           `${verificationPenaltyLine}` +
-          `${streakLine}\n` +
+          `${accrualLine}\n` +
           `Reward: **${amount} $CHARM**`
         );
       } else {
@@ -2210,23 +2450,22 @@ async function handleClaim(interaction) {
       receiptWarning = '\n(Claim receipt could not be posted to the configured channel.)';
     }
 
-    await holdersPool.query(
-      `INSERT INTO claims (guild_id, discord_id, claim_day, amount, wallet_address, receipt_channel_id, receipt_message_id)
-       VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6)`,
-      [guildId, interaction.user.id, amount, walletAddresses.join(','), receiptChannel?.id || null, receiptMessage?.id || null]
+    await recordPassiveClaim(
+      guildId,
+      interaction.user.id,
+      rewardQuote,
+      receiptChannel?.id || null,
+      receiptMessage?.id || null
     );
 
-    const streakLine = streakBonusApplied > 0
-      ? `Streak + Reward: ${streakAfterClaim} days (+${streakBonusApplied} $CHARM bonus)\n`
-      : '';
-    const verificationLine = unverifiedPenaltyAmount > 0
-      ? `Unverified wallet dock: -${Math.floor(unverifiedPenaltyAmount)} $CHARM (50%)\nVerify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.\n`
+    const verificationLine = rewardQuote.unverifiedPenaltyAmount > 0
+      ? `Unverified wallet dock: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM (50%)\nVerify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.\n`
       : '';
     await respondInteraction(interaction, {
       content:
         `🧾 Claim Receipt\n` +
         `${verificationLine}` +
-        `${streakLine}` +
+        `Claimed NFTs: ${rewardQuote.totalNfts}\n` +
         `Reward: **${amount} $CHARM**${receiptWarning}`,
       flags: 64
     });
@@ -2242,7 +2481,7 @@ async function handleClaim(interaction) {
           `Context: claim\n` +
           `Reason: ${msg.slice(0, 500)}`
       });
-    } else if (/claims|wallet_links|database|relation|column/i.test(msg)) {
+    } else if (/nft_claims|claim_events|claims|wallet_links|database|relation|column/i.test(msg)) {
       await postAdminSystemLog({
         guild: interaction.guild,
         category: 'Wallet Link Issue',
@@ -2255,7 +2494,7 @@ async function handleClaim(interaction) {
     let reason = 'We could not process your claim right now.';
     if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
     else if (/DRIP award failed/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
-    else if (/claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
+    else if (/nft_claims|claim_events|claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
     await respondInteraction(interaction, {
       content: `Claim failed: ${reason}`,
       flags: 64
@@ -2622,15 +2861,12 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         const links = await getWalletLinks(interaction.guild.id, discordId);
-        const claimedToday = await hasClaimedToday(interaction.guild.id, discordId);
-        const streak = await getClaimStreakBeforeToday(interaction.guild.id, discordId);
         if (!links.length) {
           await interaction.editReply({
             content:
               `No linked wallets found.\n` +
               `Discord ID: \`${discordId}\`\n` +
-              `Claimed today: ${claimedToday ? 'yes' : 'no'}\n` +
-              `Current streak if they claim today: ${streak + 1}`
+              `Claim status is tracked per NFT in the claims database.`
           });
           return;
         }
@@ -2640,8 +2876,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({
           content:
             `Wallet status for <@${discordId}>:\n` +
-            `Claimed today: ${claimedToday ? 'yes' : 'no'}\n` +
-            `Current streak if they claim today: ${streak + 1}\n` +
+            `Claim status is tracked per NFT in the claims database.\n` +
             `${lines.join('\n')}`
         });
         return;
@@ -3229,7 +3464,7 @@ client.on('interactionCreate', async (interaction) => {
             `- Points Label: ${getPointsLabel(settings)}\n` +
             `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
             `- Payout Amount: ${settings?.payout_amount || 1}\n` +
-            `- Claim Streak Bonus: ${settings?.claim_streak_bonus || 0}\n\n` +
+            `- Claim Streak Bonus (legacy, unused): ${settings?.claim_streak_bonus || 0}\n\n` +
             `Collections (${collections.length}):\n` +
             `${collections.map(c => `- ${c.name}: ${c.contract_address}`).join('\n') || '- none'}\n\n` +
             `Points Mappings (${mappings.size}):\n` +
@@ -3741,6 +3976,13 @@ client.on('interactionCreate', async (interaction) => {
         const grouped = normalizeTraits(attrs);
         const hpAgg = computeHpFromTraits(grouped, table);
         const tier = hpToTierLabel(hpAgg.total || 0);
+        const nftClaimState = await getClaimableAmountForNft(
+          interaction.guild.id,
+          contractAddress,
+          tokenId,
+          settings || {},
+          hpAgg.total || 0
+        );
         const collectionName = String(pending?.collectionName || labelForContract(contractAddress));
         const imageUrlRaw = String(
           meta?.image?.cachedUrl ||
@@ -3772,6 +4014,7 @@ client.on('interactionCreate', async (interaction) => {
           `Collection: **${collectionName}**\n` +
           `Contract: \`${contractAddress}\`\n` +
           `Total ${pointsLabel}: **${hpAgg.total || 0}**\n` +
+          `Claimable $CHARM: **${nftClaimState.claimableAmount}**\n` +
           `Rarity: **${tier}**\n\n` +
           `Trait ${pointsLabel} breakdown:\n${traitsText}`;
         const embed = new EmbedBuilder()
