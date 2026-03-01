@@ -1194,6 +1194,110 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
   };
 }
 
+async function computeDailyRewardQuote(guildId, links, settings) {
+  const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
+  const payoutAmount = Number(settings?.payout_amount || 0);
+  const verifiedWalletAddresses = (links || []).filter((x) => Boolean(x?.verified)).map((x) => x.wallet_address).filter(Boolean);
+  const unverifiedWalletAddresses = (links || []).filter((x) => !x?.verified).map((x) => x.wallet_address).filter(Boolean);
+
+  const [verifiedStats, unverifiedStats] = await Promise.all([
+    verifiedWalletAddresses.length
+      ? computeWalletStatsForPayout(guildId, verifiedWalletAddresses, payoutType)
+      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
+    unverifiedWalletAddresses.length
+      ? computeWalletStatsForPayout(guildId, unverifiedWalletAddresses, payoutType)
+      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
+  ]);
+
+  const effectiveUnits = verifiedStats.unitTotal + (unverifiedStats.unitTotal * 0.5);
+  const unverifiedPenaltyAmount = Math.max(0, (unverifiedStats.unitTotal * 0.5) * payoutAmount);
+  const dailyReward = Math.max(0, Math.floor(effectiveUnits * payoutAmount));
+
+  return {
+    payoutType,
+    payoutAmount,
+    verifiedStats,
+    unverifiedStats,
+    effectiveUnits,
+    unverifiedPenaltyAmount,
+    dailyReward,
+    totalNfts: verifiedStats.totalNfts + unverifiedStats.totalNfts,
+    totalUp: verifiedStats.totalUp + unverifiedStats.totalUp,
+  };
+}
+
+async function getConnectedCollectionCounts(guildId, walletAddresses) {
+  const collections = await getHolderCollections(guildId);
+  if (!collections.length) return [];
+  const out = await mapLimit(collections, 3, async (collection) => {
+    const ids = await getOwnedTokenIdsForContractMany(walletAddresses, collection.contract_address);
+    return {
+      name: collection.name,
+      contractAddress: collection.contract_address,
+      count: ids.length,
+    };
+  });
+  return out;
+}
+
+async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, settings) {
+  const ids = [...new Set((Array.isArray(memberIds) ? memberIds : [memberIds]).map((v) => String(v || '').trim()).filter(Boolean))];
+  if (!ids.length || !realmId || !currencyId || !settings?.drip_api_key) return null;
+
+  const baseUrls = dripRealmBaseUrls(realmId);
+  const variants = [
+    { suffix: '/point-balance', queryKey: 'realmPointId' },
+    { suffix: '/point-balance', queryKey: 'currencyId' },
+    { suffix: '/balance', queryKey: 'currencyId' },
+    { suffix: '/balance', queryKey: 'realmPointId' },
+  ];
+
+  const extractAmount = (payload) => {
+    const candidates = [
+      payload?.data,
+      payload?.balance,
+      payload?.pointBalance,
+      payload,
+    ];
+    for (const item of candidates) {
+      if (item == null) continue;
+      if (typeof item === 'number') return item;
+      if (typeof item === 'string' && item.trim() !== '' && Number.isFinite(Number(item))) return Number(item);
+      if (typeof item === 'object') {
+        const valueCandidates = [item.amount, item.balance, item.tokens, item.value];
+        for (const value of valueCandidates) {
+          if (value == null) continue;
+          if (typeof value === 'number') return value;
+          if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+        }
+      }
+    }
+    return null;
+  };
+
+  for (const memberId of ids) {
+    for (const baseUrl of baseUrls) {
+      for (const variant of variants) {
+        const url = new URL(`${baseUrl}/members/${encodeURIComponent(memberId)}${variant.suffix}`);
+        url.searchParams.set(variant.queryKey, String(currencyId));
+        const res = await fetchWithTimeout(url.toString(), {
+          timeoutMs: 15000,
+          headers: buildDripHeaders(settings),
+        });
+        if (res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          const amount = extractAmount(payload);
+          if (amount != null) return amount;
+          continue;
+        }
+        if (res.status === 404 || res.status === 400 || res.status === 422) continue;
+      }
+    }
+  }
+
+  return null;
+}
+
 function verificationMenuEmbed(guildName) {
   return new EmbedBuilder()
     .setTitle('Holder Verification')
@@ -1910,8 +2014,6 @@ async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
   const links = await getWalletLinks(guildId, interaction.user.id);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
-  const verifiedWalletAddresses = links.filter((x) => Boolean(x.verified)).map((x) => x.wallet_address).filter(Boolean);
-  const unverifiedWalletAddresses = links.filter((x) => !x.verified).map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
     await respondInteraction(interaction, { content: 'Connect your wallet first.', flags: 64 });
     return;
@@ -1924,7 +2026,6 @@ async function handleClaim(interaction) {
   const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
   const pointsLabel = getPointsLabel(settings);
   const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
-  const payoutAmount = Number(settings.payout_amount || 0);
   const claimStreakBonus = Number(settings.claim_streak_bonus || 0);
   const missing = [];
   if (!settings?.drip_api_key) missing.push('DRIP API Key');
@@ -1937,25 +2038,17 @@ async function handleClaim(interaction) {
     });
     return;
   }
-  const [verifiedStats, unverifiedStats] = await Promise.all([
-    verifiedWalletAddresses.length
-      ? computeWalletStatsForPayout(guildId, verifiedWalletAddresses, payoutType)
-      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
-    unverifiedWalletAddresses.length
-      ? computeWalletStatsForPayout(guildId, unverifiedWalletAddresses, payoutType)
-      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
-  ]);
+  const rewardQuote = await computeDailyRewardQuote(guildId, links, settings);
+  const { verifiedStats, unverifiedStats, unverifiedPenaltyAmount } = rewardQuote;
   const stats = {
     unitTotal: verifiedStats.unitTotal + unverifiedStats.unitTotal,
-    totalNfts: verifiedStats.totalNfts + unverifiedStats.totalNfts,
-    totalUp: verifiedStats.totalUp + unverifiedStats.totalUp,
+    totalNfts: rewardQuote.totalNfts,
+    totalUp: rewardQuote.totalUp,
   };
   const streakBeforeToday = await getClaimStreakBeforeToday(guildId, interaction.user.id);
   const streakAfterClaim = streakBeforeToday + 1;
   const streakBonusApplied = streakBeforeToday >= 1 ? claimStreakBonus : 0;
-  const effectiveUnits = verifiedStats.unitTotal + (unverifiedStats.unitTotal * 0.5);
-  const unverifiedPenaltyAmount = Math.max(0, (unverifiedStats.unitTotal * 0.5) * payoutAmount);
-  const baseAmount = Math.max(0, Math.floor(effectiveUnits * payoutAmount));
+  const baseAmount = rewardQuote.dailyReward;
   const amount = Math.max(0, Math.floor(baseAmount + streakBonusApplied));
 
   if (amount <= 0) {
@@ -2620,19 +2713,60 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'rewards_view_holdings') {
         const settings = await getGuildSettings(interaction.guild.id);
         const pointsLabel = getPointsLabel(settings);
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('rewards_view_holdings_select')
-            .setPlaceholder('Select holdings view')
-            .addOptions(
-              { label: 'By Collection', value: 'by_collection', description: 'Counts per configured contract' },
-              { label: pointsLabel, value: 'up_only', description: `Total ${pointsLabel} across linked wallets` },
-              { label: 'All', value: 'all', description: `Collection counts + total NFTs + total ${pointsLabel}` },
-            )
-        );
+        const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+        if (!walletAddresses.length) {
+          await interaction.reply({ content: 'No wallets connected yet.', flags: 64 });
+          return;
+        }
+
+        const [collectionCounts, rewardQuote] = await Promise.all([
+          getConnectedCollectionCounts(interaction.guild.id, walletAddresses),
+          computeDailyRewardQuote(interaction.guild.id, links, settings || {}),
+        ]);
+
+        let dripBalanceText = 'Unavailable';
+        try {
+          const resolved = await resolveDripMemberForDiscordUser(
+            settings?.drip_realm_id,
+            interaction.user.id,
+            walletAddresses[0],
+            settings || {}
+          ).catch(() => ({ member: null }));
+          const dripMemberIdCandidates = collectDripMemberIdCandidates(
+            resolved?.member,
+            links.find((x) => x.drip_member_id)?.drip_member_id || null
+          );
+          const dripBalance = await getDripMemberCurrencyBalance(
+            settings?.drip_realm_id,
+            dripMemberIdCandidates,
+            settings?.currency_id,
+            settings || {}
+          );
+          if (dripBalance != null) dripBalanceText = String(Math.floor(Number(dripBalance) || 0));
+        } catch {}
+
+        const collectionLines = collectionCounts.length
+          ? collectionCounts.map((x) => `• ${x.name}: **${x.count}** NFT${x.count === 1 ? '' : 's'}`).join('\n')
+          : '• No connected collections found.';
+        const penaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
+          ? `\nUnverified wallet dock: **-${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM**`
+          : '';
+
+        const embed = new EmbedBuilder()
+          .setTitle(`User's Holdings`)
+          .setColor(0xB0DEEE)
+          .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
+          .setDescription(
+            `Collections connected to this server across all linked wallets:\n${collectionLines}\n\n` +
+            `Daily earnings: **${rewardQuote.dailyReward} $CHARM**${penaltyLine}\n` +
+            `Total ${pointsLabel}: **${rewardQuote.totalUp}**\n` +
+            `Total NFTs: **${rewardQuote.totalNfts}**\n` +
+            `DRIP $CHARM held: **${dripBalanceText}**`
+          );
+
         await interaction.reply({
-          content: 'Choose holdings view:',
-          components: [row],
+          embeds: [embed],
           flags: 64
         });
         return;
