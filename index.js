@@ -1235,6 +1235,28 @@ function formatNumber(value, digits = 2) {
   return num.toFixed(digits).replace(/\.?0+$/, '');
 }
 
+function formatElapsedTimeSimple(ms) {
+  const totalMs = Math.max(0, Number(ms || 0));
+  const totalMinutes = Math.floor(totalMs / (60 * 1000));
+  if (totalMinutes < 1) return 'less than a minute';
+  if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes === 1 ? '' : 's'}`;
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours} hour${totalHours === 1 ? '' : 's'}`;
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) return `${totalDays} day${totalDays === 1 ? '' : 's'}`;
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  if (totalWeeks < 5) return `${totalWeeks} week${totalWeeks === 1 ? '' : 's'}`;
+
+  const totalMonths = Math.floor(totalDays / 30);
+  if (totalMonths < 12) return `${totalMonths} month${totalMonths === 1 ? '' : 's'}`;
+
+  const totalYears = Math.floor(totalDays / 365);
+  return `${totalYears} year${totalYears === 1 ? '' : 's'}`;
+}
+
 async function getStoredNftClaimStates(guildId, nftEntries) {
   const tokenIdsByContract = new Map();
   for (const entry of nftEntries) {
@@ -2435,6 +2457,7 @@ function claimConfirmButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('verify_claim_execute').setLabel('Claim').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('verify_claim_cancel').setLabel('No Claim').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('verify_claim_calc').setLabel('Show Calculation').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('verify_drip_status').setLabel('Check DRIP Status').setStyle(ButtonStyle.Primary),
   );
 }
@@ -2499,6 +2522,77 @@ async function handleClaimPrompt(interaction) {
       `${amountSummary}` +
       penaltyBlock,
     components: [claimConfirmButtons()],
+    flags: 64
+  });
+}
+
+async function handleClaimCalculation(interaction) {
+  const guildId = interaction.guild.id;
+  const links = await getWalletLinks(guildId, interaction.user.id);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
+    await interaction.reply({
+      content: 'Connect your wallet first to calculate claimable rewards.',
+      flags: 64
+    });
+    return;
+  }
+
+  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
+  const missing = [];
+  if (!settings?.drip_api_key) missing.push('DRIP API Key');
+  if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+  if (!settings?.currency_id) missing.push('Currency ID');
+  if (missing.length > 0) {
+    await interaction.reply({
+      content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
+      flags: 64
+    });
+    return;
+  }
+
+  const rewardQuote = await getPassiveClaimQuote(guildId, links, settings);
+  const pointsLabel = getPointsLabel(settings);
+  if (rewardQuote.claimableAmount <= 0) {
+    await interaction.reply({
+      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      flags: 64
+    });
+    return;
+  }
+
+  const grossDailyRate = rewardQuote.totalUnits * rewardQuote.payoutAmount;
+  const basisLine = rewardQuote.payoutType === 'per_nft'
+    ? `Rate: **${rewardQuote.totalNfts} eligible NFT${rewardQuote.totalNfts === 1 ? '' : 's'} x ${formatNumber(rewardQuote.payoutAmount)} $CHARM per NFT per day = ${formatNumber(grossDailyRate)} $CHARM/day**`
+    : `Rate: **${formatNumber(rewardQuote.totalUnits)} ${pointsLabel} x ${formatNumber(rewardQuote.payoutAmount)} $CHARM per ${pointsLabel} per day = ${formatNumber(grossDailyRate)} $CHARM/day**`;
+  const elapsedValues = rewardQuote.nftEntries
+    .map((entry) => Number(entry.elapsedMs || 0))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const minElapsed = elapsedValues.length ? Math.min(...elapsedValues) : 0;
+  const maxElapsed = elapsedValues.length ? Math.max(...elapsedValues) : 0;
+  const timingLine = elapsedValues.length <= 1
+    ? `You last claimed about **${formatElapsedTimeSimple(maxElapsed)}** ago, and it has been collecting ever since.`
+    : Math.abs(maxElapsed - minElapsed) < (60 * 1000)
+      ? `You last claimed these NFTs about **${formatElapsedTimeSimple(maxElapsed)}** ago, and they have been collecting ever since.`
+      : `Your NFTs were last claimed between **${formatElapsedTimeSimple(minElapsed)}** and **${formatElapsedTimeSimple(maxElapsed)}** ago, and they have been collecting ever since.`;
+  const accrualLine = `Accrued so far: **${rewardQuote.baseAmount} $CHARM**`;
+  const penaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
+    ? `DRIP penalty: **-${rewardQuote.unverifiedPenaltyAmount} $CHARM** because unverified wallets only count at 50%`
+    : `DRIP penalty: **0 $CHARM**`;
+  const resultLine = `Claim now: **${rewardQuote.claimableAmount} $CHARM**`;
+  const simpleExplain = rewardQuote.payoutType === 'per_nft'
+    ? `Simple formula: each eligible NFT earns over time until that NFT is claimed.`
+    : `Simple formula: each NFT earns based on its ${pointsLabel}, over time, until that NFT is claimed.`;
+
+  await interaction.reply({
+    content:
+      `Claim calculation\n` +
+      `${timingLine}\n` +
+      `${basisLine}\n` +
+      `${accrualLine}\n` +
+      `${penaltyLine}\n` +
+      `${resultLine}\n\n` +
+      `${simpleExplain}`,
     flags: 64
   });
 }
@@ -3147,6 +3241,11 @@ client.on('interactionCreate', async (interaction) => {
           content: 'Claim canceled.',
           components: []
         });
+        return;
+      }
+
+      if (interaction.customId === 'verify_claim_calc') {
+        await handleClaimCalculation(interaction);
         return;
       }
 
