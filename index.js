@@ -1246,40 +1246,87 @@ async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, sett
 
   const baseUrls = dripRealmBaseUrls(realmId);
   const variants = [
+    { suffix: '', queryKey: null },
     { suffix: '/point-balance', queryKey: 'realmPointId' },
     { suffix: '/point-balance', queryKey: 'currencyId' },
     { suffix: '/balance', queryKey: 'currencyId' },
     { suffix: '/balance', queryKey: 'realmPointId' },
   ];
 
+  const parseNumeric = (value) => {
+    if (value == null) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  };
+
   const extractAmount = (payload) => {
+    const targetCurrency = String(currencyId).trim();
+    const matchCurrencyAndExtract = (entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const entryIds = [entry.id, entry.currencyId, entry.realmPointId, entry.pointId]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+      if (entryIds.length && !entryIds.includes(targetCurrency)) return null;
+      const values = [
+        entry.amount,
+        entry.balance,
+        entry.tokens,
+        entry.value,
+        entry.pointBalance,
+        entry.currentBalance,
+      ];
+      for (const value of values) {
+        const parsed = parseNumeric(value);
+        if (parsed != null) return parsed;
+      }
+      return null;
+    };
+
+    const arrays = [
+      payload?.data?.balances,
+      payload?.data?.pointBalances,
+      payload?.data?.currencies,
+      payload?.balances,
+      payload?.pointBalances,
+      payload?.currencies,
+    ].filter(Array.isArray);
+    for (const arr of arrays) {
+      for (const entry of arr) {
+        const matched = matchCurrencyAndExtract(entry);
+        if (matched != null) return matched;
+      }
+    }
+
     const candidates = [
       payload?.data,
+      payload?.data?.balance,
+      payload?.data?.pointBalance,
       payload?.balance,
       payload?.pointBalance,
       payload,
     ];
     for (const item of candidates) {
       if (item == null) continue;
-      if (typeof item === 'number') return item;
-      if (typeof item === 'string' && item.trim() !== '' && Number.isFinite(Number(item))) return Number(item);
+      const direct = parseNumeric(item);
+      if (direct != null) return direct;
       if (typeof item === 'object') {
-        const valueCandidates = [item.amount, item.balance, item.tokens, item.value];
+        const valueCandidates = [item.amount, item.balance, item.tokens, item.value, item.pointBalance, item.currentBalance];
         for (const value of valueCandidates) {
-          if (value == null) continue;
-          if (typeof value === 'number') return value;
-          if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+          const parsed = parseNumeric(value);
+          if (parsed != null) return parsed;
         }
       }
     }
     return null;
   };
 
+  const failedAttempts = [];
   for (const memberId of ids) {
     for (const baseUrl of baseUrls) {
       for (const variant of variants) {
         const url = new URL(`${baseUrl}/members/${encodeURIComponent(memberId)}${variant.suffix}`);
-        url.searchParams.set(variant.queryKey, String(currencyId));
+        if (variant.queryKey) url.searchParams.set(variant.queryKey, String(currencyId));
         const res = await fetchWithTimeout(url.toString(), {
           timeoutMs: 15000,
           headers: buildDripHeaders(settings),
@@ -1288,12 +1335,25 @@ async function getDripMemberCurrencyBalance(realmId, memberIds, currencyId, sett
           const payload = await res.json().catch(() => ({}));
           const amount = extractAmount(payload);
           if (amount != null) return amount;
+          failedAttempts.push(`200 ${variant.suffix || '/'} (no parseable balance)`);
           continue;
         }
+        failedAttempts.push(`${res.status} ${variant.suffix || '/'}`);
         if (res.status === 404 || res.status === 400 || res.status === 422) continue;
       }
     }
   }
+
+  await postAdminSystemLog({
+    guildId: null,
+    category: 'DRIP Failure',
+    message:
+      `Could not resolve member currency balance for holdings view.\n` +
+      `Realm: \`${realmId}\`\n` +
+      `Currency: \`${currencyId}\`\n` +
+      `Member IDs tried: ${ids.join(', ')}\n` +
+      `Attempts: ${failedAttempts.slice(0, 8).join(' | ') || 'none'}`
+  });
 
   return null;
 }
