@@ -101,6 +101,8 @@ const SQUIGS_CONTRACT  = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 // ===== CHARM DROPS =====
 const CHARM_REWARD_CHANCE = 100; // 1 in 200
 const CHARM_REWARDS = [150, 200, 350, 200]; // Weighted pool
+const SUPPORT_TICKET_CHANNEL_ID = '1324090267699122258';
+const ADMIN_LOG_CHANNEL_ID = '1477463175665287410';
 
 // ===== CLIENT =====
 const client = new Client({
@@ -242,12 +244,14 @@ async function ensureTeamSchema() {
       points_label TEXT NOT NULL DEFAULT 'UglyPoints',
       payout_type TEXT NOT NULL DEFAULT 'per_up',
       payout_amount NUMERIC NOT NULL DEFAULT 1,
+      claim_streak_bonus NUMERIC NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS drip_client_id TEXT;`);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS receipt_channel_id TEXT;`);
   await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS points_label TEXT NOT NULL DEFAULT 'UglyPoints';`);
+  await teamPool.query(`ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS claim_streak_bonus NUMERIC NOT NULL DEFAULT 0;`);
   await teamPool.query(`
     CREATE TABLE IF NOT EXISTS holder_rules (
       id BIGSERIAL PRIMARY KEY,
@@ -257,6 +261,19 @@ async function ensureTeamSchema() {
       contract_address TEXT NOT NULL,
       min_tokens INTEGER NOT NULL DEFAULT 1,
       max_tokens INTEGER,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS trait_role_rules (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      role_name TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      trait_category TEXT,
+      trait_value TEXT NOT NULL,
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -295,13 +312,26 @@ ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
-  await holdersPool.query(
-    `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified, drip_member_id)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (guild_id, discord_id, wallet_address) DO UPDATE
-     SET verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
-    [guildId, discordId, walletAddress, verified, dripMemberId]
-  );
+  try {
+    await holdersPool.query(
+      `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified, drip_member_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (guild_id, discord_id, wallet_address) DO UPDATE
+       SET verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
+      [guildId, discordId, walletAddress, verified, dripMemberId]
+    );
+  } catch (err) {
+    await postAdminSystemLog({
+      guildId,
+      category: 'Wallet Link Issue',
+      message:
+        `Failed to save wallet link.\n` +
+        `Discord ID: \`${discordId}\`\n` +
+        `Wallet: \`${walletAddress}\`\n` +
+        `Reason: ${String(err?.message || err || '').slice(0, 300)}`
+    });
+    throw err;
+  }
 }
 
 async function getWalletLinks(guildId, discordId) {
@@ -315,12 +345,58 @@ async function getWalletLinks(guildId, discordId) {
   return rows;
 }
 
-async function deleteWalletLink(guildId, discordId, walletAddress) {
-  const { rowCount } = await holdersPool.query(
-    `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2 AND wallet_address = $3`,
-    [guildId, discordId, walletAddress]
+async function getWalletOwnerLink(guildId, walletAddress) {
+  const { rows } = await holdersPool.query(
+    `SELECT discord_id, verified, drip_member_id, created_at, updated_at
+     FROM wallet_links
+     WHERE guild_id = $1 AND wallet_address = $2
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [guildId, walletAddress]
   );
-  return rowCount || 0;
+  return rows[0] || null;
+}
+
+async function reassignWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
+  try {
+    await holdersPool.query(
+      `DELETE FROM wallet_links WHERE guild_id = $1 AND wallet_address = $2 AND discord_id <> $3`,
+      [guildId, walletAddress, discordId]
+    );
+    await setWalletLink(guildId, discordId, walletAddress, verified, dripMemberId);
+  } catch (err) {
+    await postAdminSystemLog({
+      guildId,
+      category: 'Wallet Link Issue',
+      message:
+        `Failed to reassign wallet link.\n` +
+        `Discord ID: \`${discordId}\`\n` +
+        `Wallet: \`${walletAddress}\`\n` +
+        `Reason: ${String(err?.message || err || '').slice(0, 300)}`
+    });
+    throw err;
+  }
+}
+
+async function deleteWalletLink(guildId, discordId, walletAddress) {
+  try {
+    const { rowCount } = await holdersPool.query(
+      `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2 AND wallet_address = $3`,
+      [guildId, discordId, walletAddress]
+    );
+    return rowCount || 0;
+  } catch (err) {
+    await postAdminSystemLog({
+      guildId,
+      category: 'Wallet Link Issue',
+      message:
+        `Failed to remove wallet link.\n` +
+        `Discord ID: \`${discordId}\`\n` +
+        `Wallet: \`${walletAddress}\`\n` +
+        `Reason: ${String(err?.message || err || '').slice(0, 300)}`
+    });
+    throw err;
+  }
 }
 
 // ===== Slash command registrar (guild-scoped for fast iteration) =====
@@ -374,6 +450,66 @@ function buildSlashCommands() {
           .setRequired(true)
       )
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('connectuser')
+      .setDescription('Admin override: manually link and verify a user wallet with a DRIP member ID')
+      .addStringOption((opt) =>
+        opt
+          .setName('discord_id')
+          .setDescription('Discord user ID to link the wallet to')
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('wallet')
+          .setDescription('Ethereum wallet address')
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('drip_user_id')
+          .setDescription('DRIP member/user ID to store on the wallet link')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('disconnectuser')
+      .setDescription('Admin override: remove a linked wallet from a user')
+      .addStringOption((opt) =>
+        opt
+          .setName('discord_id')
+          .setDescription('Discord user ID to remove the wallet from')
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('wallet')
+          .setDescription('Ethereum wallet address to remove')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('listuserwallets')
+      .setDescription('Admin: view linked wallets and verification status for a user')
+      .addStringOption((opt) =>
+        opt
+          .setName('discord_id')
+          .setDescription('Discord user ID to inspect')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('healthcheck')
+      .setDescription('Admin: check verification and reward system health for this server')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('info')
+      .setDescription('Admin: view a plain-English guide for how this bot works')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('info-user')
+      .setDescription('Admin: post a public plain-English guide for users')
+      .toJSON(),
   ];
 }
 
@@ -412,6 +548,7 @@ client.once(Events.ClientReady, async (c) => {
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
 globalThis.__PENDING_HOLDER_RULES ||= new Map();
+globalThis.__PENDING_TRAIT_ROLE_RULES ||= new Map();
 globalThis.__PENDING_POINTS_MAPPING ||= new Map();
 globalThis.__PENDING_CHECK_STATS ||= new Map();
 
@@ -530,6 +667,55 @@ async function postWalletReceipt(guild, settings, actorDiscordId, action, wallet
   }
 }
 
+async function postAdminSystemLog({ guild = null, guildId = null, category = 'System', message }) {
+  if (!ADMIN_LOG_CHANNEL_ID) return;
+  try {
+    const ch = await client.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
+    if (!ch?.isTextBased()) return;
+    const guildLabel = guild?.name || guildId || 'unknown';
+    await ch.send(
+      `**${category}**\n` +
+      `Guild: ${guildLabel}\n` +
+      `${String(message || '').slice(0, 1600)}`
+    );
+  } catch (err) {
+    console.warn('⚠️ Admin system log failed:', String(err?.message || err || ''));
+  }
+}
+
+async function postRoleSyncFailures(guild, actorDiscordId, syncResult, context) {
+  const failedLines = Array.isArray(syncResult?.applied)
+    ? syncResult.applied.filter((line) => /skipped/i.test(String(line || '')))
+    : [];
+  if (!failedLines.length) return;
+  await postAdminSystemLog({
+    guild,
+    category: 'Role Sync Failure',
+    message:
+      `User: <@${actorDiscordId}>\n` +
+      `Context: ${context}\n` +
+      `${failedLines.map((line) => `- ${line}`).join('\n')}`
+  });
+}
+
+async function postAdminVerificationFlag(guild, actorDiscordId, walletAddress, reason, grantedRoles = []) {
+  if (!ADMIN_LOG_CHANNEL_ID) return;
+  try {
+    const ch = await guild.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
+    if (!ch?.isTextBased()) return;
+    const roleText = grantedRoles.length ? grantedRoles.join(', ') : 'none';
+    await ch.send(
+      `Wallet not DRIP-verified but holder access was granted.\n` +
+      `User: <@${actorDiscordId}>\n` +
+      `Wallet: \`${walletAddress}\`\n` +
+      `Roles granted: ${roleText}\n` +
+      `Reason: ${String(reason || 'No reason provided.').slice(0, 300)}`
+    );
+  } catch (err) {
+    console.warn('⚠️ Admin verification flag failed:', String(err?.message || err || ''));
+  }
+}
+
 function isAdmin(interaction) {
   if (getDefaultAdminIds().has(String(interaction.user?.id || ''))) return true;
   return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
@@ -550,7 +736,7 @@ async function getGuildSettings(guildId) {
 }
 
 async function upsertGuildSetting(guildId, field, value) {
-  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'receipt_channel_id', 'points_label', 'payout_type', 'payout_amount']);
+  const allowed = new Set(['drip_api_key', 'drip_client_id', 'drip_realm_id', 'currency_id', 'receipt_channel_id', 'points_label', 'payout_type', 'payout_amount', 'claim_streak_bonus']);
   if (!allowed.has(field)) throw new Error(`Invalid setting field: ${field}`);
   await teamPool.query(
     `INSERT INTO guild_settings (guild_id, ${field}, updated_at)
@@ -569,9 +755,9 @@ function getPointsLabel(settings) {
 async function clearDripSettings(guildId) {
   await teamPool.query(
     `INSERT INTO guild_settings (
-       guild_id, drip_api_key, drip_client_id, drip_realm_id, currency_id, receipt_channel_id, payout_type, payout_amount, updated_at
+       guild_id, drip_api_key, drip_client_id, drip_realm_id, currency_id, receipt_channel_id, payout_type, payout_amount, claim_streak_bonus, updated_at
      )
-     VALUES ($1, NULL, NULL, NULL, NULL, NULL, 'per_up', 1, NOW())
+     VALUES ($1, NULL, NULL, NULL, NULL, NULL, 'per_up', 1, 0, NOW())
      ON CONFLICT (guild_id) DO UPDATE
      SET drip_api_key = NULL,
          drip_client_id = NULL,
@@ -580,6 +766,7 @@ async function clearDripSettings(guildId) {
          receipt_channel_id = NULL,
          payout_type = 'per_up',
          payout_amount = 1,
+         claim_streak_bonus = 0,
          updated_at = NOW()`,
     [guildId]
   );
@@ -588,6 +775,14 @@ async function clearDripSettings(guildId) {
 async function getHolderRules(guildId) {
   const { rows } = await teamPool.query(
     `SELECT * FROM holder_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
+    [guildId]
+  );
+  return rows;
+}
+
+async function getTraitRoleRules(guildId) {
+  const { rows } = await teamPool.query(
+    `SELECT * FROM trait_role_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
     [guildId]
   );
   return rows;
@@ -702,9 +897,31 @@ async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTok
   return role;
 }
 
+async function addTraitRoleRule(guild, { roleId, contractAddress, traitCategory, traitValue }) {
+  const role = guild.roles.cache.get(roleId);
+  if (!role) throw new Error(`Role not found: ${roleId}`);
+  await teamPool.query(
+    `INSERT INTO trait_role_rules (guild_id, role_id, role_name, contract_address, trait_category, trait_value, enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
+    [guild.id, role.id, role.name, contractAddress.toLowerCase(), traitCategory || null, traitValue]
+  );
+  return role;
+}
+
 async function disableHolderRule(guildId, ruleId) {
   const { rows } = await teamPool.query(
     `UPDATE holder_rules SET enabled = FALSE WHERE guild_id = $1 AND id = $2 AND enabled = TRUE RETURNING id, role_name, contract_address, min_tokens, max_tokens`,
+    [guildId, ruleId]
+  );
+  return rows[0] || null;
+}
+
+async function disableTraitRoleRule(guildId, ruleId) {
+  const { rows } = await teamPool.query(
+    `UPDATE trait_role_rules
+     SET enabled = FALSE
+     WHERE guild_id = $1 AND id = $2 AND enabled = TRUE
+     RETURNING id, role_name, contract_address, trait_category, trait_value`,
     [guildId, ruleId]
   );
   return rows[0] || null;
@@ -765,7 +982,8 @@ async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress)
 
 async function syncHolderRoles(member, walletAddresses) {
   const rules = await getHolderRules(member.guild.id);
-  if (!rules.length) return { changed: 0, applied: [], granted: [] };
+  const traitRules = await getTraitRoleRules(member.guild.id);
+  if (!rules.length && !traitRules.length) return { changed: 0, applied: [], granted: [] };
   const me = member.guild.members.me;
   if (!me?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
     return { changed: 0, applied: ['Skipped: bot is missing Manage Roles permission.'], granted: [] };
@@ -781,6 +999,45 @@ async function syncHolderRoles(member, walletAddresses) {
       count += await countOwnedForContract(walletAddress, r.contract_address);
     }
     byContract.set(r.contract_address, count);
+  }
+
+  const guildPointMappings = traitRules.length ? await getGuildPointMappings(member.guild.id) : new Map();
+  const traitMatchesByRuleId = new Map();
+  const traitContracts = [...new Set(traitRules.map((r) => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
+  for (const contractAddress of traitContracts) {
+    const contractRules = traitRules.filter((r) => String(r.contract_address || '').toLowerCase() === contractAddress);
+    if (!contractRules.length) continue;
+
+    const table = hpTableForContract(contractAddress, guildPointMappings);
+    const eligibleRules = contractRules.filter((r) => findMatchingTraitDefinition(table, r.trait_category, r.trait_value));
+    for (const r of contractRules) {
+      traitMatchesByRuleId.set(r.id, false);
+    }
+    if (!eligibleRules.length) continue;
+
+    const tokenIds = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress);
+    if (!tokenIds.length) continue;
+
+    for (const tokenId of tokenIds) {
+      let grouped = null;
+      try {
+        const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
+        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
+        grouped = normalizeTraits(attrs);
+      } catch {
+        grouped = null;
+      }
+      if (!grouped) continue;
+
+      for (const r of eligibleRules) {
+        if (traitMatchesByRuleId.get(r.id)) continue;
+        if (hasTraitMatch(grouped, r.trait_category, r.trait_value)) {
+          traitMatchesByRuleId.set(r.id, true);
+        }
+      }
+
+      if (eligibleRules.every((r) => traitMatchesByRuleId.get(r.id))) break;
+    }
   }
 
   let changed = 0;
@@ -819,6 +1076,41 @@ async function syncHolderRoles(member, walletAddresses) {
     }
     applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
+
+  for (const r of traitRules) {
+    const role = member.guild.roles.cache.get(r.role_id);
+    const categoryLabel = r.trait_category ? String(r.trait_category) : 'any';
+    const traitLabel = `${categoryLabel}:${r.trait_value}`;
+    if (!role) {
+      applied.push(`${r.role_name || r.role_id}: skipped (role not found)`);
+      continue;
+    }
+    if (!role.editable) {
+      applied.push(`${role.name}: skipped (bot cannot manage this role/hierarchy)`);
+      continue;
+    }
+
+    const shouldHave = Boolean(traitMatchesByRuleId.get(r.id));
+    const hasRole = member.roles.cache.has(role.id);
+    try {
+      if (shouldHave && !hasRole) {
+        await member.roles.add(role, `Trait role (${traitLabel} on ${r.contract_address})`);
+        changed++;
+        granted.push(role.name);
+      }
+      if (!shouldHave && hasRole) {
+        await member.roles.remove(role, `Trait role (${traitLabel} not found on ${r.contract_address})`);
+        changed++;
+      }
+    } catch (err) {
+      if (err?.code === 50001 || err?.code === 50013) {
+        applied.push(`${role.name}: skipped (missing access/permissions)`);
+        continue;
+      }
+      throw err;
+    }
+    applied.push(`${role.name}: ${traitLabel} (${shouldHave ? 'eligible' : 'not eligible'})`);
+  }
   return { changed, applied, granted };
 }
 
@@ -828,6 +1120,30 @@ async function hasClaimedToday(guildId, discordId) {
     [guildId, discordId]
   );
   return rows.length > 0;
+}
+
+async function getClaimStreakBeforeToday(guildId, discordId) {
+  const { rows } = await holdersPool.query(
+    `SELECT claim_day
+     FROM claims
+     WHERE guild_id = $1 AND discord_id = $2 AND claim_day < CURRENT_DATE
+     ORDER BY claim_day DESC`,
+    [guildId, discordId]
+  );
+
+  let expected = new Date();
+  expected.setUTCHours(0, 0, 0, 0);
+  expected.setUTCDate(expected.getUTCDate() - 1);
+
+  let streak = 0;
+  for (const row of rows) {
+    const claimDate = new Date(row.claim_day);
+    claimDate.setUTCHours(0, 0, 0, 0);
+    if (claimDate.getTime() !== expected.getTime()) break;
+    streak++;
+    expected.setUTCDate(expected.getUTCDate() - 1);
+  }
+  return streak;
 }
 
 async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType) {
@@ -929,6 +1245,7 @@ function setupMainEmbed() {
       `Choose a setup action.\n` +
       `• Collections: add collection name + contract for setup options.\n` +
       `• Holder roles: add/remove collection-based role rules.\n` +
+      `• Trait roles: add/remove trait-based role rules using built-in or custom mapped traits.\n` +
       `• Points Mapping: upload or remove category/trait/points CSV per collection.\n` +
       `• Setup DRIP: open DRIP settings + connection checks.\n` +
       `• View Config: show current settings and rules.`
@@ -948,16 +1265,228 @@ function setupDripEmbed() {
     .setColor(0x7ADDC0);
 }
 
+function infoEmbeds(guildName, settings = null) {
+  const pointsLabel = getPointsLabel(settings);
+  return [
+    new EmbedBuilder()
+      .setTitle('UglyBot Info: Overview')
+      .setColor(0xB0DEEE)
+      .setDescription(
+        `This bot handles holder verification, holder roles, trait roles, rewards, DRIP payouts, and admin support tools for **${guildName}**.\n\n` +
+        `In plain English:\n` +
+        `• Users connect wallets.\n` +
+        `• The bot checks what NFTs those wallets hold.\n` +
+        `• It gives or removes Discord roles based on your rules.\n` +
+        `• It can score NFTs using trait-to-points mappings.\n` +
+        `• Users can claim daily rewards through DRIP.\n` +
+        `• Admins can override links, inspect users, and monitor failures.`
+      ),
+    new EmbedBuilder()
+      .setTitle('UglyBot Info: Public User Flow')
+      .setColor(0x7ADDC0)
+      .addFields(
+        {
+          name: 'Connect Wallet',
+          value:
+            `Users click **Connect Wallet** and enter one or more wallet addresses.\n` +
+            `The bot links the wallet, checks DRIP if configured, and then runs holder role sync.`
+        },
+        {
+          name: 'Wallet Verification',
+          value:
+            `If DRIP confirms the wallet belongs to the same DRIP member as the user, it is marked verified.\n` +
+            `If DRIP cannot confirm it, the wallet can still be linked and roles can still work, but that wallet stays unverified.`
+        },
+        {
+          name: 'Claim Rewards',
+          value:
+            `Users can claim once per UTC day.\n` +
+            `Verified wallets count at full value.\n` +
+            `Unverified wallets only count at **50%**.\n` +
+            `If a user is docked, they get a hidden note telling them to verify in DRIP or open a support ticket.`
+        },
+        {
+          name: 'Check Wallets / Holdings',
+          value:
+            `Users can view linked wallets, see if each wallet is verified or pending, and view holdings / total ${pointsLabel}.`
+        }
+      ),
+    new EmbedBuilder()
+      .setTitle('UglyBot Info: Admin Commands')
+      .setColor(0x7A83BF)
+      .addFields(
+        {
+          name: '/launch-verification',
+          value: 'Posts the public wallet verification menu in the current channel.'
+        },
+        {
+          name: '/launch-rewards',
+          value: 'Posts the public rewards menu in the current channel.'
+        },
+        {
+          name: '/setup-verification',
+          value: 'Posts the private setup panel used to manage collections, roles, points mapping, and DRIP settings.'
+        },
+        {
+          name: '/set-points-mapping and /remove-points-mapping',
+          value: 'Adds, merges, replaces, or removes a collection trait-to-points CSV mapping.'
+        },
+        {
+          name: '/connectuser and /disconnectuser',
+          value: 'Manual override tools for staff to force-link or remove a wallet for a Discord user.'
+        },
+        {
+          name: '/listuserwallets, /healthcheck, /info',
+          value:
+            `Use these to inspect a user, verify server health, and read this guide.\n` +
+            `All are admin-only and reply with hidden messages.`
+        }
+      ),
+    new EmbedBuilder()
+      .setTitle('UglyBot Info: Setup And How-To')
+      .setColor(0xB0DEEE)
+      .addFields(
+        {
+          name: '1. Add Collections',
+          value: 'Add the collection name and contract address first. Collections are the base for role rules and point mappings.'
+        },
+        {
+          name: '2. Add Holder Roles',
+          value: 'Create rules that give a Discord role when a user holds a collection within a min/max token range.'
+        },
+        {
+          name: '3. Add Trait Roles',
+          value: 'Create rules that give a role when a user owns an NFT with a specific trait value, using built-in traits or custom mapped traits.'
+        },
+        {
+          name: '4. Configure Points Mapping',
+          value:
+            `Upload CSV with columns like \`category,trait,ugly_points\`.\n` +
+            `This controls how NFT traits are scored for rewards and status checks.`
+        },
+        {
+          name: '5. Configure DRIP',
+          value:
+            `Set DRIP API key, optional client ID, realm ID, currency ID, receipt channel, points label, payout type, payout amount, and claim streak bonus.\n` +
+            `Then use **Verify DRIP Connection** to confirm the setup works.`
+        },
+        {
+          name: '6. Test Before Going Live',
+          value:
+            `Test wallet connect, wallet disconnect, verified and unverified claims, admin overrides, and the health check.\n` +
+            `Watch the admin log channel for warnings and failures.`
+        }
+      ),
+    new EmbedBuilder()
+      .setTitle('UglyBot Info: Important Rules And Safeguards')
+      .setColor(0x7ADDC0)
+      .addFields(
+        {
+          name: 'Duplicate Wallet Protection',
+          value: 'A normal user cannot link a wallet that is already linked to another Discord user in the same server.'
+        },
+        {
+          name: 'Admin Override Audit',
+          value: 'Manual staff overrides are logged in the admin log channel so there is a paper trail.'
+        },
+        {
+          name: 'Failure Logging',
+          value:
+            `The admin log channel records DRIP failures, role-sync failures, wallet-link issues, duplicate-link blocks, and other major interaction errors.`
+        },
+        {
+          name: 'How Rewards Are Calculated',
+          value:
+            `Rewards are based on the configured payout type.\n` +
+            `Per NFT = eligible NFT count x payout amount.\n` +
+            `Per ${pointsLabel} = total ${pointsLabel} x payout amount.\n` +
+            `A claim streak bonus can add a flat extra amount on continued streaks.`
+        },
+        {
+          name: 'Support Flow',
+          value:
+            `If DRIP cannot verify a wallet, the user can still get holder roles, but their rewards are reduced for that wallet.\n` +
+            `They should connect the same wallet in DRIP or open a ticket for manual help.`
+        }
+      ),
+  ];
+}
+
+function infoUserEmbeds(guildName, settings = null) {
+  const pointsLabel = getPointsLabel(settings);
+  return [
+    new EmbedBuilder()
+      .setTitle('How Holder Verification Works')
+      .setColor(0x7ADDC0)
+      .setDescription(
+        `Here is the simple version for **${guildName}**:\n\n` +
+        `• Connect your wallet using the verification menu.\n` +
+        `• The bot checks what eligible NFTs your linked wallets hold.\n` +
+        `• If you qualify, it gives you the holder role(s).\n` +
+        `• If your holdings change, your roles can update too.`
+      ),
+    new EmbedBuilder()
+      .setTitle('How Rewards Work')
+      .setColor(0xB0DEEE)
+      .addFields(
+        {
+          name: 'Daily Claim',
+          value:
+            `You can claim once per UTC day from the rewards menu.\n` +
+            `The bot calculates your reward based on your eligible NFTs and/or total ${pointsLabel}, depending on server settings.`
+        },
+        {
+          name: 'Verified vs Unverified Wallets',
+          value:
+            `If your wallet is verified through DRIP, it counts at full value.\n` +
+            `If your wallet is not verified through DRIP yet, it still counts, but only at **50%** for rewards.`
+        },
+        {
+          name: 'Claim Streaks',
+          value:
+            `If this server has streak bonuses enabled, claiming on consecutive days can add an extra bonus to your reward.`
+        }
+      ),
+    new EmbedBuilder()
+      .setTitle('How To Avoid Reduced Rewards')
+      .setColor(0x7A83BF)
+      .addFields(
+        {
+          name: 'Verify Your Wallet In DRIP',
+          value:
+            `To get full rewards, make sure the same wallet you linked here is also connected to your DRIP profile in the correct realm.`
+        },
+        {
+          name: 'If Verification Fails',
+          value:
+            `You can still keep your holder roles, but your unverified wallet rewards are reduced.\n` +
+            `If you need help, open a support ticket with the team so they can review your wallet manually.`
+        },
+        {
+          name: 'Useful Buttons',
+          value:
+            `• Connect Wallet\n` +
+            `• Disconnect Wallet\n` +
+            `• Check Wallets Connected\n` +
+            `• Claim Rewards\n` +
+            `• View Holdings`
+        }
+      ),
+  ];
+}
+
 function setupMainButtons() {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_add_rule').setLabel('Add Holder Role').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup_add_trait_rule').setLabel('Add Trait Role').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup_add_collection').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_remove_rule').setLabel('Remove Holder Role').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('setup_points_mapping').setLabel('Points Mapping').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_remove_trait_rule').setLabel('Remove Trait Role').setStyle(ButtonStyle.Danger),
     ),
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_points_mapping').setLabel('Points Mapping').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_remove_points_mapping').setLabel('Remove Points Mapping').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
     ),
@@ -977,6 +1506,9 @@ function setupDripButtons() {
       new ButtonBuilder().setCustomId('setup_points_label').setLabel('Set Points Label').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_type').setLabel('Set Payout Type').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_payout_amount').setLabel('Set Payout Amount').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup_claim_streak_bonus').setLabel('Set Claim Streak Bonus').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup_verify_drip').setLabel('Verify DRIP Connection').setStyle(ButtonStyle.Success),
@@ -1157,6 +1689,57 @@ function collectDripMemberIdCandidates(memberLike, fallbackId = null) {
   return [...new Set(ids)];
 }
 
+function sameDripMember(a, b) {
+  const left = new Set(collectDripMemberIdCandidates(a));
+  const right = new Set(collectDripMemberIdCandidates(b));
+  for (const id of left) {
+    if (right.has(id)) return true;
+  }
+  return false;
+}
+
+async function verifyWalletViaDrip(realmId, discordId, walletAddress, settings) {
+  const out = {
+    verified: false,
+    dripMemberId: null,
+    reason: 'DRIP is not configured.',
+  };
+
+  if (!settings?.drip_api_key || !realmId) return out;
+
+  try {
+    const [discordMatches, walletMatches] = await Promise.all([
+      searchDripMembers(realmId, 'discord', discordId, settings),
+      searchDripMembers(realmId, 'wallet', walletAddress, settings),
+    ]);
+
+    const discordMember = discordMatches[0] || null;
+    const walletMember = walletMatches[0] || null;
+    const dripMemberId = discordMember?.id || walletMember?.id || null;
+    out.dripMemberId = dripMemberId;
+
+    if (!discordMember) {
+      out.reason = 'Your Discord account is not linked to a DRIP member in this realm.';
+      return out;
+    }
+    if (!walletMember) {
+      out.reason = 'This wallet is not linked to your DRIP member in this realm.';
+      return out;
+    }
+    if (!sameDripMember(discordMember, walletMember)) {
+      out.reason = 'DRIP found your Discord profile and wallet, but they do not match the same member.';
+      return out;
+    }
+
+    out.verified = true;
+    out.reason = 'DRIP confirmed that this wallet matches your profile.';
+    return out;
+  } catch (err) {
+    out.reason = `DRIP verification is temporarily unavailable: ${String(err?.message || err || '').slice(0, 180)}`;
+    return out;
+  }
+}
+
 async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings) {
   const ids = Array.isArray(memberIds) ? memberIds : [memberIds];
   const memberIdCandidates = [...new Set(ids.map(v => (v == null ? '' : String(v).trim())).filter(Boolean))];
@@ -1327,6 +1910,8 @@ async function handleClaim(interaction) {
   const guildId = interaction.guild.id;
   const links = await getWalletLinks(guildId, interaction.user.id);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  const verifiedWalletAddresses = links.filter((x) => Boolean(x.verified)).map((x) => x.wallet_address).filter(Boolean);
+  const unverifiedWalletAddresses = links.filter((x) => !x.verified).map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
     await respondInteraction(interaction, { content: 'Connect your wallet first.', flags: 64 });
     return;
@@ -1336,10 +1921,11 @@ async function handleClaim(interaction) {
     return;
   }
 
-  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1 };
+  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
   const pointsLabel = getPointsLabel(settings);
   const payoutType = settings.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
   const payoutAmount = Number(settings.payout_amount || 0);
+  const claimStreakBonus = Number(settings.claim_streak_bonus || 0);
   const missing = [];
   if (!settings?.drip_api_key) missing.push('DRIP API Key');
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
@@ -1351,8 +1937,26 @@ async function handleClaim(interaction) {
     });
     return;
   }
-  const stats = await computeWalletStatsForPayout(guildId, walletAddresses, payoutType);
-  const amount = Math.max(0, Math.floor(stats.unitTotal * payoutAmount));
+  const [verifiedStats, unverifiedStats] = await Promise.all([
+    verifiedWalletAddresses.length
+      ? computeWalletStatsForPayout(guildId, verifiedWalletAddresses, payoutType)
+      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
+    unverifiedWalletAddresses.length
+      ? computeWalletStatsForPayout(guildId, unverifiedWalletAddresses, payoutType)
+      : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
+  ]);
+  const stats = {
+    unitTotal: verifiedStats.unitTotal + unverifiedStats.unitTotal,
+    totalNfts: verifiedStats.totalNfts + unverifiedStats.totalNfts,
+    totalUp: verifiedStats.totalUp + unverifiedStats.totalUp,
+  };
+  const streakBeforeToday = await getClaimStreakBeforeToday(guildId, interaction.user.id);
+  const streakAfterClaim = streakBeforeToday + 1;
+  const streakBonusApplied = streakBeforeToday >= 1 ? claimStreakBonus : 0;
+  const effectiveUnits = verifiedStats.unitTotal + (unverifiedStats.unitTotal * 0.5);
+  const unverifiedPenaltyAmount = Math.max(0, (unverifiedStats.unitTotal * 0.5) * payoutAmount);
+  const baseAmount = Math.max(0, Math.floor(effectiveUnits * payoutAmount));
+  const amount = Math.max(0, Math.floor(baseAmount + streakBonusApplied));
 
   if (amount <= 0) {
     await respondInteraction(interaction, { content: 'No payout available. Check your holdings or payout settings.', flags: 64 });
@@ -1414,10 +2018,19 @@ async function handleClaim(interaction) {
         payoutType === 'per_nft'
           ? `${stats.totalNfts} eligible NFT${stats.totalNfts === 1 ? '' : 's'}`
           : `${stats.totalUp} ${pointsLabel}`;
+        const streakLine = streakBonusApplied > 0
+          ? `\nStreak: ${streakAfterClaim} day${streakAfterClaim === 1 ? '' : 's'} (+${streakBonusApplied} $CHARM bonus)`
+          : `\nStreak: ${streakAfterClaim} day${streakAfterClaim === 1 ? '' : 's'}`;
+        const verificationPenaltyLine = unverifiedPenaltyAmount > 0
+          ? `\nUnverified wallet dock: -${Math.floor(unverifiedPenaltyAmount)} $CHARM (50%)`
+          : '';
         receiptMessage = await receiptChannel.send(
           `🧾 Claim Receipt\n` +
           `User: <@${interaction.user.id}>\n` +
           `Earning Basis: ${earningBasis}\n` +
+          `Base Reward: **${baseAmount} $CHARM**` +
+          `${verificationPenaltyLine}` +
+          `${streakLine}\n` +
           `Reward: **${amount} $CHARM**`
         );
       } else {
@@ -1435,10 +2048,35 @@ async function handleClaim(interaction) {
       [guildId, interaction.user.id, amount, walletAddresses.join(','), receiptChannel?.id || null, receiptMessage?.id || null]
     );
 
-    await respondInteraction(interaction, { content: `Claim complete. You received **${amount} $CHARM**.${receiptWarning}`, flags: 64 });
+    const streakSummary = streakBonusApplied > 0
+      ? ` Streak: **${streakAfterClaim}** days (+${streakBonusApplied} $CHARM bonus).`
+      : ` Streak: **${streakAfterClaim}** day${streakAfterClaim === 1 ? '' : 's'}.`;
+    const verificationSummary = unverifiedPenaltyAmount > 0
+      ? ` You were docked **50%** on unverified wallet rewards. Verify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.`
+      : '';
+    await respondInteraction(interaction, { content: `Claim complete. You received **${amount} $CHARM**.${streakSummary}${verificationSummary}${receiptWarning}`, flags: 64 });
   } catch (err) {
     console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
+    if (/DRIP member search failed|DRIP award failed/i.test(msg)) {
+      await postAdminSystemLog({
+        guild: interaction.guild,
+        category: 'DRIP Failure',
+        message:
+          `User: <@${interaction.user.id}>\n` +
+          `Context: claim\n` +
+          `Reason: ${msg.slice(0, 500)}`
+      });
+    } else if (/claims|wallet_links|database|relation|column/i.test(msg)) {
+      await postAdminSystemLog({
+        guild: interaction.guild,
+        category: 'Wallet Link Issue',
+        message:
+          `User: <@${interaction.user.id}>\n` +
+          `Context: claim record update\n` +
+          `Reason: ${msg.slice(0, 500)}`
+      });
+    }
     let reason = 'We could not process your claim right now.';
     if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
     else if (/DRIP award failed/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
@@ -1655,6 +2293,249 @@ client.on('interactionCreate', async (interaction) => {
         });
         return;
       }
+
+      if (interaction.commandName === 'connectuser') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const discordId = String(interaction.options.getString('discord_id', true) || '').trim();
+        const dripUserId = String(interaction.options.getString('drip_user_id', true) || '').trim();
+        const walletInput = String(interaction.options.getString('wallet', true) || '').trim();
+        const walletAddress = normalizeEthAddress(walletInput);
+
+        if (!/^\d{16,20}$/.test(discordId)) {
+          await interaction.editReply({ content: 'Invalid Discord ID.' });
+          return;
+        }
+        if (!walletAddress) {
+          await interaction.editReply({ content: 'Invalid wallet address.' });
+          return;
+        }
+        if (!dripUserId) {
+          await interaction.editReply({ content: 'DRIP user ID is required.' });
+          return;
+        }
+
+        await reassignWalletLink(interaction.guild.id, discordId, walletAddress, true, dripUserId);
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Override',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Action: /connectuser\n` +
+            `Target: <@${discordId}>\n` +
+            `Wallet: \`${walletAddress}\`\n` +
+            `DRIP User ID: \`${dripUserId}\``
+        });
+
+        let syncSummary = 'Role sync skipped (member not found in this server).';
+        try {
+          const member = await interaction.guild.members.fetch(discordId);
+          const links = await getWalletLinks(interaction.guild.id, discordId);
+          const allAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+          const sync = await syncHolderRoles(member, allAddresses);
+          await postRoleSyncFailures(interaction.guild, discordId, sync, 'admin /connectuser');
+          syncSummary =
+            `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}). ` +
+            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}`;
+        } catch (err) {
+          await postAdminSystemLog({
+            guild: interaction.guild,
+            category: 'Role Sync Failure',
+            message:
+              `User: <@${discordId}>\n` +
+              `Context: admin /connectuser\n` +
+              `Reason: ${String(err?.message || err || '').slice(0, 500)}`
+          });
+        }
+
+        await interaction.editReply({
+          content:
+            `Manual wallet override saved.\n` +
+            `Discord ID: \`${discordId}\`\n` +
+            `Wallet: \`${walletAddress}\`\n` +
+            `DRIP User ID: \`${dripUserId}\`\n` +
+            `Status: DRIP verified (manual override).\n` +
+            `${syncSummary}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'disconnectuser') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const discordId = String(interaction.options.getString('discord_id', true) || '').trim();
+        const walletInput = String(interaction.options.getString('wallet', true) || '').trim();
+        const walletAddress = normalizeEthAddress(walletInput);
+
+        if (!/^\d{16,20}$/.test(discordId)) {
+          await interaction.editReply({ content: 'Invalid Discord ID.' });
+          return;
+        }
+        if (!walletAddress) {
+          await interaction.editReply({ content: 'Invalid wallet address.' });
+          return;
+        }
+
+        const removed = await deleteWalletLink(interaction.guild.id, discordId, walletAddress);
+        if (!removed) {
+          await interaction.editReply({
+            content:
+              `No linked wallet found for that user.\n` +
+              `Discord ID: \`${discordId}\`\n` +
+              `Wallet: \`${walletAddress}\``
+          });
+          return;
+        }
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Override',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Action: /disconnectuser\n` +
+            `Target: <@${discordId}>\n` +
+            `Wallet: \`${walletAddress}\``
+        });
+
+        let syncSummary = 'Role sync skipped (member not found in this server).';
+        try {
+          const member = await interaction.guild.members.fetch(discordId);
+          const links = await getWalletLinks(interaction.guild.id, discordId);
+          const remainingAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+          const sync = await syncHolderRoles(member, remainingAddresses);
+          await postRoleSyncFailures(interaction.guild, discordId, sync, 'admin /disconnectuser');
+          syncSummary =
+            `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}). ` +
+            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}`;
+        } catch (err) {
+          await postAdminSystemLog({
+            guild: interaction.guild,
+            category: 'Role Sync Failure',
+            message:
+              `User: <@${discordId}>\n` +
+              `Context: admin /disconnectuser\n` +
+              `Reason: ${String(err?.message || err || '').slice(0, 500)}`
+          });
+        }
+
+        await interaction.editReply({
+          content:
+            `Manual wallet disconnect complete.\n` +
+            `Discord ID: \`${discordId}\`\n` +
+            `Wallet: \`${walletAddress}\`\n` +
+            `${syncSummary}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'listuserwallets') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const discordId = String(interaction.options.getString('discord_id', true) || '').trim();
+        if (!/^\d{16,20}$/.test(discordId)) {
+          await interaction.editReply({ content: 'Invalid Discord ID.' });
+          return;
+        }
+        const links = await getWalletLinks(interaction.guild.id, discordId);
+        const claimedToday = await hasClaimedToday(interaction.guild.id, discordId);
+        const streak = await getClaimStreakBeforeToday(interaction.guild.id, discordId);
+        if (!links.length) {
+          await interaction.editReply({
+            content:
+              `No linked wallets found.\n` +
+              `Discord ID: \`${discordId}\`\n` +
+              `Claimed today: ${claimedToday ? 'yes' : 'no'}\n` +
+              `Current streak if they claim today: ${streak + 1}`
+          });
+          return;
+        }
+        const lines = links.map((w, i) =>
+          `${i + 1}. \`${w.wallet_address}\` | ${w.verified ? 'verified' : 'unverified'} | DRIP: \`${w.drip_member_id || 'none'}\``
+        );
+        await interaction.editReply({
+          content:
+            `Wallet status for <@${discordId}>:\n` +
+            `Claimed today: ${claimedToday ? 'yes' : 'no'}\n` +
+            `Current streak if they claim today: ${streak + 1}\n` +
+            `${lines.join('\n')}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'healthcheck') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const settings = await getGuildSettings(interaction.guild.id);
+        const holderRules = await getHolderRules(interaction.guild.id);
+        const traitRules = await getTraitRoleRules(interaction.guild.id);
+        const me = interaction.guild.members.me;
+        const canManageRoles = Boolean(me?.permissions?.has(PermissionFlagsBits.ManageRoles));
+        const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
+        const receiptChannel = await interaction.guild.channels.fetch(receiptChannelId).catch(() => null);
+        const adminLogChannel = await interaction.guild.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
+        const missingRoles = [];
+        const blockedRoles = [];
+        for (const r of [...holderRules, ...traitRules]) {
+          const role = interaction.guild.roles.cache.get(r.role_id);
+          if (!role) {
+            missingRoles.push(r.role_name || r.role_id);
+            continue;
+          }
+          if (!role.editable) blockedRoles.push(role.name);
+        }
+        const dripReady = Boolean(settings?.drip_api_key && settings?.drip_realm_id && settings?.currency_id);
+        await interaction.editReply({
+          content:
+            `Health Check\n` +
+            `- DRIP configured: ${dripReady ? 'yes' : 'no'}\n` +
+            `- Receipt channel reachable: ${receiptChannel?.isTextBased() ? 'yes' : 'no'} (\`${receiptChannelId}\`)\n` +
+            `- Admin log channel reachable: ${adminLogChannel?.isTextBased() ? 'yes' : 'no'} (\`${ADMIN_LOG_CHANNEL_ID}\`)\n` +
+            `- Bot can manage roles: ${canManageRoles ? 'yes' : 'no'}\n` +
+            `- Holder rules: ${holderRules.length}\n` +
+            `- Trait rules: ${traitRules.length}\n` +
+            `- Missing roles: ${missingRoles.length ? missingRoles.join(', ') : 'none'}\n` +
+            `- Unmanageable roles: ${blockedRoles.length ? blockedRoles.join(', ') : 'none'}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'info') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const settings = await getGuildSettings(interaction.guild.id);
+        await interaction.reply({
+          embeds: infoEmbeds(interaction.guild.name, settings),
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'info-user') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const settings = await getGuildSettings(interaction.guild.id);
+        await interaction.reply({
+          embeds: infoUserEmbeds(interaction.guild.name, settings)
+        });
+        return;
+      }
       return;
     }
 
@@ -1728,7 +2609,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'No wallets connected yet.', flags: 64 });
           return;
         }
-        const lines = links.map((w, i) => `${i + 1}. \`${w.wallet_address}\` - https://etherscan.io/address/${w.wallet_address}`);
+        const lines = links.map((w, i) => `${i + 1}. \`${w.wallet_address}\` - ${w.verified ? 'DRIP verified' : 'DRIP verification pending'} - https://etherscan.io/address/${w.wallet_address}`);
         await interaction.reply({
           content: `Connected wallet(s):\n${lines.join('\n')}`,
           flags: 64
@@ -1815,7 +2696,50 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.customId === 'setup_add_collection' || interaction.customId === 'setup_add_collection_from_rule') {
+      if (interaction.customId === 'setup_add_trait_rule') {
+        const collections = await getHolderCollections(interaction.guild.id);
+        if (!collections.length) {
+          const addBtnRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('setup_add_collection_from_trait_rule').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
+          );
+          await interaction.reply({
+            content: 'No collections found. Add one to continue.',
+            components: [addBtnRow],
+            flags: 64
+          });
+          return;
+        }
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        globalThis.__PENDING_TRAIT_ROLE_RULES.set(key, {
+          contractAddress: null,
+          collectionName: null,
+          traitCategory: null,
+          traitValue: null,
+          createdAt: Date.now()
+        });
+        const options = collections.slice(0, 25).map((c) => ({
+          label: String(c.name).slice(0, 100),
+          value: c.contract_address,
+          description: String(c.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_add_trait_rule_collection_select')
+            .setPlaceholder('Select collection')
+            .addOptions(options)
+        );
+        const addBtnRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('setup_add_collection_from_trait_rule').setLabel('Add Collection').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.reply({
+          content: 'Select collection for trait role rule. If not listed, add it below.',
+          components: [row, addBtnRow],
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_add_collection' || interaction.customId === 'setup_add_collection_from_rule' || interaction.customId === 'setup_add_collection_from_trait_rule') {
         const modal = new ModalBuilder().setCustomId('setup_add_collection_modal').setTitle('Add Collection');
         modal.addComponents(
           new ActionRowBuilder().addComponents(
@@ -1868,6 +2792,27 @@ client.on('interactionCreate', async (interaction) => {
           components: [row],
           flags: 64
         });
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_trait_rule') {
+        const traitRules = await getTraitRoleRules(interaction.guild.id);
+        if (!traitRules.length) {
+          await interaction.reply({ content: 'No trait role rules to remove.', flags: 64 });
+          return;
+        }
+        const options = traitRules.slice(0, 25).map((r) => ({
+          label: `${r.role_name} (${r.trait_category || 'any'}:${r.trait_value})`.slice(0, 100),
+          value: String(r.id),
+          description: String(r.contract_address).slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_remove_trait_rule_select')
+            .setPlaceholder('Select a trait role rule to remove')
+            .addOptions(options)
+        );
+        await interaction.reply({ content: 'Select the trait role rule to remove:', components: [row], flags: 64 });
         return;
       }
 
@@ -1941,7 +2886,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_receipt_channel' || interaction.customId === 'setup_points_label' || interaction.customId === 'setup_payout_amount') {
+      if (interaction.customId === 'setup_drip_key' || interaction.customId === 'setup_client_id' || interaction.customId === 'setup_realm_id' || interaction.customId === 'setup_currency_id' || interaction.customId === 'setup_receipt_channel' || interaction.customId === 'setup_points_label' || interaction.customId === 'setup_payout_amount' || interaction.customId === 'setup_claim_streak_bonus') {
         const fieldMap = {
           setup_drip_key: ['setup_drip_key_modal', 'DRIP API Key', 'drip_api_key', 'API key'],
           setup_client_id: ['setup_client_id_modal', 'DRIP Client ID', 'drip_client_id', 'Client ID'],
@@ -1950,6 +2895,7 @@ client.on('interactionCreate', async (interaction) => {
           setup_receipt_channel: ['setup_receipt_channel_modal', 'Receipt Channel ID', 'receipt_channel_id', 'Channel ID'],
           setup_points_label: ['setup_points_label_modal', 'Points Label', 'points_label', 'Points label (e.g. UglyPoints)'],
           setup_payout_amount: ['setup_payout_amount_modal', 'Payout Amount', 'payout_amount', 'Number'],
+          setup_claim_streak_bonus: ['setup_claim_streak_bonus_modal', 'Claim Streak Bonus', 'claim_streak_bonus', 'Flat bonus amount (0 disables)'],
         };
         const [id, title, field, label] = fieldMap[interaction.customId];
         const modal = new ModalBuilder().setCustomId(id).setTitle(title);
@@ -1981,6 +2927,14 @@ client.on('interactionCreate', async (interaction) => {
         const settings = await getGuildSettings(interaction.guild.id);
         const result = await verifyDripConnection(settings, interaction.user.id);
         if (!result.ok) {
+          await postAdminSystemLog({
+            guild: interaction.guild,
+            category: 'DRIP Failure',
+            message:
+              `User: <@${interaction.user.id}>\n` +
+              `Context: setup verify DRIP\n` +
+              `Reason: ${String(result.reason || 'unknown').slice(0, 500)}`
+          });
           await interaction.editReply({
             content:
               `DRIP verification failed.\n` +
@@ -2039,6 +2993,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'setup_view') {
         const settings = await getGuildSettings(interaction.guild.id);
         const rules = await getHolderRules(interaction.guild.id);
+        const traitRules = await getTraitRoleRules(interaction.guild.id);
         const collections = await getHolderCollections(interaction.guild.id);
         const mappings = await getGuildPointMappings(interaction.guild.id);
         const mappingLines = [...mappings.keys()].map((c) => `- ${labelForContract(c)}: ${c}`);
@@ -2053,13 +3008,16 @@ client.on('interactionCreate', async (interaction) => {
             `- Receipt Channel ID: ${settings?.receipt_channel_id || RECEIPT_CHANNEL_ID}\n` +
             `- Points Label: ${getPointsLabel(settings)}\n` +
             `- Payout Type: ${settings?.payout_type || 'per_up'}\n` +
-            `- Payout Amount: ${settings?.payout_amount || 1}\n\n` +
+            `- Payout Amount: ${settings?.payout_amount || 1}\n` +
+            `- Claim Streak Bonus: ${settings?.claim_streak_bonus || 0}\n\n` +
             `Collections (${collections.length}):\n` +
             `${collections.map(c => `- ${c.name}: ${c.contract_address}`).join('\n') || '- none'}\n\n` +
             `Points Mappings (${mappings.size}):\n` +
             `${mappingLines.join('\n') || '- none'}\n\n` +
             `Rules (${rules.length}):\n` +
-            `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}`
+            `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}\n\n` +
+            `Trait Rules (${traitRules.length}):\n` +
+            `${traitRules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.trait_category || 'any'}:${r.trait_value})`).join('\n') || '- none'}`
         });
         return;
       }
@@ -2091,6 +3049,36 @@ client.on('interactionCreate', async (interaction) => {
       globalThis.__PENDING_HOLDER_RULES.delete(key);
       await interaction.update({
         content: `Rule added for role **${role.name}** on \`${pending.contractAddress}\` (${pending.minTokens}-${pending.maxTokens ?? '∞'}).`,
+        components: []
+      });
+      return;
+    }
+
+    if (interaction.isRoleSelectMenu() && interaction.customId === 'setup_add_trait_rule_role_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      const pending = globalThis.__PENDING_TRAIT_ROLE_RULES.get(key);
+      if (!pending || !pending.contractAddress || !pending.traitValue) {
+        await interaction.reply({ content: 'No pending trait role rule found. Click "Add Trait Role" again.', flags: 64 });
+        return;
+      }
+      const roleId = interaction.values?.[0];
+      if (!roleId) {
+        await interaction.reply({ content: 'No role selected.', flags: 64 });
+        return;
+      }
+      const role = await addTraitRoleRule(interaction.guild, {
+        roleId,
+        contractAddress: pending.contractAddress,
+        traitCategory: pending.traitCategory,
+        traitValue: pending.traitValue
+      });
+      globalThis.__PENDING_TRAIT_ROLE_RULES.delete(key);
+      await interaction.update({
+        content: `Trait rule added for role **${role.name}** on \`${pending.contractAddress}\` (${pending.traitCategory || 'any'}:${pending.traitValue}).`,
         components: []
       });
       return;
@@ -2193,6 +3181,50 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_add_trait_rule_collection_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      const pending = globalThis.__PENDING_TRAIT_ROLE_RULES.get(key);
+      if (!pending) {
+        await interaction.update({ content: 'No pending trait role rule found. Click "Add Trait Role" again.', components: [] });
+        return;
+      }
+      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
+      if (!contractAddress) {
+        await interaction.update({ content: 'Invalid collection selection.', components: [] });
+        return;
+      }
+      const collections = await getHolderCollections(interaction.guild.id);
+      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      pending.contractAddress = contractAddress;
+      pending.collectionName = selected?.name || labelForContract(contractAddress);
+      globalThis.__PENDING_TRAIT_ROLE_RULES.set(key, pending);
+      const modal = new ModalBuilder().setCustomId('setup_add_trait_rule_modal').setTitle('Set Trait Role Rule');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('trait_category')
+            .setLabel('Trait category (optional)')
+            .setRequired(false)
+            .setPlaceholder('Type, Background, Head...')
+            .setStyle(TextInputStyle.Short)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('trait_value')
+            .setLabel('Trait value')
+            .setRequired(true)
+            .setPlaceholder('Pikachugly, Green Laser...')
+            .setStyle(TextInputStyle.Short)
+        ),
+      );
+      await interaction.showModal(modal);
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'setup_points_mapping_collection_select') {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -2281,6 +3313,28 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_remove_trait_rule_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const ruleId = Number(interaction.values?.[0]);
+      if (!Number.isInteger(ruleId) || ruleId <= 0) {
+        await interaction.update({ content: 'Invalid rule selection.', components: [] });
+        return;
+      }
+      const removed = await disableTraitRoleRule(interaction.guild.id, ruleId);
+      if (!removed) {
+        await interaction.update({ content: 'Trait rule not found or already removed.', components: [] });
+        return;
+      }
+      await interaction.update({
+        content: `Removed trait rule: **${removed.role_name}** on \`${removed.contract_address}\` (${removed.trait_category || 'any'}:${removed.trait_value}).`,
+        components: []
+      });
+      return;
+    }
+
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'verify_connect_modal') {
         const raw = interaction.fields.getTextInputValue('wallet_address');
@@ -2292,32 +3346,36 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ flags: 64 });
 
         const settings = await getGuildSettings(interaction.guild.id);
-        let dripMemberId = null;
-        let dripStatus = 'DRIP profile check unavailable (not configured).';
-        if (settings?.drip_api_key && settings?.drip_realm_id) {
-          try {
-            const resolved = await resolveDripMemberForDiscordUser(
-              settings.drip_realm_id,
-              interaction.user.id,
-              addresses[0],
-              settings
-            );
-            const dripMember = resolved.member;
-            dripMemberId = dripMember?.id || null;
-            dripStatus = dripMemberId
-              ? 'DRIP profile linked.'
-              : 'DRIP profile not linked in this realm yet.';
-          } catch (err) {
-            console.error('DRIP lookup during connect failed:', err);
-            dripStatus = 'DRIP profile check is temporarily unavailable.';
-          }
-        }
-
         const existing = await getWalletLinks(interaction.guild.id, interaction.user.id);
         const existingSet = new Set(existing.map((x) => String(x.wallet_address).toLowerCase()));
         const added = [];
+        const verificationResults = [];
+        const blockedByOtherUser = [];
+        let primaryDripMemberId = null;
         for (const addr of addresses) {
-          await setWalletLink(interaction.guild.id, interaction.user.id, addr, false, dripMemberId);
+          const currentOwner = await getWalletOwnerLink(interaction.guild.id, addr);
+          if (currentOwner && String(currentOwner.discord_id) !== String(interaction.user.id)) {
+            blockedByOtherUser.push({ walletAddress: addr, discordId: String(currentOwner.discord_id) });
+            await postAdminSystemLog({
+              guild: interaction.guild,
+              category: 'Wallet Link Issue',
+              message:
+                `Duplicate wallet link blocked.\n` +
+                `Actor: <@${interaction.user.id}>\n` +
+                `Wallet: \`${addr}\`\n` +
+                `Already linked to: <@${currentOwner.discord_id}>`
+            });
+            continue;
+          }
+          const verification = await verifyWalletViaDrip(
+            settings?.drip_realm_id,
+            interaction.user.id,
+            addr,
+            settings
+          );
+          if (!primaryDripMemberId && verification.dripMemberId) primaryDripMemberId = verification.dripMemberId;
+          verificationResults.push({ walletAddress: addr, ...verification });
+          await setWalletLink(interaction.guild.id, interaction.user.id, addr, verification.verified, verification.dripMemberId);
           if (!existingSet.has(addr)) {
             added.push(addr);
             await postWalletReceipt(interaction.guild, settings, interaction.user.id, 'Connected', addr);
@@ -2327,12 +3385,63 @@ client.on('interactionCreate', async (interaction) => {
         const allAddresses = allLinks.map((x) => x.wallet_address);
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, allAddresses);
+        await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet connect');
+        const verifiedCount = verificationResults.filter((x) => x.verified).length;
+        const unverifiedResults = verificationResults.filter((x) => !x.verified);
+        const dripFailures = unverifiedResults.filter((x) => /temporarily unavailable/i.test(String(x.reason || '')));
+        for (const item of dripFailures) {
+          await postAdminSystemLog({
+            guild: interaction.guild,
+            category: 'DRIP Failure',
+            message:
+              `User: <@${interaction.user.id}>\n` +
+              `Context: wallet connect\n` +
+              `Wallet: \`${item.walletAddress}\`\n` +
+              `Reason: ${String(item.reason || '').slice(0, 500)}`
+          });
+        }
+        if (primaryDripMemberId) {
+          for (const row of allLinks) {
+            await setWalletLink(
+              interaction.guild.id,
+              interaction.user.id,
+              row.wallet_address,
+              Boolean(row.verified),
+              row.drip_member_id || primaryDripMemberId
+            );
+          }
+        }
+        if (unverifiedResults.length && sync.granted?.length) {
+          for (const item of unverifiedResults) {
+            await postAdminVerificationFlag(
+              interaction.guild,
+              interaction.user.id,
+              item.walletAddress,
+              item.reason,
+              sync.granted
+            );
+          }
+        }
+        const dripStatus = unverifiedResults.length
+          ? (
+              `DRIP wallet verification pending for ${unverifiedResults.length} wallet${unverifiedResults.length === 1 ? '' : 's'}.\n` +
+              `To verify, connect the same wallet to your DRIP profile in this realm, then reconnect here.\n` +
+              `If you need help, open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}>.\n` +
+              `Reason: ${unverifiedResults[0].reason}`
+            )
+          : (verifiedCount
+              ? `DRIP verified ${verifiedCount} wallet${verifiedCount === 1 ? '' : 's'}.`
+              : 'DRIP profile check unavailable.');
+        const blockedText = blockedByOtherUser.length
+          ? `\nBlocked duplicate wallet(s): ${blockedByOtherUser.map((x) => `\`${x.walletAddress}\``).join(', ')}`
+          : '';
         await interaction.editReply({
           content:
             `Wallet connect processed.\n` +
             `Added: ${added.length}\n` +
             `Total linked wallets: ${allAddresses.length}\n` +
             `${dripStatus}\n` +
+            `${blockedText}\n` +
             `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
             `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}`
         });
@@ -2372,8 +3481,18 @@ client.on('interactionCreate', async (interaction) => {
           const remainingLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
           const remainingAddresses = remainingLinks.map((x) => x.wallet_address);
           const sync = await syncHolderRoles(member, remainingAddresses);
+          await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet disconnect');
           removedRoles = sync.changed;
-        } catch {}
+        } catch (err) {
+          await postAdminSystemLog({
+            guild: interaction.guild,
+            category: 'Role Sync Failure',
+            message:
+              `User: <@${interaction.user.id}>\n` +
+              `Context: wallet disconnect\n` +
+              `Reason: ${String(err?.message || err || '').slice(0, 500)}`
+          });
+        }
         await interaction.editReply({
           content:
             `Disconnected wallet(s): ${removedWallets.length}\n` +
@@ -2483,6 +3602,52 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.customId === 'setup_add_trait_rule_modal') {
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
+        const pending = globalThis.__PENDING_TRAIT_ROLE_RULES.get(key);
+        if (!pending?.contractAddress) {
+          await interaction.reply({ content: 'No pending collection selection found. Click "Add Trait Role" again.', flags: 64 });
+          return;
+        }
+
+        const traitCategoryRaw = String(interaction.fields.getTextInputValue('trait_category') || '').trim();
+        const traitValueRaw = String(interaction.fields.getTextInputValue('trait_value') || '').trim();
+        if (!traitValueRaw) {
+          await interaction.reply({ content: 'Trait value is required.', flags: 64 });
+          return;
+        }
+
+        const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
+        const table = hpTableForContract(pending.contractAddress, guildPointMappings);
+        const matched = findMatchingTraitDefinition(table, traitCategoryRaw, traitValueRaw);
+        if (!matched) {
+          await interaction.reply({
+            content:
+              `Trait not found in available traits for this collection.\n` +
+              `Use a trait value already present in the built-in table or the configured points mapping.`,
+            flags: 64
+          });
+          return;
+        }
+
+        pending.traitCategory = matched.category;
+        pending.traitValue = matched.trait;
+        globalThis.__PENDING_TRAIT_ROLE_RULES.set(key, pending);
+        const row = new ActionRowBuilder().addComponents(
+          new RoleSelectMenuBuilder()
+            .setCustomId('setup_add_trait_rule_role_select')
+            .setPlaceholder('Select the trait role')
+            .setMinValues(1)
+            .setMaxValues(1)
+        );
+        await interaction.reply({
+          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`) when a user owns trait ${matched.category}:${matched.trait}:`,
+          components: [row],
+          flags: 64
+        });
+        return;
+      }
+
       if (interaction.customId === 'setup_add_collection_modal') {
         const name = String(interaction.fields.getTextInputValue('collection_name') || '').trim();
         const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
@@ -2567,14 +3732,15 @@ client.on('interactionCreate', async (interaction) => {
         setup_receipt_channel_modal: 'receipt_channel_id',
         setup_points_label_modal: 'points_label',
         setup_payout_amount_modal: 'payout_amount',
+        setup_claim_streak_bonus_modal: 'claim_streak_bonus',
       };
       const field = settingModalMap[interaction.customId];
       if (field) {
         const value = interaction.fields.getTextInputValue(field).trim();
-        if (field === 'payout_amount') {
+        if (field === 'payout_amount' || field === 'claim_streak_bonus') {
           const n = Number(value);
           if (!Number.isFinite(n) || n < 0) {
-            await interaction.reply({ content: 'Payout amount must be a non-negative number.', flags: 64 });
+            await interaction.reply({ content: `${field === 'payout_amount' ? 'Payout amount' : 'Claim streak bonus'} must be a non-negative number.`, flags: 64 });
             return;
           }
           await upsertGuildSetting(interaction.guild.id, field, n);
@@ -2587,6 +3753,19 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     console.error('❌ Verification interaction error:', err);
+    const msg = String(err?.message || err || '').trim();
+    await postAdminSystemLog({
+      guild: interaction.guild || null,
+      guildId: interaction.guild?.id || null,
+      category:
+        /DRIP/i.test(msg) ? 'DRIP Failure'
+        : /wallet|claims|database|relation|column/i.test(msg) ? 'Wallet Link Issue'
+        : 'Interaction Failure',
+      message:
+        `User: ${interaction.user ? `<@${interaction.user.id}>` : 'unknown'}\n` +
+        `Context: interaction handler\n` +
+        `Reason: ${msg.slice(0, 500)}`
+    });
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ content: '⚠️ Something went wrong handling that action.', flags: 64 }).catch(() => {});
     } else {
@@ -3218,6 +4397,40 @@ function computeHpFromTraits(groupedTraits, table = HP_TABLE) {
     }
   }
   return { total, per };
+}
+
+function findMatchingTraitDefinition(table, traitCategory, traitValue) {
+  const desiredValue = String(traitValue || '').trim().toLowerCase();
+  const desiredCategory = String(traitCategory || '').trim().toLowerCase();
+  if (!desiredValue || !table || typeof table !== 'object') return null;
+
+  for (const [category, traits] of Object.entries(table)) {
+    if (!traits || typeof traits !== 'object') continue;
+    if (desiredCategory && String(category).trim().toLowerCase() !== desiredCategory) continue;
+    for (const trait of Object.keys(traits)) {
+      if (String(trait).trim().toLowerCase() === desiredValue) {
+        return { category, trait };
+      }
+    }
+  }
+  return null;
+}
+
+function hasTraitMatch(groupedTraits, traitCategory, traitValue) {
+  const desiredValue = String(traitValue || '').trim().toLowerCase();
+  const desiredCategory = String(traitCategory || '').trim().toLowerCase();
+  if (!desiredValue || !groupedTraits || typeof groupedTraits !== 'object') return false;
+
+  if (desiredCategory) {
+    const entries = Array.isArray(groupedTraits[traitCategory]) ? groupedTraits[traitCategory] : [];
+    return entries.some((t) => String(t?.value || '').trim().toLowerCase() === desiredValue);
+  }
+
+  for (const entries of Object.values(groupedTraits)) {
+    if (!Array.isArray(entries)) continue;
+    if (entries.some((t) => String(t?.value || '').trim().toLowerCase() === desiredValue)) return true;
+  }
+  return false;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
