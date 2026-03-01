@@ -2216,13 +2216,20 @@ async function handleClaim(interaction) {
       [guildId, interaction.user.id, amount, walletAddresses.join(','), receiptChannel?.id || null, receiptMessage?.id || null]
     );
 
-    const streakSummary = streakBonusApplied > 0
-      ? ` Streak: **${streakAfterClaim}** days (+${streakBonusApplied} $CHARM bonus).`
-      : ` Streak: **${streakAfterClaim}** day${streakAfterClaim === 1 ? '' : 's'}.`;
-    const verificationSummary = unverifiedPenaltyAmount > 0
-      ? ` You were docked **50%** on unverified wallet rewards. Verify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.`
+    const streakLine = streakBonusApplied > 0
+      ? `Streak + Reward: ${streakAfterClaim} days (+${streakBonusApplied} $CHARM bonus)\n`
       : '';
-    await respondInteraction(interaction, { content: `Claim complete. You received **${amount} $CHARM**.${streakSummary}${verificationSummary}${receiptWarning}`, flags: 64 });
+    const verificationLine = unverifiedPenaltyAmount > 0
+      ? `Unverified wallet dock: -${Math.floor(unverifiedPenaltyAmount)} $CHARM (50%)\nVerify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.\n`
+      : '';
+    await respondInteraction(interaction, {
+      content:
+        `🧾 Claim Receipt\n` +
+        `${verificationLine}` +
+        `${streakLine}` +
+        `Reward: **${amount} $CHARM**${receiptWarning}`,
+      flags: 64
+    });
   } catch (err) {
     console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
