@@ -1632,7 +1632,8 @@ function verificationMenuEmbed(guildName) {
       `Use the buttons below:\n` +
       `• **Connect Wallet**: link one or more wallets for holder verification.\n` +
       `• **Disconnect Wallet**: unlink one specific wallet or all wallets.\n` +
-      `• **Check Wallets Connected**: view all wallets currently linked.`
+      `• **Check Wallets Connected**: view all wallets currently linked.\n` +
+      `• **Check DRIP Status**: confirm your Discord + wallet match in DRIP and get fix steps if not.`
     )
     .setImage('https://i.imgur.com/HxdVgDc.png')
     .setColor(0x7ADDC0);
@@ -1643,6 +1644,7 @@ function verificationButtons() {
     new ButtonBuilder().setCustomId('verify_connect').setLabel('Connect Wallet').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect Wallet').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('verify_wallets').setLabel('Check Wallets Connected').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('verify_drip_status').setLabel('Check DRIP Status').setStyle(ButtonStyle.Success),
   );
 }
 
@@ -1898,6 +1900,7 @@ function infoUserEmbeds(guildName, settings = null) {
           name: 'Useful Buttons',
           value:
             `• Connect Wallet\n` +
+            `• Check DRIP Status\n` +
             `• Disconnect Wallet\n` +
             `• Check Wallets Connected\n` +
             `• Claim Rewards\n` +
@@ -2170,6 +2173,96 @@ async function verifyWalletViaDrip(realmId, discordId, walletAddress, settings) 
     out.reason = `DRIP verification is temporarily unavailable: ${String(err?.message || err || '').slice(0, 180)}`;
     return out;
   }
+}
+
+async function handleDripStatusCheck(interaction) {
+  const guildId = interaction.guild.id;
+  const settings = await getGuildSettings(guildId);
+  const links = await getWalletLinks(guildId, interaction.user.id);
+  const walletAddresses = links.map((x) => normalizeEthAddress(x.wallet_address)).filter(Boolean);
+
+  if (!walletAddresses.length) {
+    await interaction.reply({
+      content:
+        `No wallets connected yet.\n` +
+        `1. Click **Connect Wallet** here first.\n` +
+        `2. Then click **Check DRIP Status** again.\n` +
+        `3. If you also need DRIP setup, open https://app.drip.re/user and add the same wallet to your DRIP profile.`,
+      flags: 64
+    });
+    return;
+  }
+
+  if (!settings?.drip_api_key || !settings?.drip_realm_id) {
+    await interaction.reply({
+      content:
+        `DRIP is not configured for this server yet.\n` +
+        `A server admin needs to set the DRIP API key and realm before wallet verification can be checked.`,
+      flags: 64
+    });
+    return;
+  }
+
+  await interaction.deferReply({ flags: 64 });
+
+  const checks = await mapLimit(links, 3, async (link) => {
+    const walletAddress = normalizeEthAddress(link.wallet_address);
+    if (!walletAddress) {
+      return {
+        walletAddress: String(link.wallet_address || ''),
+        verified: false,
+        reason: 'Wallet address is invalid or could not be normalized.',
+        dripMemberId: null,
+      };
+    }
+    const result = await verifyWalletViaDrip(
+      settings.drip_realm_id,
+      interaction.user.id,
+      walletAddress,
+      settings
+    );
+    return {
+      walletAddress,
+      verified: Boolean(result.verified),
+      reason: result.reason,
+      dripMemberId: result.dripMemberId || null,
+    };
+  });
+
+  const verified = checks.filter((x) => x.verified);
+  const pending = checks.filter((x) => !x.verified);
+
+  if (!pending.length) {
+    const lines = verified.map((x, i) =>
+      `${i + 1}. \`${x.walletAddress}\` | DRIP verified | member: \`${x.dripMemberId || 'found'}\``
+    );
+    await interaction.editReply({
+      content:
+        `DRIP status: verified.\n` +
+        `Your linked wallet${verified.length === 1 ? ' is' : 's are'} connected to your DRIP profile in this realm.\n` +
+        `${lines.join('\n')}`
+    });
+    return;
+  }
+
+  const pendingLines = pending.map((x, i) =>
+    `${i + 1}. \`${x.walletAddress}\` | ${x.reason}`
+  );
+  const verifiedSummary = verified.length
+    ? `\nAlready verified here:\n${verified.map((x) => `• \`${x.walletAddress}\``).join('\n')}\n`
+    : '\n';
+
+  await interaction.editReply({
+    content:
+      `DRIP status needs attention.${verifiedSummary}` +
+      `Wallets still not verified in DRIP:\n${pendingLines.join('\n')}\n\n` +
+      `To fix this:\n` +
+      `1. Open https://app.drip.re/user\n` +
+      `2. Sign in with the same Discord account: <@${interaction.user.id}>\n` +
+      `3. Open your profile and connect the same wallet address${pending.length === 1 ? '' : 'es'} shown above\n` +
+      `4. Make sure the wallet is connected in this server's DRIP realm (\`${settings.drip_realm_id}\`)\n` +
+      `5. Come back here and click **Check DRIP Status** again, or reconnect your wallet here to refresh verification`
+  });
 }
 
 async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings) {
@@ -3024,6 +3117,11 @@ client.on('interactionCreate', async (interaction) => {
           content: `Connected wallet(s):\n${lines.join('\n')}`,
           flags: 64
         });
+        return;
+      }
+
+      if (interaction.customId === 'verify_drip_status') {
+        await handleDripStatusCheck(interaction);
         return;
       }
 
