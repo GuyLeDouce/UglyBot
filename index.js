@@ -2835,14 +2835,12 @@ client.on('interactionCreate', async (interaction) => {
           : '';
 
         const embed = new EmbedBuilder()
-          .setTitle(`User's Holdings`)
+          .setTitle(`${interaction.user.username}'s Holdings`)
           .setColor(0xB0DEEE)
           .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
           .setDescription(
             `Collections connected to this server across all linked wallets:\n${collectionLines}\n\n` +
             `Daily earnings: **${rewardQuote.dailyReward} $CHARM**${penaltyLine}\n` +
-            `Total ${pointsLabel}: **${rewardQuote.totalUp}**\n` +
-            `Total NFTs: **${rewardQuote.totalNfts}**\n` +
             `DRIP $CHARM held: **${dripBalanceText}**`
           );
 
