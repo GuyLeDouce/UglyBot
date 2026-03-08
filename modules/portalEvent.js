@@ -16,6 +16,7 @@ const DEFAULT_MAX_TOKEN_ID = Number(process.env.PORTAL_MAX_SQUIG_TOKEN_ID || 100
 const SQUIGS_MINT_URL = 'https://squigs.io/';
 const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
 const SQUIGS_IMAGE_TEMPLATE = 'https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default';
+const PORTAL_RECEIPT_CHANNEL_ID = '1477463175665287410';
 
 let deps = null;
 
@@ -668,6 +669,15 @@ async function handlePortalSelect(interaction) {
   if (safeImageUrl) embed.setImage(safeImageUrl);
 
   await interaction.channel.send({ embeds: [embed] });
+  try {
+    const receiptChannel = deps.client.channels.cache.get(PORTAL_RECEIPT_CHANNEL_ID)
+      || await deps.client.channels.fetch(PORTAL_RECEIPT_CHANNEL_ID);
+    if (receiptChannel?.isTextBased()) {
+      await receiptChannel.send(
+        `<@${interaction.user.id}> was rewarded ${currentPortal.reward} $CHARM for helping stabilize the portal.`
+      );
+    }
+  } catch {}
   await interaction.editReply({ content: `Portal stabilized. Sent ${currentPortal.reward} $CHARM.` });
 }
 
