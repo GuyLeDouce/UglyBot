@@ -112,6 +112,24 @@ function flattenTraitTable(table) {
   return out;
 }
 
+function findMappedTraitPoint(table, traitType, traitValue) {
+  const desiredType = String(traitType || '').trim().toLowerCase();
+  const desiredValue = String(traitValue || '').trim().toLowerCase();
+  if (!desiredType || !desiredValue || !table || typeof table !== 'object') return null;
+
+  for (const [category, traits] of Object.entries(table)) {
+    if (String(category || '').trim().toLowerCase() !== desiredType) continue;
+    if (!traits || typeof traits !== 'object') continue;
+    for (const [trait, points] of Object.entries(traits)) {
+      if (String(trait || '').trim().toLowerCase() !== desiredValue) continue;
+      const p = Number(points);
+      if (!Number.isFinite(p) || p <= 0) return null;
+      return { category, trait: String(trait), uglyPoints: Math.floor(p) };
+    }
+  }
+  return null;
+}
+
 function choosePortalTraits(traitPool) {
   const unique = new Map();
   for (const entry of traitPool) {
@@ -132,6 +150,72 @@ function choosePortalTraits(traitPool) {
   const traitB = pickRandom(remaining);
   if (!traitB) return { type: 'single', traitA, traitB: null, reward: traitA.uglyPoints };
   return { type: 'dual', traitA, traitB, reward: traitA.uglyPoints + traitB.uglyPoints };
+}
+
+async function choosePortalFromRealSquig(table) {
+  const tries = Math.max(80, Number(process.env.PORTAL_REAL_SQUIG_SCAN_ATTEMPTS || 220));
+  for (let i = 0; i < tries; i++) {
+    const tokenId = String(randomInt(1, DEFAULT_MAX_TOKEN_ID));
+    try {
+      const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
+      const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+      const mapped = [];
+      for (const a of Array.isArray(attrs) ? attrs : []) {
+        const category = String(a?.trait_type || '').trim();
+        const value = String(a?.value || '').trim();
+        if (!category || !value) continue;
+        const m = findMappedTraitPoint(table, category, value);
+        if (!m) continue;
+        mapped.push(m);
+      }
+      if (!mapped.length) continue;
+
+      const byTrait = new Map();
+      for (const m of mapped) {
+        const key = String(m.trait || '').toLowerCase();
+        if (!key || byTrait.has(key)) continue;
+        byTrait.set(key, m);
+      }
+      const unique = [...byTrait.values()];
+      if (!unique.length) continue;
+
+      const wantsDual = Math.random() > SINGLE_TRAIT_CHANCE;
+      const traitA = pickRandom(unique);
+      if (!traitA) continue;
+
+      let type = 'single';
+      let traitB = null;
+      if (wantsDual) {
+        const dualCandidates = unique.filter(
+          (x) => x.trait.toLowerCase() !== traitA.trait.toLowerCase() &&
+            String(x.category || '').toLowerCase() !== String(traitA.category || '').toLowerCase()
+        );
+        if (dualCandidates.length) {
+          traitB = pickRandom(dualCandidates);
+          type = 'dual';
+        }
+      }
+
+      const reward = type === 'dual'
+        ? traitA.uglyPoints + (traitB?.uglyPoints || 0)
+        : traitA.uglyPoints;
+
+      const imageUrl = normalizeImageUrl(
+        meta?.image ||
+        meta?.metadata?.image ||
+        meta?.raw?.metadata?.image ||
+        meta?.tokenUri?.gateway ||
+        meta?.tokenUri?.raw
+      );
+      if (!imageUrl) continue;
+
+      return {
+        portal: { type, traitA, traitB, reward },
+        preview: { tokenId, imageUrl, name: String(meta?.name || `Squig #${tokenId}`) },
+      };
+    } catch {}
+  }
+  return null;
 }
 
 async function resolvePortalChannel() {
@@ -318,17 +402,29 @@ async function triggerPortalEvent(options = {}) {
 
   const guildPointMappings = await deps.getGuildPointMappings(channel.guild.id);
   const squigTable = deps.hpTableForContract(SQUIGS_CONTRACT, guildPointMappings);
-  const traitPool = flattenTraitTable(squigTable);
-  const selected = choosePortalTraits(traitPool);
-  if (!selected) {
-    schedulePortal();
-    return { ok: false, reason: 'No valid traits available for portal event.' };
-  }
+  let selected = null;
+  let preview = null;
 
-  const preview = await findSquigForPreview(
-    selected.traitA.trait,
-    selected.type === 'dual' ? selected.traitB.trait : null
-  );
+  const realSquigChoice = await choosePortalFromRealSquig(squigTable);
+  if (realSquigChoice?.portal && realSquigChoice?.preview) {
+    selected = realSquigChoice.portal;
+    preview = realSquigChoice.preview;
+  } else {
+    const traitPool = flattenTraitTable(squigTable);
+    selected = choosePortalTraits(traitPool);
+    if (!selected) {
+      schedulePortal();
+      return { ok: false, reason: 'No valid traits available for portal event.' };
+    }
+    preview = await findSquigForPreview(
+      selected.traitA.trait,
+      selected.type === 'dual' ? selected.traitB.trait : null
+    );
+    if (!preview?.imageUrl) {
+      schedulePortal();
+      return { ok: false, reason: 'No matching Squig image found for selected portal traits.' };
+    }
+  }
 
   portalActive = true;
   claimedUsers = new Set();
