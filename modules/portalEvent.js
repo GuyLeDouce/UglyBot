@@ -13,6 +13,8 @@ const SINGLE_TRAIT_CHANCE = 0.85;
 const MAX_SELECT_OPTIONS = 25;
 const SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 const DEFAULT_MAX_TOKEN_ID = Number(process.env.PORTAL_MAX_SQUIG_TOKEN_ID || 10000);
+const SQUIGS_MINT_URL = 'https://squigs.io/';
+const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
 
 let deps = null;
 
@@ -179,6 +181,27 @@ function buildPortalButtonRow(disabled = false) {
       .setLabel('STABILIZE PORTAL')
       .setStyle(ButtonStyle.Danger)
       .setDisabled(disabled)
+  );
+}
+
+function buildNoTraitFunnyResponse(portal) {
+  const traitLine = portal?.type === 'dual'
+    ? `${portal?.traitA?.trait} + ${portal?.traitB?.trait}`
+    : `${portal?.traitA?.trait || 'Unknown Trait'}`;
+
+  const lines = [
+    `The portal rejected you. It was looking for **${traitLine}**, but your Squigs are still cooking.`,
+    `Portal scanner result: **no ${traitLine} detected**. The wormhole asks for more chaos.`,
+    `Your Squigs knocked, but the portal only opens for **${traitLine}** this round.`,
+    `The portal sneezed and said: "Bring me **${traitLine}** and maybe we talk."`,
+    `Almost! This portal run needs **${traitLine}** and your current squad missed the vibe check.`,
+  ];
+  const pick = lines[Math.floor(Math.random() * lines.length)];
+  return (
+    `${pick}\n\n` +
+    `Keep collecting:\n` +
+    `Mint: ${SQUIGS_MINT_URL}\n` +
+    `OpenSea: ${SQUIGS_OPENSEA_URL}`
   );
 }
 
@@ -367,7 +390,7 @@ async function handlePortalClaim(interaction) {
 
   const squigs = await fetchEligibleSquigsForUser(links);
   if (!squigs.length) {
-    await interaction.editReply({ content: 'The portal rejected you. No valid Squigs detected.' });
+    await interaction.editReply({ content: buildNoTraitFunnyResponse(currentPortal) });
     return;
   }
 
