@@ -47,12 +47,36 @@ function pickRandom(arr) {
 }
 
 function normalizeImageUrl(input) {
-  const value = String(input || '').trim();
+  if (!input) return null;
+
+  // Some metadata providers return nested objects for tokenUri/image fields.
+  if (typeof input === 'object') {
+    const nested =
+      input.gateway ||
+      input.raw ||
+      input.url ||
+      input.image ||
+      input.href ||
+      null;
+    if (!nested) return null;
+    return normalizeImageUrl(nested);
+  }
+
+  const value = String(input).trim();
   if (!value) return null;
   if (value.startsWith('ipfs://')) {
-    return `https://ipfs.io/ipfs/${value.slice('ipfs://'.length).replace(/^ipfs\//, '')}`;
+    const ipfsUrl = `https://ipfs.io/ipfs/${value.slice('ipfs://'.length).replace(/^ipfs\//, '')}`;
+    try {
+      const parsed = new URL(ipfsUrl);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+    } catch {}
+    return null;
   }
-  return value;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+  } catch {}
+  return null;
 }
 
 function traitValuesFromAttrs(attrs) {
@@ -126,16 +150,16 @@ async function resolvePortalChannel() {
 
 async function findSquigForPreview(requiredTraitA, requiredTraitB = null) {
   assertReady();
-  const tries = Math.max(10, Number(process.env.PORTAL_PREVIEW_SCAN_ATTEMPTS || 45));
+  const randomTries = Math.max(25, Number(process.env.PORTAL_PREVIEW_SCAN_ATTEMPTS || 120));
+  const linearTries = Math.max(100, Number(process.env.PORTAL_PREVIEW_LINEAR_SCAN_ATTEMPTS || 450));
   const candidates = [];
 
-  for (let i = 0; i < tries; i++) {
-    const tokenId = String(randomInt(1, DEFAULT_MAX_TOKEN_ID));
+  const inspectToken = async (tokenId) => {
     try {
       const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
       const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
       const traitValues = traitValuesFromAttrs(attrs);
-      if (!hasRequiredTraits(traitValues, requiredTraitA, requiredTraitB)) continue;
+      if (!hasRequiredTraits(traitValues, requiredTraitA, requiredTraitB)) return;
       const imageUrl = normalizeImageUrl(
         meta?.image ||
         meta?.metadata?.image ||
@@ -143,8 +167,25 @@ async function findSquigForPreview(requiredTraitA, requiredTraitB = null) {
         meta?.tokenUri?.gateway ||
         meta?.tokenUri?.raw
       );
-      candidates.push({ tokenId, imageUrl });
+      const name = String(meta?.name || `Squig #${tokenId}`);
+      candidates.push({ tokenId, imageUrl, name });
     } catch {}
+  };
+
+  for (let i = 0; i < randomTries; i++) {
+    const tokenId = String(randomInt(1, DEFAULT_MAX_TOKEN_ID));
+    await inspectToken(tokenId);
+    if (candidates.length >= 3) break;
+  }
+
+  // Fallback: linear probe from a random start for better hit-rate on rare trait combos.
+  if (!candidates.length) {
+    const start = randomInt(1, DEFAULT_MAX_TOKEN_ID);
+    for (let i = 0; i < linearTries; i++) {
+      const next = ((start + i - 1) % DEFAULT_MAX_TOKEN_ID) + 1;
+      await inspectToken(String(next));
+      if (candidates.length >= 3) break;
+    }
   }
 
   return pickRandom(candidates) || null;
@@ -170,6 +211,10 @@ function buildPortalEmbed(portal, preview) {
 
   if (preview?.imageUrl) {
     embed.setImage(preview.imageUrl);
+    embed.addFields({
+      name: 'Example Squig Match',
+      value: `Squig #${preview.tokenId}\nhttps://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${preview.tokenId}`,
+    });
   }
   return embed;
 }
@@ -423,15 +468,21 @@ async function resolveDripRecipient(interaction, links, settings) {
   const realmId = settings?.drip_realm_id;
   const firstWallet = links.find((x) => x.wallet_address)?.wallet_address || null;
   const fromLinks = [...new Set(links.map((x) => String(x?.drip_member_id || '').trim()).filter(Boolean))];
-  if (fromLinks.length) return fromLinks;
 
-  const resolved = await deps.resolveDripMemberForDiscordUser(
-    realmId,
-    interaction.user.id,
-    firstWallet,
-    settings
-  );
-  return deps.collectDripMemberIdCandidates(resolved?.member, null);
+  let resolved = null;
+  try {
+    resolved = await deps.resolveDripMemberForDiscordUser(
+      realmId,
+      interaction.user.id,
+      firstWallet,
+      settings
+    );
+  } catch {
+    resolved = null;
+  }
+  const resolvedCandidates = deps.collectDripMemberIdCandidates(resolved?.member, null);
+  // Match claim flow behavior: prefer freshly resolved member IDs, then linked fallbacks.
+  return [...new Set([...resolvedCandidates, ...fromLinks])];
 }
 
 async function handlePortalSelect(interaction) {
@@ -507,7 +558,8 @@ async function handlePortalSelect(interaction) {
     )
     .setColor(0x2ECC71);
 
-  if (chosenSquig.imageUrl) embed.setImage(chosenSquig.imageUrl);
+  const safeImageUrl = normalizeImageUrl(chosenSquig.imageUrl);
+  if (safeImageUrl) embed.setImage(safeImageUrl);
 
   await interaction.channel.send({ embeds: [embed] });
   await interaction.editReply({ content: `Portal stabilized. Sent ${currentPortal.reward} $CHARM.` });
