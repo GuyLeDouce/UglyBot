@@ -4725,7 +4725,11 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
         return { attrs: attrsB, source: 'opensea' };
       }
     } catch (e) {
-      console.warn('⚠️ OpenSea trait fallback failed:', e.message);
+      const msg = String(e?.message || e || '');
+      // 404 on OpenSea is common for missing/unindexed tokens; keep logs clean.
+      if (!/OpenSea HTTP 404/i.test(msg)) {
+        console.warn('⚠️ OpenSea trait fallback failed:', msg);
+      }
     }
   }
 
@@ -4789,6 +4793,7 @@ async function fetchOpenSeaTraits(tokenId, contractAddress = SQUIGS_CONTRACT) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetchWithTimeout(url, { headers, timeoutMs: 10000 });
+      if (res.status === 404) return [];
       if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
       const data = await res.json();
       const arr =
