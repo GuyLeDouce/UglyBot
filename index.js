@@ -25,6 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { renderSquigCardExact } = require('./card_renderer');
+const portalEvent = require('./modules/portalEvent');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
 
@@ -531,6 +532,25 @@ function buildSlashCommands() {
       .setDescription('Admin: check verification and reward system health for this server')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('portal')
+      .setDescription('Admin: manage the PORTAL MALFUNCTION event scheduler')
+      .addSubcommand((sub) =>
+        sub
+          .setName('start')
+          .setDescription('Start the portal scheduler')
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('stop')
+          .setDescription('Stop the portal scheduler and clear pending timers')
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('trigger')
+          .setDescription('Trigger a portal event immediately')
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('info')
       .setDescription('Admin: view a plain-English guide for how this bot works')
       .toJSON(),
@@ -571,6 +591,17 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   try { await registerSlashCommands(c); } catch (e) {
     console.error('Slash register error:', e.message);
+  }
+  if (String(process.env.PORTAL_AUTO_START || '').toLowerCase() === 'true') {
+    try {
+      portalEvent.startPortalScheduler({
+        guildId: process.env.PORTAL_GUILD_ID || null,
+        channelId: process.env.PORTAL_CHANNEL_ID || null,
+      });
+      console.log('✅ Portal scheduler auto-started.');
+    } catch (err) {
+      console.warn('⚠️ Portal auto-start failed:', err.message);
+    }
   }
 });
 
@@ -2786,6 +2817,20 @@ async function removeHolderRolesFromMember(member) {
   return removed;
 }
 
+portalEvent.initPortalEvent({
+  client,
+  getWalletLinks,
+  getGuildSettings,
+  getGuildPointMappings,
+  getOwnedTokenIdsForContractMany,
+  getNftMetadataAlchemy,
+  getTraitsForToken,
+  hpTableForContract,
+  resolveDripMemberForDiscordUser,
+  collectDripMemberIdCandidates,
+  awardDripPoints,
+});
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -2832,6 +2877,50 @@ client.on('interactionCreate', async (interaction) => {
         });
         await interaction.reply({ content: `Setup panel posted in <#${interaction.channel.id}>`, flags: 64 });
         return;
+      }
+
+      if (interaction.commandName === 'portal') {
+        const isPortalAdmin = Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+        if (!isPortalAdmin) {
+          await interaction.reply({ content: 'Administrator only.', flags: 64 });
+          return;
+        }
+
+        const sub = interaction.options.getSubcommand(true);
+        if (sub === 'start') {
+          const result = portalEvent.startPortalScheduler({
+            guildId: interaction.guild.id,
+            channelId: interaction.channel.id,
+          });
+          await interaction.reply({
+            content: `Portal scheduler started.\nChannel: <#${interaction.channel.id}>\nPortal active: ${result.portalActive ? 'yes' : 'no'}`,
+            flags: 64
+          });
+          return;
+        }
+
+        if (sub === 'stop') {
+          await interaction.deferReply({ flags: 64 });
+          const result = await portalEvent.stopPortalScheduler({ closeActivePortal: true });
+          await interaction.editReply({
+            content: `Portal scheduler stopped.\nPortal active: ${result.portalActive ? 'yes' : 'no'}`
+          });
+          return;
+        }
+
+        if (sub === 'trigger') {
+          await interaction.deferReply({ flags: 64 });
+          const out = await portalEvent.triggerPortalEvent({
+            guildId: interaction.guild.id,
+            channelId: interaction.channel.id,
+          });
+          if (!out.ok) {
+            await interaction.editReply({ content: `Portal trigger failed: ${out.reason}` });
+            return;
+          }
+          await interaction.editReply({ content: 'Portal triggered.' });
+          return;
+        }
       }
 
       if (interaction.commandName === 'set-points-mapping') {
@@ -3209,6 +3298,11 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton()) {
+      if (interaction.customId === 'portal_claim') {
+        await portalEvent.handlePortalClaim(interaction);
+        return;
+      }
+
       if (interaction.customId === 'verify_connect') {
         const modal = new ModalBuilder().setCustomId('verify_connect_modal').setTitle('Connect Wallet');
         modal.addComponents(
@@ -3828,6 +3922,11 @@ client.on('interactionCreate', async (interaction) => {
       }
       await upsertGuildSetting(interaction.guild.id, 'payout_type', interaction.values[0]);
       await interaction.update({ content: `Payout type set to \`${interaction.values[0]}\`.`, components: [] });
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'portal_select') {
+      await portalEvent.handlePortalSelect(interaction);
       return;
     }
 
