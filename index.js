@@ -680,14 +680,13 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
-  const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+async function buildRandomOwnedNftResponse(guildId, discordUserId, username, collections, commandLabel) {
+  const links = await getWalletLinks(guildId, discordUserId);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
-    await interaction.editReply({
+    return {
       content: 'Connect your wallet first with the verification menu before using this command.'
-    });
-    return;
+    };
   }
 
   const pools = await Promise.all(
@@ -699,10 +698,9 @@ async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
   const owned = pools.flat();
   if (!owned.length) {
     const names = collections.map((x) => x.name).join(', ');
-    await interaction.editReply({
+    return {
       content: `No ${commandLabel} NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\nChecked: ${names}`
-    });
-    return;
+    };
   }
 
   const chosen = pickRandom(owned);
@@ -730,10 +728,21 @@ async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
       `Token ID: **${chosen.tokenId}**\n` +
       `OpenSea: https://opensea.io/assets/ethereum/${chosen.contractAddress}/${chosen.tokenId}`
     )
-    .setFooter({ text: `${commandLabel} pull for ${interaction.user.username}` });
+    .setFooter({ text: `${commandLabel} pull for ${username}` });
   if (imageUrl) embed.setImage(imageUrl);
 
-  await interaction.editReply({ embeds: [embed] });
+  return { embeds: [embed] };
+}
+
+async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
+  const payload = await buildRandomOwnedNftResponse(
+    interaction.guild.id,
+    interaction.user.id,
+    interaction.user.username,
+    collections,
+    commandLabel
+  );
+  await interaction.editReply(payload);
 }
 
 function parseWalletAddressesInput(raw) {
@@ -4760,6 +4769,48 @@ client.on('interactionCreate', async (interaction) => {
     } else {
       await interaction.reply({ content: '⚠️ Something went wrong handling that action.', flags: 64 }).catch(() => {});
     }
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  if (!message.guild || message.author?.bot) return;
+
+  const content = String(message.content || '').trim();
+  if (!content.startsWith('!')) return;
+
+  const command = content.split(/\s+/)[0].toLowerCase();
+  const collectionCommands = {
+    '!flex': [
+      { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
+      { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
+      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+    ],
+    '!ugly': [
+      { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
+    ],
+    '!monster': [
+      { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
+    ],
+    '!squig': [
+      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+    ],
+  };
+
+  const collections = collectionCommands[command];
+  if (!collections) return;
+
+  try {
+    const payload = await buildRandomOwnedNftResponse(
+      message.guild.id,
+      message.author.id,
+      message.author.username,
+      collections,
+      command
+    );
+    await message.reply(payload);
+  } catch (err) {
+    console.error('! command error:', err);
+    await message.reply('Something went wrong handling that command.').catch(() => {});
   }
 });
 // ===== LOGIN =====
