@@ -558,6 +558,22 @@ function buildSlashCommands() {
       .setName('info-user')
       .setDescription('Admin: post a public plain-English guide for users')
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('flex')
+      .setDescription('Show a random NFT you own from Charm of the Ugly, Ugly Monsters, or Squigs')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ugly')
+      .setDescription('Show a random Charm of the Ugly NFT you own')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('monster')
+      .setDescription('Show a random Ugly Monster NFT you own')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('squig')
+      .setDescription('Show a random Squig you own')
+      .toJSON(),
   ];
 }
 
@@ -623,6 +639,101 @@ function labelForContract(contractAddress) {
   if (c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
   if (c === SQUIGS_CONTRACT.toLowerCase()) return 'Squigs';
   return String(contractAddress || 'Unknown Contract');
+}
+
+function normalizeImageUrl(input) {
+  if (!input) return null;
+  if (typeof input === 'object') {
+    const nested =
+      input.gateway ||
+      input.cachedUrl ||
+      input.pngUrl ||
+      input.thumbnailUrl ||
+      input.raw ||
+      input.url ||
+      input.image ||
+      input.href ||
+      null;
+    if (!nested) return null;
+    return normalizeImageUrl(nested);
+  }
+
+  const value = String(input).trim();
+  if (!value) return null;
+  if (value.startsWith('ipfs://')) {
+    const ipfsUrl = `https://ipfs.io/ipfs/${value.slice('ipfs://'.length).replace(/^ipfs\//, '')}`;
+    try {
+      const parsed = new URL(ipfsUrl);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+    } catch {}
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+  } catch {}
+  return null;
+}
+
+function pickRandom(arr) {
+  if (!Array.isArray(arr) || !arr.length) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
+  const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
+    await interaction.editReply({
+      content: 'Connect your wallet first with the verification menu before using this command.'
+    });
+    return;
+  }
+
+  const pools = await Promise.all(
+    collections.map(async ({ contractAddress }) => {
+      const tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress);
+      return tokenIds.map((tokenId) => ({ tokenId: String(tokenId), contractAddress }));
+    })
+  );
+  const owned = pools.flat();
+  if (!owned.length) {
+    const names = collections.map((x) => x.name).join(', ');
+    await interaction.editReply({
+      content: `No ${commandLabel} NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\nChecked: ${names}`
+    });
+    return;
+  }
+
+  const chosen = pickRandom(owned);
+  const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress).catch(() => null);
+  const collectionName = labelForContract(chosen.contractAddress);
+  const tokenName = String(meta?.name || `${collectionName} #${chosen.tokenId}`);
+  const imageUrl =
+    normalizeImageUrl(
+      meta?.image ||
+      meta?.image?.cachedUrl ||
+      meta?.image?.pngUrl ||
+      meta?.image?.thumbnailUrl ||
+      meta?.metadata?.image ||
+      meta?.raw?.metadata?.image
+    ) ||
+    (String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase()
+      ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${chosen.tokenId}`
+      : null);
+
+  const embed = new EmbedBuilder()
+    .setTitle(tokenName)
+    .setColor(0xB0DEEE)
+    .setDescription(
+      `Collection: **${collectionName}**\n` +
+      `Token ID: **${chosen.tokenId}**\n` +
+      `OpenSea: https://opensea.io/assets/ethereum/${chosen.contractAddress}/${chosen.tokenId}`
+    )
+    .setFooter({ text: `${commandLabel} pull for ${interaction.user.username}` });
+  if (imageUrl) embed.setImage(imageUrl);
+
+  await interaction.editReply({ embeds: [embed] });
 }
 
 function parseWalletAddressesInput(raw) {
@@ -3292,6 +3403,40 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({
           embeds: infoUserEmbeds(interaction.guild.name, settings)
         });
+        return;
+      }
+
+      if (interaction.commandName === 'flex') {
+        await interaction.deferReply();
+        await replyWithRandomOwnedNft(interaction, [
+          { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
+          { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
+          { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+        ], '/flex');
+        return;
+      }
+
+      if (interaction.commandName === 'ugly') {
+        await interaction.deferReply();
+        await replyWithRandomOwnedNft(interaction, [
+          { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
+        ], '/ugly');
+        return;
+      }
+
+      if (interaction.commandName === 'monster') {
+        await interaction.deferReply();
+        await replyWithRandomOwnedNft(interaction, [
+          { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
+        ], '/monster');
+        return;
+      }
+
+      if (interaction.commandName === 'squig') {
+        await interaction.deferReply();
+        await replyWithRandomOwnedNft(interaction, [
+          { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+        ], '/squig');
         return;
       }
       return;
