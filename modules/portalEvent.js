@@ -645,7 +645,13 @@ async function handlePortalSelect(interaction) {
     memberIds,
     currentPortal.reward,
     settings.currency_id,
-    settings
+    settings,
+    {
+      context: 'portal',
+      initiatorDiscordId: interaction.user.id,
+      recipientDiscordId: interaction.user.id,
+      recipientWalletAddress: links.find((x) => x.wallet_address)?.wallet_address || null,
+    }
   );
 
   claimedUsers.add(interaction.user.id);

@@ -37,6 +37,9 @@ const ETHERSCAN_API_KEY  = process.env.ETHERSCAN_API_KEY;
 const ALCHEMY_API_KEY    = process.env.ALCHEMY_API_KEY;
 const OPENSEA_API_KEY    = process.env.OPENSEA_API_KEY || ''; // optional
 const DEFAULT_ADMIN_USER = process.env.DEFAULT_ADMIN_USER || '';
+const DRIP_INITIATOR_ID = String(process.env.DRIP_INITIATOR_ID || '').trim();
+const DRIP_SENDER_ID = String(process.env.DRIP_SENDER_ID || process.env.DRIP_TRANSFER_SENDER_ID || '').trim();
+const DEFAULT_DRIP_MEMBER_SENDER_ID = String(process.env.DRIP_DEFAULT_MEMBER_SENDER_ID || '').trim();
 
 // Visual/render tunables
 const RENDER_SCALE = 3; // 1 = 750x1050. 2 = 1500x2100. 3 = 2250x3150
@@ -530,6 +533,30 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('healthcheck')
       .setDescription('Admin: check verification and reward system health for this server')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('paytest')
+      .setDescription('Admin: send a DRIP payout test using the live reward transfer flow')
+      .addStringOption((opt) =>
+        opt
+          .setName('discord_id')
+          .setDescription('Discord user ID to receive the payout')
+          .setRequired(true)
+      )
+      .addIntegerOption((opt) =>
+        opt
+          .setName('amount')
+          .setDescription('Test payout amount')
+          .setRequired(false)
+          .setMinValue(1)
+          .setMaxValue(100000)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('recipient_member_id')
+          .setDescription('Optional DRIP member ID override for the recipient')
+          .setRequired(false)
+      )
       .toJSON(),
     new SlashCommandBuilder()
       .setName('portal')
@@ -2163,9 +2190,40 @@ function buildDripHeaders(settings, includeJson = false) {
 function dripRealmBaseUrls(realmId) {
   const encoded = encodeURIComponent(realmId);
   return [
-    `https://api.drip.re/api/v1/realm/${encoded}`,
     `https://api.drip.re/api/v1/realms/${encoded}`,
+    `https://api.drip.re/api/v1/realm/${encoded}`,
   ];
+}
+
+function normalizeDripMemberId(value) {
+  if (value == null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === '[object object]' || lower === 'undefined' || lower === 'null') return null;
+  return trimmed;
+}
+
+function collectUniqueDripMemberIds(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = normalizeDripMemberId(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function logDripPayout(stage, details = {}) {
+  try {
+    console.log(`[DRIP] ${stage}`, JSON.stringify(details));
+  } catch {
+    console.log(`[DRIP] ${stage}`, details);
+  }
 }
 
 async function searchDripMembers(realmId, type, value, settings) {
@@ -2284,17 +2342,13 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
 }
 
 function collectDripMemberIdCandidates(memberLike, fallbackId = null) {
-  const ids = [
-    fallbackId,
+  return collectUniqueDripMemberIds([
     memberLike?.id,
     memberLike?.realmMemberId,
     memberLike?.memberId,
-    memberLike?.dripId,
-    memberLike?.accountId,
-  ]
-    .map(v => (v == null ? '' : String(v).trim()))
-    .filter(Boolean);
-  return [...new Set(ids)];
+    memberLike?.dripMemberId,
+    fallbackId,
+  ]);
 }
 
 function sameDripMember(a, b) {
@@ -2438,13 +2492,10 @@ async function handleDripStatusCheck(interaction) {
   });
 }
 
-async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings) {
+async function awardDripPointsProjectFallback(realmId, memberIds, tokens, currencyId, settings) {
   const ids = Array.isArray(memberIds) ? memberIds : [memberIds];
-  const memberIdCandidates = [...new Set(ids.map(v => (v == null ? '' : String(v).trim())).filter(Boolean))];
-  if (!memberIdCandidates.length) {
-    throw new Error('DRIP award failed: no member ID candidates provided.');
-  }
-
+  const memberIdCandidates = collectUniqueDripMemberIds(ids);
+  if (!memberIdCandidates.length) throw new Error('DRIP award failed: no member ID candidates provided.');
   const baseUrls = dripRealmBaseUrls(realmId);
   const endpointVariants = [
     {
@@ -2469,6 +2520,12 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings)
     for (const baseUrl of baseUrls) {
       for (const variant of endpointVariants) {
         const url = `${baseUrl}/members/${encodeURIComponent(memberId)}${variant.suffix}`;
+        logDripPayout('project fallback request', {
+          realmId,
+          url,
+          memberId,
+          payload: variant.payload,
+        });
         const res = await fetchWithTimeout(url, {
           timeoutMs: 15000,
           headers: buildDripHeaders(settings, true),
@@ -2480,6 +2537,14 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings)
           return { data, usedMemberId: memberId, endpoint: variant.suffix, baseUrl };
         }
         const body = await res.text().catch(() => '');
+        logDripPayout('project fallback failure', {
+          realmId,
+          url,
+          memberId,
+          payload: variant.payload,
+          status: res.status,
+          body: String(body || '').slice(0, 500),
+        });
         if (res.status === 404) {
           notFoundAttempts.push(`${memberId}@${variant.suffix}: ${String(body || '404').slice(0, 90)}`);
           continue;
@@ -2495,6 +2560,151 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings)
     );
   }
   throw new Error('DRIP award failed: no endpoint accepted the request.');
+}
+
+function resolveConfiguredDripSenderMemberId() {
+  return normalizeDripMemberId(DRIP_SENDER_ID) || normalizeDripMemberId(DEFAULT_DRIP_MEMBER_SENDER_ID) || null;
+}
+
+async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings, options = {}) {
+  const amount = Number(tokens);
+  const recipientCandidates = collectUniqueDripMemberIds(Array.isArray(memberIds) ? memberIds : [memberIds]);
+  if (!recipientCandidates.length) {
+    throw new Error('DRIP award failed: no recipient member ID candidates provided.');
+  }
+
+  const senderOverride = normalizeDripMemberId(options.senderMemberIdOverride);
+  const configuredSender = resolveConfiguredDripSenderMemberId();
+  const senderCandidates = collectUniqueDripMemberIds([senderOverride, configuredSender]);
+  const initiatorId = normalizeDripMemberId(options.initiatorId || DRIP_INITIATOR_ID || options.initiatorDiscordId || null);
+  const context = String(options.context || 'reward');
+
+  logDripPayout('reward start', {
+    context,
+    realmId,
+    amount,
+    currencyId: currencyId ? String(currencyId) : null,
+    initiatorId,
+    recipientDiscordId: options.recipientDiscordId || null,
+    recipientWalletAddress: options.recipientWalletAddress || null,
+    recipientMemberIdOverride: normalizeDripMemberId(options.recipientMemberIdOverride),
+  });
+
+  logDripPayout('recipient resolution', {
+    context,
+    recipientDiscordId: options.recipientDiscordId || null,
+    recipientCandidates,
+    resolvedRecipientMemberIds: collectDripMemberIdCandidates(options.recipientResolvedMember || null),
+  });
+
+  const senderConfigProblem = senderCandidates.find((id) => id === DISCORD_CLIENT_ID)
+    ? `invalid DRIP sender configuration: sender member ID resolves to the Discord app ID (${DISCORD_CLIENT_ID})`
+    : null;
+  if (senderConfigProblem) throw new Error(senderConfigProblem);
+
+  logDripPayout('sender resolution', {
+    context,
+    senderCandidates,
+    configuredSender,
+    senderOverride,
+    initiatorId,
+  });
+
+  if (!senderCandidates.length) {
+    throw new Error(
+      'DRIP award failed: no sender member ID configured. Set DRIP_SENDER_ID or DRIP_TRANSFER_SENDER_ID.'
+    );
+  }
+
+  const routeVariants = [
+    { baseUrl: `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}`, quiet404: false },
+    { baseUrl: `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}`, quiet404: true },
+  ];
+  const payloadVariants = [];
+  if (currencyId) {
+    payloadVariants.push({ amount, recipientId: null, currencyId: String(currencyId) });
+    payloadVariants.push({ tokens: amount, recipientId: null, realmPointId: String(currencyId) });
+  }
+  payloadVariants.push({ amount, recipientId: null });
+  payloadVariants.push({ tokens: amount, recipientId: null });
+
+  const transferErrors = [];
+  const quiet404s = [];
+  for (const senderId of senderCandidates) {
+    for (const recipientId of recipientCandidates) {
+      for (const route of routeVariants) {
+        const url = `${route.baseUrl}/members/${encodeURIComponent(senderId)}/transfer`;
+        for (const payloadTemplate of payloadVariants) {
+          const payload = { ...payloadTemplate, recipientId };
+          logDripPayout('transfer request', {
+            context,
+            url,
+            senderId,
+            recipientId,
+            payload,
+          });
+          const res = await fetchWithTimeout(url, {
+            timeoutMs: 15000,
+            headers: buildDripHeaders(settings, true),
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            return {
+              data,
+              usedMemberId: recipientId,
+              usedSenderId: senderId,
+              endpoint: '/transfer',
+              baseUrl: route.baseUrl,
+              method: 'POST',
+            };
+          }
+          const body = await res.text().catch(() => '');
+          logDripPayout('transfer failure', {
+            context,
+            url,
+            senderId,
+            recipientId,
+            payload,
+            status: res.status,
+            body: String(body || '').slice(0, 500),
+          });
+          if (res.status === 404 && route.quiet404) {
+            quiet404s.push(`${url}: 404 ${String(body || '').slice(0, 120)}`.trim());
+            continue;
+          }
+          transferErrors.push(
+            `${res.status} ${url} payload=${JSON.stringify(payload)} body=${String(body || '').slice(0, 220)}`
+          );
+          if (res.status === 400 || res.status === 403 || res.status === 404 || res.status === 422) continue;
+          throw new Error(`DRIP transfer failed: HTTP ${res.status} ${body}`);
+        }
+      }
+    }
+  }
+
+  logDripPayout('transfer fallback', {
+    context,
+    senderCandidates,
+    recipientCandidates,
+    quiet404s: quiet404s.slice(0, 6),
+    transferErrors: transferErrors.slice(0, 6),
+  });
+
+  const fallbackResult = await awardDripPointsProjectFallback(
+    realmId,
+    recipientCandidates,
+    amount,
+    currencyId,
+    settings
+  );
+  return {
+    ...fallbackResult,
+    fallbackUsed: true,
+    senderCandidates,
+    recipientCandidates,
+  };
 }
 
 async function verifyDripConnection(settings, discordProbeId) {
@@ -2820,7 +3030,14 @@ async function handleClaim(interaction) {
       dripMemberIdCandidates,
       amount,
       settings.currency_id,
-      settings
+      settings,
+      {
+        context: 'claim',
+        initiatorDiscordId: interaction.user.id,
+        recipientDiscordId: interaction.user.id,
+        recipientWalletAddress: walletAddresses[0] || null,
+        recipientResolvedMember: resolved?.member || null,
+      }
     );
     dripMemberId = awardResult?.usedMemberId || dripMemberIdCandidates[0];
     for (const row of links) {
@@ -2882,7 +3099,7 @@ async function handleClaim(interaction) {
   } catch (err) {
     console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
-    if (/DRIP member search failed|DRIP award failed/i.test(msg)) {
+    if (/DRIP member search failed|DRIP award failed|DRIP transfer failed|DRIP sender/i.test(msg)) {
       await postAdminSystemLog({
         guild: interaction.guild,
         category: 'DRIP Failure',
@@ -2903,7 +3120,7 @@ async function handleClaim(interaction) {
     }
     let reason = 'We could not process your claim right now.';
     if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
-    else if (/DRIP award failed/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
+    else if (/DRIP award failed|DRIP transfer failed|DRIP sender/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
     else if (/nft_claims|claim_events|claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
     await respondInteraction(interaction, {
       content: `Claim failed: ${reason}`,
@@ -3386,6 +3603,94 @@ client.on('interactionCreate', async (interaction) => {
             `- Trait rules: ${traitRules.length}\n` +
             `- Missing roles: ${missingRoles.length ? missingRoles.join(', ') : 'none'}\n` +
             `- Unmanageable roles: ${blockedRoles.length ? blockedRoles.join(', ') : 'none'}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'paytest') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const settings = await getGuildSettings(interaction.guild.id);
+        const missing = [];
+        if (!settings?.drip_api_key) missing.push('DRIP API Key');
+        if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+        if (missing.length) {
+          await interaction.editReply({ content: `Paytest unavailable. Missing: ${missing.join(', ')}` });
+          return;
+        }
+
+        const targetDiscordId = String(interaction.options.getString('discord_id', true) || '').trim();
+        const amount = Number(interaction.options.getInteger('amount', false) || 1);
+        const recipientOverride = normalizeDripMemberId(interaction.options.getString('recipient_member_id', false));
+        if (!/^\d{16,20}$/.test(targetDiscordId)) {
+          await interaction.editReply({ content: 'Invalid Discord ID.' });
+          return;
+        }
+        if (!Number.isFinite(amount) || amount < 1 || amount > 100000) {
+          await interaction.editReply({ content: 'Amount must be between 1 and 100000.' });
+          return;
+        }
+
+        const links = await getWalletLinks(interaction.guild.id, targetDiscordId);
+        const targetWallet = links.find((x) => x.wallet_address)?.wallet_address || null;
+
+        let resolved = null;
+        let resolvedErr = null;
+        try {
+          resolved = await resolveDripMemberForDiscordUser(
+            settings.drip_realm_id,
+            targetDiscordId,
+            targetWallet,
+            settings
+          );
+        } catch (err) {
+          resolvedErr = err;
+        }
+
+        const recipientCandidates = collectUniqueDripMemberIds([
+          recipientOverride,
+          ...collectDripMemberIdCandidates(resolved?.member || null),
+          ...links.map((x) => x?.drip_member_id),
+        ]);
+        if (!recipientCandidates.length) {
+          if (resolvedErr) throw resolvedErr;
+          await interaction.editReply({ content: 'Paytest failed: no DRIP recipient member ID could be resolved.' });
+          return;
+        }
+
+        const payoutResult = await awardDripPoints(
+          settings.drip_realm_id,
+          recipientCandidates,
+          amount,
+          settings.currency_id,
+          settings,
+          {
+            context: 'paytest',
+            initiatorDiscordId: interaction.user.id,
+            recipientDiscordId: targetDiscordId,
+            recipientWalletAddress: targetWallet,
+            recipientMemberIdOverride: recipientOverride,
+            recipientResolvedMember: resolved?.member || null,
+          }
+        );
+
+        const usedRecipientId = payoutResult?.usedMemberId || recipientCandidates[0];
+        for (const row of links) {
+          await setWalletLink(interaction.guild.id, targetDiscordId, row.wallet_address, Boolean(row.verified), usedRecipientId);
+        }
+
+        await interaction.editReply({
+          content:
+            `Paytest sent.\n` +
+            `Target: <@${targetDiscordId}>\n` +
+            `Amount: **${amount}**\n` +
+            `Recipient member: \`${usedRecipientId}\`\n` +
+            `Sender member: \`${payoutResult?.usedSenderId || 'fallback/project-level'}\`\n` +
+            `Route: \`${payoutResult?.baseUrl || 'project-level fallback'}${payoutResult?.endpoint || ''}\``
         });
         return;
       }
