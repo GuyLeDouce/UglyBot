@@ -601,6 +601,10 @@ function buildSlashCommands() {
       .setName('squig')
       .setDescription('Show a random Squig you own')
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('mint')
+      .setDescription('Show the Squigs mint embed')
+      .toJSON(),
   ];
 }
 
@@ -733,6 +737,7 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   const chosen = pickRandom(owned);
   const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress).catch(() => null);
   const collectionName = labelForContract(chosen.contractAddress);
+  const isSquig = String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
   const tokenName = String(meta?.name || `${collectionName} #${chosen.tokenId}`);
   const imageUrl =
     normalizeImageUrl(
@@ -743,7 +748,7 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
       meta?.metadata?.image ||
       meta?.raw?.metadata?.image
     ) ||
-    (String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase()
+    (isSquig
       ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${chosen.tokenId}`
       : null);
 
@@ -753,7 +758,8 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
     .setDescription(
       `Collection: **${collectionName}**\n` +
       `Token ID: **${chosen.tokenId}**\n` +
-      `OpenSea: https://opensea.io/assets/ethereum/${chosen.contractAddress}/${chosen.tokenId}`
+      `OpenSea: https://opensea.io/assets/ethereum/${chosen.contractAddress}/${chosen.tokenId}` +
+      (isSquig ? `\n[Mint A Squig](https://bueno.art/squigs/mint)` : '')
     )
     .setFooter({ text: `${commandLabel} pull for ${username}` });
   if (imageUrl) embed.setImage(imageUrl);
@@ -770,6 +776,22 @@ async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
     commandLabel
   );
   await interaction.editReply(payload);
+}
+
+function mintEmbed() {
+  return new EmbedBuilder()
+    .setTitle('MINT IS LIVE')
+    .setColor(0xB0DEEE)
+    .setDescription(
+      `You can [Mint Here](https://bueno.art/squigs/mint)\n\n` +
+      `Each mint gets you a Squig **+ a Portal Prize** (NFTs or $CHARM)\n\n` +
+      `You'll also get:\n\n` +
+      `- access to more custom games\n` +
+      `- more gems in the Malformed Marketplace\n` +
+      `- passive $CHARM earning with each NFT\n\n` +
+      `Check the [UglyDex](https://uglydex.xyz) to reveal your Portal Prize, see your Squig Card, UglyPoints by trait, total score, Badges, and where you rank on the UglyBoard`
+    )
+    .setImage('https://i.imgur.com/puZCGxP.gif');
 }
 
 function parseWalletAddressesInput(raw) {
@@ -3751,6 +3773,13 @@ client.on('interactionCreate', async (interaction) => {
         await replyWithRandomOwnedNft(interaction, [
           { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
         ], '/squig');
+        return;
+      }
+
+      if (interaction.commandName === 'mint') {
+        await interaction.reply({
+          embeds: [mintEmbed()]
+        });
         return;
       }
       return;
