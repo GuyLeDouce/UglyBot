@@ -1002,6 +1002,33 @@ function getDefaultAdminIds() {
   );
 }
 
+function buildPortalAdminActionRow({ canTriggerNow = true } = {}) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('portal_admin_stop')
+      .setLabel('STOP')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('portal_admin_trigger_now')
+      .setLabel('TRIGGER NOW')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!canTriggerNow)
+  );
+}
+
+function formatPortalNextTriggerText(state) {
+  if (state?.portalActive) {
+    return 'A portal is already active right now.';
+  }
+  const nextPortalAt = Number(state?.nextPortalAt || 0);
+  if (!Number.isFinite(nextPortalAt) || nextPortalAt <= Date.now()) {
+    return 'The next portal trigger is scheduled, but the remaining time is not available.';
+  }
+  const remainingMs = Math.max(0, nextPortalAt - Date.now());
+  const remainingMinutes = Math.max(1, Math.round(remainingMs / 60000));
+  return `It should trigger in about **${remainingMinutes} minute${remainingMinutes === 1 ? '' : 's'}**.`;
+}
+
 async function getGuildSettings(guildId) {
   const { rows } = await teamPool.query(`SELECT * FROM guild_settings WHERE guild_id = $1`, [guildId]);
   return rows[0] || null;
@@ -3291,6 +3318,18 @@ client.on('interactionCreate', async (interaction) => {
 
         const sub = interaction.options.getSubcommand(true);
         if (sub === 'start') {
+          const state = portalEvent.getPortalState();
+          if (state?.schedulerEnabled) {
+            await interaction.reply({
+              content:
+                `Portal scheduler is already active for <#${state.portalChannelId || interaction.channel.id}>.\n` +
+                `${formatPortalNextTriggerText(state)}`,
+              components: [buildPortalAdminActionRow({ canTriggerNow: !state.portalActive })],
+              flags: 64
+            });
+            return;
+          }
+
           const result = portalEvent.startPortalScheduler({
             guildId: interaction.guild.id,
             channelId: interaction.channel.id,
@@ -3904,6 +3943,57 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId === 'portal_claim') {
         await portalEvent.handlePortalClaim(interaction);
+        return;
+      }
+
+      if (interaction.customId === 'portal_admin_stop') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          await interaction.reply({ content: 'Administrator only.', flags: 64 });
+          return;
+        }
+        await interaction.deferUpdate();
+        const result = await portalEvent.stopPortalScheduler({ closeActivePortal: true });
+        await interaction.editReply({
+          content: `Portal scheduler stopped.\nPortal active: ${result.portalActive ? 'yes' : 'no'}`,
+          components: []
+        });
+        return;
+      }
+
+      if (interaction.customId === 'portal_admin_trigger_now') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          await interaction.reply({ content: 'Administrator only.', flags: 64 });
+          return;
+        }
+        await interaction.deferUpdate();
+        const state = portalEvent.getPortalState();
+        if (state?.portalActive) {
+          await interaction.editReply({
+            content: 'A portal is already active right now.',
+            components: [buildPortalAdminActionRow({ canTriggerNow: false })]
+          });
+          return;
+        }
+
+        const out = await portalEvent.triggerPortalEvent({
+          guildId: interaction.guild.id,
+          channelId: state?.portalChannelId || interaction.channel.id,
+        });
+        if (!out.ok) {
+          const refreshed = portalEvent.getPortalState();
+          await interaction.editReply({
+            content:
+              `Portal trigger failed: ${out.reason}\n` +
+              `${formatPortalNextTriggerText(refreshed)}`,
+            components: [buildPortalAdminActionRow({ canTriggerNow: !refreshed.portalActive })]
+          });
+          return;
+        }
+
+        await interaction.editReply({
+          content: 'Portal triggered now.',
+          components: [buildPortalAdminActionRow({ canTriggerNow: false })]
+        });
         return;
       }
 

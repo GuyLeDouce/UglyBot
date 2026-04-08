@@ -7,7 +7,7 @@ const {
 } = require('discord.js');
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
-const MIN_DELAY_MS = 6 * 60 * 60 * 1000;
+const MIN_DELAY_MS = 4 * 60 * 60 * 1000;
 const MAX_DELAY_MS = 12 * 60 * 60 * 1000;
 const SINGLE_TRAIT_CHANCE = 0.85;
 const MAX_SELECT_OPTIONS = 25;
@@ -30,6 +30,7 @@ let portalChannelId = process.env.PORTAL_CHANNEL_ID || null;
 let portalGuildId = process.env.PORTAL_GUILD_ID || null;
 let currentPortal = null;
 let schedulerEnabled = false;
+let nextPortalAt = null;
 
 function initPortalEvent(injectedDeps) {
   deps = injectedDeps;
@@ -357,8 +358,14 @@ function clearTimers() {
 
 function schedulePortal() {
   if (!schedulerEnabled) return;
+  if (portalTimeout) {
+    clearTimeout(portalTimeout);
+    portalTimeout = null;
+  }
   const delay = Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS + 1)) + MIN_DELAY_MS;
+  nextPortalAt = Date.now() + delay;
   portalTimeout = setTimeout(() => {
+    nextPortalAt = null;
     triggerPortalEvent().catch((err) => {
       console.error('Portal trigger error:', err);
       schedulePortal();
@@ -400,6 +407,7 @@ async function triggerPortalEvent(options = {}) {
     clearTimeout(portalTimeout);
     portalTimeout = null;
   }
+  nextPortalAt = null;
 
   if (options.channelId) portalChannelId = String(options.channelId);
   if (options.guildId) portalGuildId = String(options.guildId);
@@ -476,6 +484,7 @@ async function stopPortalScheduler({ closeActivePortal = true } = {}) {
   schedulerEnabled = false;
   if (portalTimeout) clearTimeout(portalTimeout);
   portalTimeout = null;
+  nextPortalAt = null;
 
   if (closeActivePortal && portalActive) {
     await closePortal({ announce: true });
@@ -695,6 +704,7 @@ function getPortalState() {
     portalGuildId,
     claimedCount: claimedUsers.size,
     currentPortal,
+    nextPortalAt,
   };
 }
 
