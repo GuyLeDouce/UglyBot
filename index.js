@@ -338,10 +338,53 @@ async function ensureClaimsSchema() {
   console.log(`✅ claims schema ready (${DATABASE_URL_CLAIMS ? 'DATABASE_URL_CLAIMS' : 'holders database fallback'})`);
 }
 
+async function ensureMarketplaceSchema() {
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS marketplace_items (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      thumbnail_url TEXT,
+      image_url TEXT,
+      price NUMERIC NOT NULL,
+      per_user_limit INTEGER,
+      total_stock INTEGER,
+      allowed_role_ids TEXT,
+      raffle_ends_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'draft',
+      published_channel_id TEXT,
+      published_message_id TEXT,
+      created_by_discord_id TEXT NOT NULL,
+      updated_by_discord_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_items_guild_status_idx ON marketplace_items (guild_id, status, updated_at DESC);`);
+  await teamPool.query(`
+    CREATE TABLE IF NOT EXISTS marketplace_purchases (
+      id BIGSERIAL PRIMARY KEY,
+      item_id BIGINT NOT NULL REFERENCES marketplace_items(id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      spent_amount NUMERIC NOT NULL,
+      purchase_type TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_item_idx ON marketplace_purchases (item_id, created_at DESC);`);
+  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_user_idx ON marketplace_purchases (guild_id, discord_id, created_at DESC);`);
+  console.log('✅ marketplace schema ready');
+}
+
 ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
 ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
 ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message));
+ensureMarketplaceSchema().catch(e => console.error('Marketplace schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   try {
@@ -622,6 +665,10 @@ function buildSlashCommands() {
       )
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('prize')
+      .setDescription('Admin: open the marketplace prize editor dashboard')
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('info')
       .setDescription('Admin: view a plain-English guide for how this bot works')
       .toJSON(),
@@ -701,6 +748,7 @@ globalThis.__PENDING_HOLDER_RULES ||= new Map();
 globalThis.__PENDING_TRAIT_ROLE_RULES ||= new Map();
 globalThis.__PENDING_POINTS_MAPPING ||= new Map();
 globalThis.__PENDING_CHECK_STATS ||= new Map();
+globalThis.__PENDING_PRIZE_DRAFTS ||= new Map();
 
 function normalizeEthAddress(input) {
   const addr = String(input || '').trim();
@@ -1053,6 +1101,500 @@ async function upsertGuildSetting(guildId, field, value) {
 function getPointsLabel(settings) {
   const label = String(settings?.points_label || '').trim();
   return label || 'UglyPoints';
+}
+
+function getPrizeDraftKey(guildId, discordId) {
+  return `${guildId}:${discordId}`;
+}
+
+function createEmptyPrizeDraft(guildId, discordId) {
+  return {
+    guildId,
+    discordId,
+    itemType: 'buy',
+    name: '',
+    description: '',
+    thumbnailUrl: '',
+    imageUrl: '',
+    price: '',
+    perUserLimit: '',
+    totalStock: '',
+    allowedRoleIds: [],
+    raffleDurationMinutes: '',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+function upsertPrizeDraft(guildId, discordId, patch = {}) {
+  const key = getPrizeDraftKey(guildId, discordId);
+  const existing = globalThis.__PENDING_PRIZE_DRAFTS.get(key) || createEmptyPrizeDraft(guildId, discordId);
+  const next = { ...existing, ...patch, updatedAt: Date.now() };
+  globalThis.__PENDING_PRIZE_DRAFTS.set(key, next);
+  return next;
+}
+
+function getPrizeDraft(guildId, discordId) {
+  return globalThis.__PENDING_PRIZE_DRAFTS.get(getPrizeDraftKey(guildId, discordId)) || null;
+}
+
+function clearPrizeDraft(guildId, discordId) {
+  globalThis.__PENDING_PRIZE_DRAFTS.delete(getPrizeDraftKey(guildId, discordId));
+}
+
+function parseRoleIdsInput(input, guild) {
+  const values = String(input || '')
+    .split(/[,\n]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const out = [];
+  const seen = new Set();
+  for (const raw of values) {
+    const match = raw.match(/^<@&(\d{16,20})>$/) || raw.match(/^(\d{16,20})$/);
+    const roleId = match?.[1] || null;
+    if (!roleId || seen.has(roleId)) continue;
+    if (guild && !guild.roles.cache.has(roleId)) continue;
+    seen.add(roleId);
+    out.push(roleId);
+  }
+  return out;
+}
+
+function formatRoleMentions(roleIds) {
+  const ids = Array.isArray(roleIds) ? roleIds.filter(Boolean) : [];
+  return ids.length ? ids.map((id) => `<@&${id}>`).join(', ') : 'Everyone';
+}
+
+function normalizeMarketplaceItemType(value) {
+  return String(value || '').trim().toLowerCase() === 'raffle' ? 'raffle' : 'buy';
+}
+
+function formatMarketplaceTimeLeft(item) {
+  if (normalizeMarketplaceItemType(item?.item_type || item?.itemType) !== 'raffle') return 'n/a';
+  const endAt = item?.raffle_ends_at ? new Date(item.raffle_ends_at) : null;
+  if (!endAt || !Number.isFinite(endAt.getTime())) return 'Not set';
+  const now = Date.now();
+  const remainingMs = endAt.getTime() - now;
+  if (remainingMs <= 0) return 'Closed';
+  const minutes = Math.max(1, Math.ceil(remainingMs / 60000));
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.floor(minutes / 60);
+  const extraMinutes = minutes % 60;
+  if (!extraMinutes) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  return `${hours}h ${extraMinutes}m`;
+}
+
+function buildPrizeEditorEmbed(draft) {
+  const type = normalizeMarketplaceItemType(draft?.itemType);
+  return new EmbedBuilder()
+    .setTitle(`Prize Editor | ${type === 'raffle' ? 'Raffle' : 'Buy Item'}`)
+    .setColor(0xE67E22)
+    .setDescription(
+      `Configure the marketplace item, then press **Done** to preview the user-facing post.\n\n` +
+      `Name: ${draft?.name ? `**${draft.name}**` : '`not set`'}\n` +
+      `Description: ${draft?.description ? draft.description.slice(0, 300) : '`not set`'}\n` +
+      `Thumbnail: ${draft?.thumbnailUrl ? draft.thumbnailUrl : '`not set`'}\n` +
+      `Image: ${draft?.imageUrl ? draft.imageUrl : '`not set`'}\n` +
+      `Price: ${draft?.price ? `**${draft.price} $CHARM**` : '`not set`'}\n` +
+      `Per person limit: ${draft?.perUserLimit ? `**${draft.perUserLimit}**` : 'Unlimited'}\n` +
+      `Total stock: ${draft?.totalStock ? `**${draft.totalStock}**` : 'Unlimited'}\n` +
+      `Allowed roles: ${formatRoleMentions(draft?.allowedRoleIds)}\n` +
+      `Raffle timer: ${type === 'raffle'
+        ? (draft?.raffleDurationMinutes ? `**${draft.raffleDurationMinutes} minute(s)**` : '`not set`')
+        : 'Not used for buy items'}`
+    );
+}
+
+function buildPrizeEditorRows(draft) {
+  const isRaffle = normalizeMarketplaceItemType(draft?.itemType) === 'raffle';
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_type_buy').setLabel('Type: Buy').setStyle(isRaffle ? ButtonStyle.Secondary : ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('prize_type_raffle').setLabel('Type: Raffle').setStyle(isRaffle ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_name').setLabel('Name').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_description').setLabel('Description').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_price').setLabel('Price').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_set_thumbnail').setLabel('Thumbnail').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_image').setLabel('Image').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_limit').setLabel('Per Person').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_stock').setLabel('Stock').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_roles').setLabel('Roles').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_set_raffle_time').setLabel('Raffle Time').setStyle(ButtonStyle.Secondary).setDisabled(!isRaffle),
+      new ButtonBuilder().setCustomId('prize_done').setLabel('Done').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prize_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger),
+    ),
+  ];
+}
+
+function buildPrizePreviewRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_publish').setLabel('Publish').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prize_edit').setLabel('Edit').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger),
+    )
+  ];
+}
+
+function validatePrizeDraft(draft) {
+  const problems = [];
+  const itemType = normalizeMarketplaceItemType(draft?.itemType);
+  if (!String(draft?.name || '').trim()) problems.push('Item name');
+  if (!String(draft?.description || '').trim()) problems.push('Item description');
+  const price = Number(draft?.price);
+  if (!Number.isFinite(price) || price <= 0) problems.push('Price');
+  const perUserLimit = String(draft?.perUserLimit || '').trim();
+  if (perUserLimit && (!Number.isInteger(Number(perUserLimit)) || Number(perUserLimit) < 1)) problems.push('Per person limit');
+  const totalStock = String(draft?.totalStock || '').trim();
+  if (totalStock && (!Number.isInteger(Number(totalStock)) || Number(totalStock) < 1)) problems.push('Total stock');
+  if (draft?.thumbnailUrl && !normalizeImageUrl(draft.thumbnailUrl)) problems.push('Thumbnail URL');
+  if (draft?.imageUrl && !normalizeImageUrl(draft.imageUrl)) problems.push('Image URL');
+  if (itemType === 'raffle') {
+    const duration = Number(draft?.raffleDurationMinutes);
+    if (!Number.isInteger(duration) || duration < 1) problems.push('Raffle time');
+  }
+  return {
+    ok: problems.length === 0,
+    problems,
+  };
+}
+
+async function getMarketplaceItemById(itemId) {
+  const { rows } = await teamPool.query(`SELECT * FROM marketplace_items WHERE id = $1 LIMIT 1`, [itemId]);
+  return rows[0] || null;
+}
+
+async function getMarketplaceItemStats(itemId, discordId = null) {
+  const [{ rows: totals }, { rows: mine }] = await Promise.all([
+    teamPool.query(
+      `SELECT COALESCE(SUM(quantity), 0) AS total_purchased, COUNT(*) AS purchase_events
+       FROM marketplace_purchases
+       WHERE item_id = $1`,
+      [itemId]
+    ),
+    discordId
+      ? teamPool.query(
+          `SELECT COALESCE(SUM(quantity), 0) AS user_quantity, COALESCE(SUM(spent_amount), 0) AS user_spent
+           FROM marketplace_purchases
+           WHERE item_id = $1 AND discord_id = $2`,
+          [itemId, discordId]
+        )
+      : Promise.resolve({ rows: [{ user_quantity: 0, user_spent: 0 }] })
+  ]);
+  return {
+    totalPurchased: Number(totals[0]?.total_purchased || 0),
+    purchaseEvents: Number(totals[0]?.purchase_events || 0),
+    userQuantity: Number(mine[0]?.user_quantity || 0),
+    userSpent: Number(mine[0]?.user_spent || 0),
+  };
+}
+
+function getMarketplaceRemainingStock(item, stats) {
+  const totalStock = Number(item?.total_stock);
+  if (!Number.isFinite(totalStock) || totalStock <= 0) return null;
+  return Math.max(0, totalStock - Number(stats?.totalPurchased || 0));
+}
+
+function buildMarketplaceItemEmbed(item, stats = {}) {
+  const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
+  const remainingStock = getMarketplaceRemainingStock(item, stats);
+  const allowedRoleIds = String(item?.allowed_role_ids || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const titleType = itemType === 'raffle' ? 'Raffle' : 'Buy';
+  const embed = new EmbedBuilder()
+    .setTitle(`${String(item?.name || 'Marketplace Item').slice(0, 220)} | ${titleType}`)
+    .setColor(itemType === 'raffle' ? 0xF1C40F : 0x2ECC71)
+    .setDescription(String(item?.description || '').slice(0, 4000))
+    .addFields(
+      { name: 'Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
+      { name: 'Available', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
+      { name: 'Per Person', value: Number(item?.per_user_limit) > 0 ? `**${item.per_user_limit}**` : 'Unlimited', inline: true },
+      { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
+      { name: itemType === 'raffle' ? 'Time Left Until Draw' : 'Status', value: itemType === 'raffle' ? formatMarketplaceTimeLeft(item) : 'Available while stock remains', inline: false },
+    )
+    .setFooter({ text: `Item ID ${item?.id || 'preview'}` });
+  const thumb = normalizeImageUrl(item?.thumbnail_url || item?.thumbnailUrl || '');
+  const image = normalizeImageUrl(item?.image_url || item?.imageUrl || '');
+  if (thumb) embed.setThumbnail(thumb);
+  if (image) embed.setImage(image);
+  return embed;
+}
+
+function buildMarketplaceItemButtons(item, stats = {}) {
+  const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
+  const remainingStock = getMarketplaceRemainingStock(item, stats);
+  const raffleClosed = itemType === 'raffle' && formatMarketplaceTimeLeft(item) === 'Closed';
+  const soldOut = remainingStock != null && remainingStock <= 0;
+  const disabled = soldOut || raffleClosed || String(item?.status || 'published') !== 'published';
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`market_buy_${item.id}`)
+        .setLabel(itemType === 'raffle' ? 'Buy Tickets' : 'Buy')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled),
+      ...(itemType === 'raffle'
+        ? [
+            new ButtonBuilder()
+              .setCustomId(`market_entries_${item.id}`)
+              .setLabel('View Entries')
+              .setStyle(ButtonStyle.Secondary)
+          ]
+        : [])
+    )
+  ];
+}
+
+async function createMarketplaceItemFromDraft(guildId, actorDiscordId, draft) {
+  const itemType = normalizeMarketplaceItemType(draft?.itemType);
+  const raffleEndsAt = itemType === 'raffle'
+    ? new Date(Date.now() + (Number(draft?.raffleDurationMinutes || 0) * 60 * 1000))
+    : null;
+  const { rows } = await teamPool.query(
+    `INSERT INTO marketplace_items (
+       guild_id, item_type, name, description, thumbnail_url, image_url, price, per_user_limit, total_stock,
+       allowed_role_ids, raffle_ends_at, status, created_by_discord_id, updated_by_discord_id, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'draft', $12, $12, NOW())
+     RETURNING *`,
+    [
+      guildId,
+      itemType,
+      String(draft?.name || '').trim(),
+      String(draft?.description || '').trim(),
+      normalizeImageUrl(draft?.thumbnailUrl) || null,
+      normalizeImageUrl(draft?.imageUrl) || null,
+      Math.floor(Number(draft?.price || 0)),
+      Number(draft?.perUserLimit) > 0 ? Math.floor(Number(draft.perUserLimit)) : null,
+      Number(draft?.totalStock) > 0 ? Math.floor(Number(draft.totalStock)) : null,
+      Array.isArray(draft?.allowedRoleIds) && draft.allowedRoleIds.length ? draft.allowedRoleIds.join(',') : null,
+      raffleEndsAt ? raffleEndsAt.toISOString() : null,
+      actorDiscordId,
+    ]
+  );
+  return rows[0] || null;
+}
+
+async function publishMarketplaceItem(itemId, channelId, actorDiscordId) {
+  const item = await getMarketplaceItemById(itemId);
+  if (!item) throw new Error('Marketplace item not found.');
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel?.isTextBased()) throw new Error('Selected channel is not text-based.');
+  const stats = await getMarketplaceItemStats(itemId);
+  const message = await channel.send({
+    embeds: [buildMarketplaceItemEmbed(item, stats)],
+    components: buildMarketplaceItemButtons({ ...item, status: 'published' }, stats),
+  });
+  const { rows } = await teamPool.query(
+    `UPDATE marketplace_items
+     SET status = 'published',
+         published_channel_id = $2,
+         published_message_id = $3,
+         updated_by_discord_id = $4,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [itemId, channelId, message.id, actorDiscordId]
+  );
+  return rows[0] || item;
+}
+
+async function refreshMarketplaceItemMessage(itemId) {
+  const item = await getMarketplaceItemById(itemId);
+  if (!item?.published_channel_id || !item?.published_message_id) return;
+  const channel = await client.channels.fetch(item.published_channel_id).catch(() => null);
+  if (!channel?.isTextBased()) return;
+  const message = await channel.messages.fetch(item.published_message_id).catch(() => null);
+  if (!message) return;
+  const stats = await getMarketplaceItemStats(itemId);
+  await message.edit({
+    embeds: [buildMarketplaceItemEmbed(item, stats)],
+    components: buildMarketplaceItemButtons(item, stats),
+  }).catch(() => null);
+}
+
+async function resolveMarketplaceMemberIds(guildId, discordId) {
+  const settings = await getGuildSettings(guildId);
+  const links = await getWalletLinks(guildId, discordId);
+  const walletAddress = links.find((x) => x.wallet_address)?.wallet_address || null;
+  let resolved = null;
+  try {
+    resolved = await resolveDripMemberForDiscordUser(
+      settings?.drip_realm_id,
+      discordId,
+      walletAddress,
+      settings || {}
+    );
+  } catch {}
+  return {
+    settings,
+    links,
+    memberIds: collectUniqueDripMemberIds([
+      ...collectDripMemberIdCandidates(resolved?.member || null),
+      ...links.map((x) => x?.drip_member_id),
+    ]),
+  };
+}
+
+async function getMarketplaceSpendableBalance(guildId, discordId) {
+  const { settings, memberIds } = await resolveMarketplaceMemberIds(guildId, discordId);
+  const botMemberId = resolveConfiguredDripSenderMemberId();
+  if (!settings?.drip_api_key || !settings?.drip_realm_id) {
+    return { ok: false, reason: 'Marketplace unavailable: DRIP is not fully configured.' };
+  }
+  if (!settings?.currency_id) return { ok: false, reason: 'Marketplace unavailable: Currency ID is not configured.' };
+  if (!botMemberId) return { ok: false, reason: 'Marketplace unavailable: bot DRIP member ID is not configured.' };
+  if (!memberIds.length) return { ok: false, reason: 'Marketplace unavailable: no DRIP member ID found for your account.' };
+  const liveBalance = await getDripMemberCurrencyBalance(settings.drip_realm_id, memberIds, settings.currency_id, settings || {});
+  if (liveBalance == null) return { ok: false, reason: 'Marketplace unavailable: could not read your DRIP $CHARM balance right now.' };
+  return {
+    ok: true,
+    available: Math.max(0, Math.floor(Number(liveBalance || 0))),
+    liveBalance: Math.max(0, Math.floor(Number(liveBalance || 0))),
+    settings,
+    memberIds,
+    botMemberId,
+  };
+}
+
+async function postMarketplacePurchaseLog({ guild, actorDiscordId, item, quantity, spentAmount }) {
+  await postAdminSystemLog({
+    guild,
+    category: 'Marketplace Purchase',
+    message:
+      `User: <@${actorDiscordId}>\n` +
+      `Item: **${item.name}**\n` +
+      `Type: ${normalizeMarketplaceItemType(item.item_type)}\n` +
+      `Quantity: ${quantity}\n` +
+      `Spent: ${spentAmount} $CHARM\n` +
+      `Item ID: \`${item.id}\``
+  });
+}
+
+async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
+  const normalizedQuantity = Math.floor(Number(quantity));
+  if (!Number.isFinite(normalizedQuantity) || normalizedQuantity < 1) {
+    return { ok: false, reason: 'Quantity must be at least 1.' };
+  }
+
+  const item = await getMarketplaceItemById(itemId);
+  if (!item || String(item.guild_id) !== String(guild.id)) {
+    return { ok: false, reason: 'Marketplace item not found.' };
+  }
+  if (String(item.status) !== 'published') {
+    return { ok: false, reason: 'That item is not available right now.' };
+  }
+
+  const itemType = normalizeMarketplaceItemType(item.item_type);
+  if (itemType === 'raffle' && formatMarketplaceTimeLeft(item) === 'Closed') {
+    return { ok: false, reason: 'That raffle has already closed.' };
+  }
+
+  const allowedRoleIds = String(item.allowed_role_ids || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (allowedRoleIds.length) {
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    const hasAllowedRole = member && allowedRoleIds.some((id) => member.roles.cache.has(id));
+    if (!hasAllowedRole) {
+      return { ok: false, reason: 'You do not have an allowed role for this item.' };
+    }
+  }
+
+  const balance = await getMarketplaceSpendableBalance(guild.id, discordId);
+  if (!balance.ok) return balance;
+
+  const stats = await getMarketplaceItemStats(itemId, discordId);
+  const remainingStock = getMarketplaceRemainingStock(item, stats);
+  if (remainingStock != null && normalizedQuantity > remainingStock) {
+    return { ok: false, reason: `Only ${remainingStock} remain for this item.` };
+  }
+  const perUserLimit = Number(item.per_user_limit);
+  if (Number.isFinite(perUserLimit) && perUserLimit > 0 && (stats.userQuantity + normalizedQuantity) > perUserLimit) {
+    return { ok: false, reason: `You can only purchase ${perUserLimit} total for this item.` };
+  }
+
+  const totalCost = Math.floor(Number(item.price || 0)) * normalizedQuantity;
+  if (totalCost <= 0) return { ok: false, reason: 'That item has an invalid price.' };
+  if (balance.available < totalCost) {
+    return { ok: false, reason: `You need ${totalCost} $CHARM but only have ${balance.available} in DRIP right now.` };
+  }
+
+  const db = await teamPool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows: lockedRows } = await db.query(`SELECT * FROM marketplace_items WHERE id = $1 FOR UPDATE`, [itemId]);
+    const lockedItem = lockedRows[0];
+    if (!lockedItem || String(lockedItem.status) !== 'published') {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: 'That item is not available right now.' };
+    }
+    const lockedStatsRes = await db.query(
+      `SELECT
+         COALESCE(SUM(quantity), 0) AS total_purchased,
+         COALESCE(SUM(CASE WHEN discord_id = $2 THEN quantity ELSE 0 END), 0) AS user_quantity
+       FROM marketplace_purchases
+       WHERE item_id = $1`,
+      [itemId, discordId]
+    );
+    const lockedStats = lockedStatsRes.rows[0] || {};
+    const lockedTotalPurchased = Number(lockedStats.total_purchased || 0);
+    const lockedUserQuantity = Number(lockedStats.user_quantity || 0);
+    const lockedRemainingStock = Number.isFinite(Number(lockedItem.total_stock)) && Number(lockedItem.total_stock) > 0
+      ? Math.max(0, Number(lockedItem.total_stock) - lockedTotalPurchased)
+      : null;
+    if (lockedRemainingStock != null && normalizedQuantity > lockedRemainingStock) {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: `Only ${lockedRemainingStock} remain for this item.` };
+    }
+    const lockedPerUserLimit = Number(lockedItem.per_user_limit);
+    if (Number.isFinite(lockedPerUserLimit) && lockedPerUserLimit > 0 && (lockedUserQuantity + normalizedQuantity) > lockedPerUserLimit) {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: `You can only purchase ${lockedPerUserLimit} total for this item.` };
+    }
+
+    const transferResult = await awardDripPoints(
+      balance.settings.drip_realm_id,
+      [balance.botMemberId],
+      totalCost,
+      balance.settings.currency_id,
+      balance.settings,
+      {
+        context: 'marketplace_purchase',
+        initiatorDiscordId: discordId,
+        recipientDiscordId: client.user?.id || null,
+        recipientMemberIdOverride: balance.botMemberId,
+        senderMemberIdOverride: balance.memberIds[0],
+      }
+    );
+
+    await db.query(
+      `INSERT INTO marketplace_purchases (item_id, guild_id, discord_id, quantity, spent_amount, purchase_type)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [itemId, guild.id, discordId, normalizedQuantity, totalCost, itemType]
+    );
+    await db.query('COMMIT');
+    return {
+      ok: true,
+      item: lockedItem,
+      quantity: normalizedQuantity,
+      spentAmount: totalCost,
+      availableAfter: Math.max(0, balance.available - totalCost),
+      transferResult,
+    };
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    db.release();
+  }
 }
 
 async function clearDripSettings(guildId) {
@@ -3369,6 +3911,20 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
+      if (interaction.commandName === 'prize') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, {});
+        await interaction.reply({
+          embeds: [buildPrizeEditorEmbed(draft)],
+          components: buildPrizeEditorRows(draft),
+          flags: 64
+        });
+        return;
+      }
+
       if (interaction.commandName === 'set-points-mapping') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -4017,6 +4573,176 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({
           content: 'Portal triggered now.',
           components: [buildPortalAdminActionRow({ canTriggerNow: false })]
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_type_buy' || interaction.customId === 'prize_type_raffle') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, {
+          itemType: interaction.customId === 'prize_type_raffle' ? 'raffle' : 'buy',
+        });
+        await interaction.update({
+          embeds: [buildPrizeEditorEmbed(draft)],
+          components: buildPrizeEditorRows(draft),
+        });
+        return;
+      }
+
+      if ([
+        'prize_set_name',
+        'prize_set_description',
+        'prize_set_price',
+        'prize_set_thumbnail',
+        'prize_set_image',
+        'prize_set_limit',
+        'prize_set_stock',
+        'prize_set_roles',
+        'prize_set_raffle_time',
+        'prize_publish',
+      ].includes(interaction.customId)) {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const modalConfig = {
+          prize_set_name: ['prize_set_name_modal', 'Prize Name', 'prize_value', 'Item name', TextInputStyle.Short, true, 'Golden Ticket'],
+          prize_set_description: ['prize_set_description_modal', 'Prize Description', 'prize_value', 'Item description', TextInputStyle.Paragraph, true, 'What users get when they buy or enter.'],
+          prize_set_price: ['prize_set_price_modal', 'Prize Price', 'prize_value', 'Price in $CHARM', TextInputStyle.Short, true, '250'],
+          prize_set_thumbnail: ['prize_set_thumbnail_modal', 'Prize Thumbnail URL', 'prize_value', 'Optional thumbnail URL', TextInputStyle.Short, false, 'https://...'],
+          prize_set_image: ['prize_set_image_modal', 'Prize Image URL', 'prize_value', 'Optional image URL', TextInputStyle.Short, false, 'https://...'],
+          prize_set_limit: ['prize_set_limit_modal', 'Per User Limit', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '3'],
+          prize_set_stock: ['prize_set_stock_modal', 'Total Stock', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '25'],
+          prize_set_roles: ['prize_set_roles_modal', 'Allowed Roles', 'prize_value', 'Role IDs or mentions, comma separated', TextInputStyle.Paragraph, false, '<@&123>, <@&456>'],
+          prize_set_raffle_time: ['prize_set_raffle_time_modal', 'Raffle Time', 'prize_value', 'Minutes until raffle draw', TextInputStyle.Short, true, '1440'],
+          prize_publish: ['prize_publish_modal', 'Publish Prize', 'prize_value', 'Channel ID to publish into', TextInputStyle.Short, true, interaction.channel.id],
+        };
+        const [modalId, title, inputId, label, style, required, placeholder] = modalConfig[interaction.customId];
+        const modal = new ModalBuilder().setCustomId(modalId).setTitle(title);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId(inputId)
+              .setLabel(label)
+              .setStyle(style)
+              .setRequired(required)
+              .setPlaceholder(String(placeholder || ''))
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'prize_done') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id);
+        if (!draft) {
+          await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
+          return;
+        }
+        const validation = validatePrizeDraft(draft);
+        if (!validation.ok) {
+          await interaction.reply({
+            content: `Prize draft is missing or invalid: ${validation.problems.join(', ')}`,
+            flags: 64
+          });
+          return;
+        }
+        const previewItem = {
+          id: 'preview',
+          item_type: draft.itemType,
+          name: draft.name,
+          description: draft.description,
+          thumbnail_url: draft.thumbnailUrl || null,
+          image_url: draft.imageUrl || null,
+          price: draft.price,
+          per_user_limit: draft.perUserLimit || null,
+          total_stock: draft.totalStock || null,
+          allowed_role_ids: (draft.allowedRoleIds || []).join(','),
+          raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
+            ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+            : null,
+          status: 'published',
+        };
+        await interaction.update({
+          content: 'Preview of the user-facing marketplace post:',
+          embeds: [buildMarketplaceItemEmbed(previewItem, { totalPurchased: 0 })],
+          components: buildPrizePreviewRows(),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_edit') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id) || upsertPrizeDraft(interaction.guild.id, interaction.user.id, {});
+        await interaction.update({
+          content: '',
+          embeds: [buildPrizeEditorEmbed(draft)],
+          components: buildPrizeEditorRows(draft),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_cancel') {
+        clearPrizeDraft(interaction.guild.id, interaction.user.id);
+        await interaction.update({
+          content: 'Prize draft canceled.',
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+
+      const marketBuyMatch = interaction.customId.match(/^market_buy_(\d+)$/);
+      if (marketBuyMatch) {
+        const itemId = Number(marketBuyMatch[1]);
+        const item = await getMarketplaceItemById(itemId);
+        if (!item) {
+          await interaction.reply({ content: 'Marketplace item not found.', flags: 64 });
+          return;
+        }
+        const modal = new ModalBuilder().setCustomId(`market_buy_modal_${itemId}`).setTitle(
+          normalizeMarketplaceItemType(item.item_type) === 'raffle' ? 'Buy Raffle Tickets' : 'Buy Item'
+        );
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('market_quantity')
+              .setLabel('Quantity')
+              .setRequired(true)
+              .setPlaceholder('1')
+              .setStyle(TextInputStyle.Short)
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      const marketEntriesMatch = interaction.customId.match(/^market_entries_(\d+)$/);
+      if (marketEntriesMatch) {
+        const itemId = Number(marketEntriesMatch[1]);
+        const item = await getMarketplaceItemById(itemId);
+        if (!item) {
+          await interaction.reply({ content: 'Marketplace item not found.', flags: 64 });
+          return;
+        }
+        const stats = await getMarketplaceItemStats(itemId, interaction.user.id);
+        await interaction.reply({
+          content:
+            `Entries for **${item.name}**\n` +
+            `Your entries: **${stats.userQuantity}**\n` +
+            `Total entries: **${stats.totalPurchased}**\n` +
+            `Time left: **${formatMarketplaceTimeLeft(item)}**`,
+          flags: 64
         });
         return;
       }
@@ -4890,6 +5616,111 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if ([
+        'prize_set_name_modal',
+        'prize_set_description_modal',
+        'prize_set_price_modal',
+        'prize_set_thumbnail_modal',
+        'prize_set_image_modal',
+        'prize_set_limit_modal',
+        'prize_set_stock_modal',
+        'prize_set_roles_modal',
+        'prize_set_raffle_time_modal',
+      ].includes(interaction.customId)) {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const value = String(interaction.fields.getTextInputValue('prize_value') || '').trim();
+        const patch = {};
+        if (interaction.customId === 'prize_set_name_modal') patch.name = value;
+        if (interaction.customId === 'prize_set_description_modal') patch.description = value;
+        if (interaction.customId === 'prize_set_price_modal') patch.price = value;
+        if (interaction.customId === 'prize_set_thumbnail_modal') patch.thumbnailUrl = value;
+        if (interaction.customId === 'prize_set_image_modal') patch.imageUrl = value;
+        if (interaction.customId === 'prize_set_limit_modal') patch.perUserLimit = value;
+        if (interaction.customId === 'prize_set_stock_modal') patch.totalStock = value;
+        if (interaction.customId === 'prize_set_roles_modal') patch.allowedRoleIds = parseRoleIdsInput(value, interaction.guild);
+        if (interaction.customId === 'prize_set_raffle_time_modal') patch.raffleDurationMinutes = value;
+        const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, patch);
+        await interaction.reply({
+          embeds: [buildPrizeEditorEmbed(draft)],
+          components: buildPrizeEditorRows(draft),
+          flags: 64
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_publish_modal') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id);
+        if (!draft) {
+          await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
+          return;
+        }
+        const validation = validatePrizeDraft(draft);
+        if (!validation.ok) {
+          await interaction.reply({
+            content: `Prize draft is missing or invalid: ${validation.problems.join(', ')}`,
+            flags: 64
+          });
+          return;
+        }
+        const channelId = String(interaction.fields.getTextInputValue('prize_value') || '').trim().replace(/[<#>]/g, '');
+        if (!/^\d{16,20}$/.test(channelId)) {
+          await interaction.reply({ content: 'Enter a valid channel ID.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const item = await createMarketplaceItemFromDraft(interaction.guild.id, interaction.user.id, draft);
+        const published = await publishMarketplaceItem(item.id, channelId, interaction.user.id);
+        clearPrizeDraft(interaction.guild.id, interaction.user.id);
+        await interaction.editReply({
+          content:
+            `Prize published.\n` +
+            `Item ID: \`${published.id}\`\n` +
+            `Channel: <#${channelId}>`
+        });
+        return;
+      }
+
+      const marketBuyModalMatch = interaction.customId.match(/^market_buy_modal_(\d+)$/);
+      if (marketBuyModalMatch) {
+        const itemId = Number(marketBuyModalMatch[1]);
+        const rawQuantity = String(interaction.fields.getTextInputValue('market_quantity') || '').trim();
+        const quantity = Number(rawQuantity);
+        if (!/^\d+$/.test(rawQuantity) || !Number.isFinite(quantity) || quantity < 1 || quantity > 1000) {
+          await interaction.reply({ content: 'Enter a whole-number quantity between 1 and 1000.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const result = await purchaseMarketplaceItem(interaction.guild, interaction.user.id, itemId, quantity);
+        if (!result.ok) {
+          await interaction.editReply({ content: result.reason || 'Purchase failed.' });
+          return;
+        }
+        await refreshMarketplaceItemMessage(itemId);
+        await postMarketplacePurchaseLog({
+          guild: interaction.guild,
+          actorDiscordId: interaction.user.id,
+          item: result.item,
+          quantity: result.quantity,
+          spentAmount: result.spentAmount,
+        });
+        await interaction.editReply({
+          content:
+            `${normalizeMarketplaceItemType(result.item.item_type) === 'raffle' ? 'Tickets purchased.' : 'Purchase complete.'}\n` +
+            `Item: **${result.item.name}**\n` +
+            `Quantity: **${result.quantity}**\n` +
+            `Spent: **${result.spentAmount} $CHARM**\n` +
+            `Marketplace balance remaining: **${result.availableAfter} $CHARM**`
+        });
+        return;
+      }
+
       if (interaction.customId === 'portal_admin_change_time_modal') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
           await interaction.reply({ content: 'Administrator only.', flags: 64 });
