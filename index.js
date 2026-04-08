@@ -1009,6 +1009,10 @@ function buildPortalAdminActionRow({ canTriggerNow = true } = {}) {
       .setLabel('STOP')
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
+      .setCustomId('portal_admin_change_time')
+      .setLabel('CHANGE TIME')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
       .setCustomId('portal_admin_trigger_now')
       .setLabel('TRIGGER NOW')
       .setStyle(ButtonStyle.Success)
@@ -3960,6 +3964,26 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.customId === 'portal_admin_change_time') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          await interaction.reply({ content: 'Administrator only.', flags: 64 });
+          return;
+        }
+        const modal = new ModalBuilder().setCustomId('portal_admin_change_time_modal').setTitle('Change Portal Timer');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('portal_minutes')
+              .setLabel('Next trigger in minutes')
+              .setRequired(true)
+              .setPlaceholder('60')
+              .setStyle(TextInputStyle.Short)
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
       if (interaction.customId === 'portal_admin_trigger_now') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
           await interaction.reply({ content: 'Administrator only.', flags: 64 });
@@ -4866,6 +4890,35 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'portal_admin_change_time_modal') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          await interaction.reply({ content: 'Administrator only.', flags: 64 });
+          return;
+        }
+        const rawMinutes = String(interaction.fields.getTextInputValue('portal_minutes') || '').trim();
+        const minutes = Number(rawMinutes);
+        if (!/^\d+$/.test(rawMinutes) || !Number.isFinite(minutes) || minutes < 1 || minutes > 10080) {
+          await interaction.reply({ content: 'Enter a whole number of minutes between 1 and 10080.', flags: 64 });
+          return;
+        }
+
+        const result = portalEvent.setNextPortalTriggerDelayMinutes(minutes);
+        if (!result.ok) {
+          await interaction.reply({ content: result.reason || 'Could not change the portal timer.', flags: 64 });
+          return;
+        }
+
+        const refreshed = portalEvent.getPortalState();
+        await interaction.reply({
+          content:
+            `Portal timer updated.\n` +
+            `${formatPortalNextTriggerText(refreshed)}`,
+          components: [buildPortalAdminActionRow({ canTriggerNow: !refreshed.portalActive })],
+          flags: 64
+        });
+        return;
+      }
+
       if (interaction.customId === 'verify_connect_modal') {
         const raw = interaction.fields.getTextInputValue('wallet_address');
         const addresses = parseWalletAddressesInput(raw);

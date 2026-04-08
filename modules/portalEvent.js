@@ -31,6 +31,7 @@ let portalGuildId = process.env.PORTAL_GUILD_ID || null;
 let currentPortal = null;
 let schedulerEnabled = false;
 let nextPortalAt = null;
+let nextPortalDelayOverrideMs = null;
 
 function initPortalEvent(injectedDeps) {
   deps = injectedDeps;
@@ -356,21 +357,30 @@ function clearTimers() {
   portalCloseTimeout = null;
 }
 
-function schedulePortal() {
+function schedulePortalWithDelay(delayMs) {
   if (!schedulerEnabled) return;
   if (portalTimeout) {
     clearTimeout(portalTimeout);
     portalTimeout = null;
   }
-  const delay = Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS + 1)) + MIN_DELAY_MS;
-  nextPortalAt = Date.now() + delay;
+  const safeDelay = Math.max(60 * 1000, Math.floor(Number(delayMs) || 0));
+  nextPortalAt = Date.now() + safeDelay;
   portalTimeout = setTimeout(() => {
     nextPortalAt = null;
     triggerPortalEvent().catch((err) => {
       console.error('Portal trigger error:', err);
       schedulePortal();
     });
-  }, delay);
+  }, safeDelay);
+}
+
+function schedulePortal() {
+  if (!schedulerEnabled) return;
+  const delay = Number.isFinite(nextPortalDelayOverrideMs)
+    ? nextPortalDelayOverrideMs
+    : Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS + 1)) + MIN_DELAY_MS;
+  nextPortalDelayOverrideMs = null;
+  schedulePortalWithDelay(delay);
 }
 
 async function closePortal({ announce = true } = {}) {
@@ -485,6 +495,7 @@ async function stopPortalScheduler({ closeActivePortal = true } = {}) {
   if (portalTimeout) clearTimeout(portalTimeout);
   portalTimeout = null;
   nextPortalAt = null;
+  nextPortalDelayOverrideMs = null;
 
   if (closeActivePortal && portalActive) {
     await closePortal({ announce: true });
@@ -493,6 +504,33 @@ async function stopPortalScheduler({ closeActivePortal = true } = {}) {
     portalCloseTimeout = null;
   }
   return { ok: true, schedulerEnabled, portalActive };
+}
+
+function setNextPortalTriggerDelayMinutes(minutes) {
+  assertReady();
+  const parsedMinutes = Math.floor(Number(minutes));
+  if (!Number.isFinite(parsedMinutes) || parsedMinutes < 1) {
+    return { ok: false, reason: 'Minutes must be at least 1.' };
+  }
+
+  const delayMs = parsedMinutes * 60 * 1000;
+  nextPortalDelayOverrideMs = delayMs;
+
+  if (schedulerEnabled) {
+    if (portalActive && currentPortal?.expiresAt) {
+      nextPortalAt = Number(currentPortal.expiresAt) + delayMs;
+    } else {
+      schedulePortalWithDelay(delayMs);
+    }
+  }
+
+  return {
+    ok: true,
+    schedulerEnabled,
+    portalActive,
+    nextPortalAt,
+    delayMinutes: parsedMinutes,
+  };
 }
 
 async function fetchEligibleSquigsForUser(links) {
@@ -705,6 +743,7 @@ function getPortalState() {
     claimedCount: claimedUsers.size,
     currentPortal,
     nextPortalAt,
+    nextPortalDelayOverrideMs,
   };
 }
 
@@ -713,6 +752,7 @@ module.exports = {
   startPortalScheduler,
   stopPortalScheduler,
   triggerPortalEvent,
+  setNextPortalTriggerDelayMinutes,
   handlePortalClaim,
   handlePortalSelect,
   getPortalState,
