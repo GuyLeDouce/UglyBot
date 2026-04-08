@@ -366,6 +366,7 @@ async function ensureMarketplaceSchema() {
       published_channel_id TEXT,
       published_message_id TEXT,
       cancelled_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
       created_by_discord_id TEXT NOT NULL,
       updated_by_discord_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -374,6 +375,7 @@ async function ensureMarketplaceSchema() {
   `);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_items_guild_status_idx ON marketplace_items (guild_id, status, updated_at DESC);`);
   await prizesPool.query(`ALTER TABLE marketplace_items ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;`);
+  await prizesPool.query(`ALTER TABLE marketplace_items ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;`);
   await prizesPool.query(`
     CREATE TABLE IF NOT EXISTS marketplace_purchases (
       id BIGSERIAL PRIMARY KEY,
@@ -390,6 +392,19 @@ async function ensureMarketplaceSchema() {
   `);
   await prizesPool.query(`ALTER TABLE marketplace_purchases ADD COLUMN IF NOT EXISTS refunded_amount NUMERIC;`);
   await prizesPool.query(`ALTER TABLE marketplace_purchases ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;`);
+  await prizesPool.query(`
+    CREATE TABLE IF NOT EXISTS marketplace_raffle_winners (
+      id BIGSERIAL PRIMARY KEY,
+      item_id BIGINT NOT NULL REFERENCES marketplace_items(id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
+      winner_rank INTEGER NOT NULL,
+      ticket_count INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await prizesPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS marketplace_raffle_winners_item_user_uidx ON marketplace_raffle_winners (item_id, discord_id);`);
+  await prizesPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS marketplace_raffle_winners_item_rank_uidx ON marketplace_raffle_winners (item_id, winner_rank);`);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_item_idx ON marketplace_purchases (item_id, created_at DESC);`);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_user_idx ON marketplace_purchases (guild_id, discord_id, created_at DESC);`);
   console.log(`✅ marketplace schema ready (${DATABASE_URL_PRIZES ? 'DATABASE_URL_PRIZES' : 'team database fallback'})`);
@@ -755,6 +770,7 @@ client.once(Events.ClientReady, async (c) => {
   try { await registerSlashCommands(c); } catch (e) {
     console.error('Slash register error:', e.message);
   }
+  startMarketplaceRaffleProcessor();
   if (String(process.env.PORTAL_AUTO_START || '').toLowerCase() === 'true') {
     try {
       portalEvent.startPortalScheduler({
@@ -1357,6 +1373,59 @@ async function getMarketplaceItemStats(itemId, discordId = null) {
   };
 }
 
+async function getMarketplaceEntryLeaderboard(itemId) {
+  const { rows } = await prizesPool.query(
+    `SELECT discord_id, COALESCE(SUM(quantity), 0) AS ticket_count
+     FROM marketplace_purchases
+     WHERE item_id = $1
+       AND refunded_at IS NULL
+     GROUP BY discord_id
+     ORDER BY ticket_count DESC, discord_id ASC`,
+    [itemId]
+  );
+  return rows.map((row) => ({
+    discordId: String(row.discord_id || '').trim(),
+    ticketCount: Number(row.ticket_count || 0),
+  })).filter((row) => row.discordId && row.ticketCount > 0);
+}
+
+async function getMarketplaceRaffleWinners(itemId) {
+  const { rows } = await prizesPool.query(
+    `SELECT discord_id, winner_rank, ticket_count
+     FROM marketplace_raffle_winners
+     WHERE item_id = $1
+     ORDER BY winner_rank ASC`,
+    [itemId]
+  );
+  return rows.map((row) => ({
+    discordId: String(row.discord_id || '').trim(),
+    rank: Number(row.winner_rank || 0),
+    ticketCount: Number(row.ticket_count || 0),
+  })).filter((row) => row.discordId && row.rank > 0);
+}
+
+function pickRandomTicketWinners(entries, winnerCount) {
+  const ticketPool = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const discordId = String(entry.discordId || '').trim();
+    const ticketCount = Math.max(0, Math.floor(Number(entry.ticketCount || 0)));
+    if (!discordId || ticketCount <= 0) continue;
+    for (let i = 0; i < ticketCount; i++) {
+      ticketPool.push({ discordId, ticketCount });
+    }
+  }
+
+  const winners = [];
+  let remaining = Math.max(0, Math.floor(Number(winnerCount || 0)));
+  while (ticketPool.length && remaining > 0) {
+    const chosenIndex = Math.floor(Math.random() * ticketPool.length);
+    winners.push(ticketPool[chosenIndex]);
+    ticketPool.splice(chosenIndex, 1);
+    remaining -= 1;
+  }
+  return winners;
+}
+
 function getMarketplaceRemainingStock(item, stats) {
   const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
   const capacity = itemType === 'raffle'
@@ -1374,6 +1443,12 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
     .map((x) => x.trim())
     .filter(Boolean);
   const titleType = itemType === 'raffle' ? 'Raffle' : 'Buy';
+  const status = String(item?.status || 'published');
+  const raffleStatusText = status === 'completed'
+    ? 'Draw completed'
+    : status === 'cancelled'
+      ? 'Cancelled'
+      : formatMarketplaceTimeLeft(item);
   const embed = new EmbedBuilder()
     .setTitle(`${String(item?.name || 'Marketplace Item').slice(0, 220)} | ${titleType}`)
     .setColor(itemType === 'raffle' ? 0xF1C40F : 0x2ECC71)
@@ -1384,7 +1459,7 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
           { name: 'Tickets Remaining', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
           { name: 'Winners', value: Number(item?.total_stock) > 0 ? `**${item.total_stock}**` : '`not set`', inline: true },
           { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
-          { name: 'Time Left Until Draw', value: formatMarketplaceTimeLeft(item), inline: false },
+          { name: status === 'completed' ? 'Result' : 'Time Left Until Draw', value: raffleStatusText, inline: false },
         ]
       : [
           { name: 'Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
@@ -1508,6 +1583,20 @@ async function markMarketplaceItemCancelled(itemId, actorDiscordId) {
   return rows[0] || null;
 }
 
+async function markMarketplaceItemCompleted(itemId, actorDiscordId) {
+  const { rows } = await prizesPool.query(
+    `UPDATE marketplace_items
+     SET status = 'completed',
+         completed_at = NOW(),
+         updated_by_discord_id = $2,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [itemId, actorDiscordId]
+  );
+  return rows[0] || null;
+}
+
 async function getRefundableMarketplacePurchases(itemId) {
   const { rows } = await prizesPool.query(
     `SELECT id, guild_id, discord_id, quantity, spent_amount, purchase_type, refunded_at
@@ -1528,6 +1617,146 @@ async function markMarketplacePurchaseRefunded(purchaseId, refundedAmount) {
      WHERE id = $1`,
     [purchaseId, refundedAmount]
   );
+}
+
+async function storeMarketplaceRaffleWinners(itemId, guildId, winners) {
+  for (let i = 0; i < winners.length; i++) {
+    const winner = winners[i];
+    await prizesPool.query(
+      `INSERT INTO marketplace_raffle_winners (item_id, guild_id, discord_id, winner_rank, ticket_count)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (item_id, discord_id) DO NOTHING`,
+      [itemId, guildId, winner.discordId, i + 1, winner.ticketCount]
+    );
+  }
+}
+
+function buildMarketplaceWinnersAnnouncement(item, winners) {
+  const lines = winners.length
+    ? winners.map((winner, index) => `${index + 1}. <@${winner.discordId}> - ${winner.ticketCount} ticket${winner.ticketCount === 1 ? '' : 's'}`)
+    : ['No valid entries were available for this raffle.'];
+  return (
+    `**Raffle Complete: ${item.name}**\n` +
+    `${lines.join('\n')}`
+  );
+}
+
+async function announceMarketplaceRaffleWinners(item, winners) {
+  const channel = await client.channels.fetch(item.published_channel_id).catch(() => null);
+  if (!channel?.isTextBased()) return;
+  await channel.send({ content: buildMarketplaceWinnersAnnouncement(item, winners) }).catch(() => null);
+}
+
+async function getExpiredPublishedRaffles(limit = 10) {
+  const { rows } = await prizesPool.query(
+    `SELECT *
+     FROM marketplace_items
+     WHERE item_type = 'raffle'
+       AND status = 'published'
+       AND raffle_ends_at IS NOT NULL
+       AND raffle_ends_at <= NOW()
+     ORDER BY raffle_ends_at ASC
+     LIMIT $1`,
+    [limit]
+  );
+  return rows;
+}
+
+async function completeMarketplaceRaffle(itemId, actorDiscordId = client.user?.id || 'system') {
+  const db = await prizesPool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows } = await db.query(`SELECT * FROM marketplace_items WHERE id = $1 FOR UPDATE`, [itemId]);
+    const item = rows[0];
+    if (!item) {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: 'Raffle item not found.' };
+    }
+    if (String(item.item_type) !== 'raffle') {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: 'Item is not a raffle.' };
+    }
+    if (String(item.status) === 'completed') {
+      await db.query('ROLLBACK');
+      return { ok: true, item, winners: await getMarketplaceRaffleWinners(itemId), alreadyCompleted: true };
+    }
+    if (String(item.status) === 'cancelled') {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: 'Raffle has already been cancelled.' };
+    }
+    if (item.raffle_ends_at && new Date(item.raffle_ends_at).getTime() > Date.now()) {
+      await db.query('ROLLBACK');
+      return { ok: false, reason: 'Raffle has not ended yet.' };
+    }
+
+    const leaderboardRes = await db.query(
+      `SELECT discord_id, COALESCE(SUM(quantity), 0) AS ticket_count
+       FROM marketplace_purchases
+       WHERE item_id = $1
+         AND refunded_at IS NULL
+       GROUP BY discord_id
+       ORDER BY ticket_count DESC, discord_id ASC`,
+      [itemId]
+    );
+    const entries = leaderboardRes.rows.map((row) => ({
+      discordId: String(row.discord_id || '').trim(),
+      ticketCount: Number(row.ticket_count || 0),
+    })).filter((entry) => entry.discordId && entry.ticketCount > 0);
+
+    const winnerCount = Math.max(1, Math.floor(Number(item.total_stock || 1)));
+    const winners = pickRandomTicketWinners(entries, winnerCount);
+
+    await db.query(
+      `UPDATE marketplace_items
+       SET status = 'completed',
+           completed_at = NOW(),
+           updated_by_discord_id = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [itemId, actorDiscordId]
+    );
+
+    for (let i = 0; i < winners.length; i++) {
+      const winner = winners[i];
+      await db.query(
+        `INSERT INTO marketplace_raffle_winners (item_id, guild_id, discord_id, winner_rank, ticket_count)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (item_id, discord_id) DO NOTHING`,
+        [itemId, item.guild_id, winner.discordId, i + 1, winner.ticketCount]
+      );
+    }
+
+    await db.query('COMMIT');
+    const completedItem = await getMarketplaceItemById(itemId);
+    await refreshMarketplaceItemMessage(itemId);
+    await announceMarketplaceRaffleWinners(completedItem || item, winners);
+    return { ok: true, item: completedItem || item, winners };
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    db.release();
+  }
+}
+
+let marketplaceRaffleInterval = null;
+
+function startMarketplaceRaffleProcessor() {
+  const run = async () => {
+    try {
+      const expired = await getExpiredPublishedRaffles(10);
+      for (const raffle of expired) {
+        await completeMarketplaceRaffle(raffle.id).catch((err) => {
+          console.warn('Marketplace raffle completion failed:', String(err?.message || err || ''));
+        });
+      }
+    } catch (err) {
+      console.warn('Marketplace raffle processor failed:', String(err?.message || err || ''));
+    }
+  };
+  if (marketplaceRaffleInterval) clearInterval(marketplaceRaffleInterval);
+  marketplaceRaffleInterval = setInterval(run, 60 * 1000);
+  run().catch(() => null);
 }
 
 async function resolveMarketplaceMemberIds(guildId, discordId) {
@@ -1604,6 +1833,9 @@ async function cancelMarketplaceRaffleAndRefund(guild, actorDiscordId, messageId
   if (!item) return { ok: false, reason: 'No marketplace raffle found for that message ID.' };
   if (normalizeMarketplaceItemType(item.item_type) !== 'raffle') {
     return { ok: false, reason: 'That marketplace post is not a raffle.' };
+  }
+  if (String(item.status) === 'completed') {
+    return { ok: false, reason: 'That raffle has already completed and winners were drawn.' };
   }
 
   const cancelledItem = String(item.status) === 'cancelled'
@@ -5067,13 +5299,22 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Marketplace item not found.', flags: 64 });
           return;
         }
-        const stats = await getMarketplaceItemStats(itemId, interaction.user.id);
+        const entries = await getMarketplaceEntryLeaderboard(itemId);
+        if (!entries.length) {
+          await interaction.reply({
+            content: `No entries yet for **${item.name}**.`,
+            flags: 64
+          });
+          return;
+        }
+        const lines = entries
+          .slice(0, 100)
+          .map((entry) => `<@${entry.discordId}> - ${entry.ticketCount} ticket${entry.ticketCount === 1 ? '' : 's'}`);
+        const truncated = entries.length > 100 ? `\n...and ${entries.length - 100} more` : '';
         await interaction.reply({
           content:
             `Entries for **${item.name}**\n` +
-            `Your entries: **${stats.userQuantity}**\n` +
-            `Total entries: **${stats.totalPurchased}**\n` +
-            `Time left: **${formatMarketplaceTimeLeft(item)}**`,
+            `${lines.join('\n')}${truncated}`,
           flags: 64
         });
         return;
