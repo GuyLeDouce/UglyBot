@@ -365,6 +365,7 @@ async function ensureMarketplaceSchema() {
       status TEXT NOT NULL DEFAULT 'draft',
       published_channel_id TEXT,
       published_message_id TEXT,
+      cancelled_at TIMESTAMPTZ,
       created_by_discord_id TEXT NOT NULL,
       updated_by_discord_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -372,6 +373,7 @@ async function ensureMarketplaceSchema() {
     );
   `);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_items_guild_status_idx ON marketplace_items (guild_id, status, updated_at DESC);`);
+  await prizesPool.query(`ALTER TABLE marketplace_items ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;`);
   await prizesPool.query(`
     CREATE TABLE IF NOT EXISTS marketplace_purchases (
       id BIGSERIAL PRIMARY KEY,
@@ -381,9 +383,13 @@ async function ensureMarketplaceSchema() {
       quantity INTEGER NOT NULL,
       spent_amount NUMERIC NOT NULL,
       purchase_type TEXT NOT NULL,
+      refunded_amount NUMERIC,
+      refunded_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await prizesPool.query(`ALTER TABLE marketplace_purchases ADD COLUMN IF NOT EXISTS refunded_amount NUMERIC;`);
+  await prizesPool.query(`ALTER TABLE marketplace_purchases ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;`);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_item_idx ON marketplace_purchases (item_id, created_at DESC);`);
   await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_user_idx ON marketplace_purchases (guild_id, discord_id, created_at DESC);`);
   console.log(`✅ marketplace schema ready (${DATABASE_URL_PRIZES ? 'DATABASE_URL_PRIZES' : 'team database fallback'})`);
@@ -676,6 +682,16 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('prize')
       .setDescription('Admin: open the marketplace prize editor dashboard')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('endraffle')
+      .setDescription('Admin: cancel an active raffle and refund all purchases')
+      .addStringOption((opt) =>
+        opt
+          .setName('message_id')
+          .setDescription('Published raffle message ID')
+          .setRequired(true)
+      )
       .toJSON(),
     new SlashCommandBuilder()
       .setName('info')
@@ -1305,6 +1321,17 @@ async function getMarketplaceItemById(itemId) {
   return rows[0] || null;
 }
 
+async function getMarketplaceItemByPublishedMessage(guildId, messageId) {
+  const { rows } = await prizesPool.query(
+    `SELECT *
+     FROM marketplace_items
+     WHERE guild_id = $1 AND published_message_id = $2
+     LIMIT 1`,
+    [guildId, messageId]
+  );
+  return rows[0] || null;
+}
+
 async function getMarketplaceItemStats(itemId, discordId = null) {
   const [{ rows: totals }, { rows: mine }] = await Promise.all([
     prizesPool.query(
@@ -1467,6 +1494,42 @@ async function refreshMarketplaceItemMessage(itemId) {
   }).catch(() => null);
 }
 
+async function markMarketplaceItemCancelled(itemId, actorDiscordId) {
+  const { rows } = await prizesPool.query(
+    `UPDATE marketplace_items
+     SET status = 'cancelled',
+         cancelled_at = NOW(),
+         updated_by_discord_id = $2,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [itemId, actorDiscordId]
+  );
+  return rows[0] || null;
+}
+
+async function getRefundableMarketplacePurchases(itemId) {
+  const { rows } = await prizesPool.query(
+    `SELECT id, guild_id, discord_id, quantity, spent_amount, purchase_type, refunded_at
+     FROM marketplace_purchases
+     WHERE item_id = $1
+       AND refunded_at IS NULL
+     ORDER BY created_at ASC`,
+    [itemId]
+  );
+  return rows;
+}
+
+async function markMarketplacePurchaseRefunded(purchaseId, refundedAmount) {
+  await prizesPool.query(
+    `UPDATE marketplace_purchases
+     SET refunded_amount = $2,
+         refunded_at = NOW()
+     WHERE id = $1`,
+    [purchaseId, refundedAmount]
+  );
+}
+
 async function resolveMarketplaceMemberIds(guildId, discordId) {
   const settings = await getGuildSettings(guildId);
   const links = await getWalletLinks(guildId, discordId);
@@ -1519,6 +1582,108 @@ async function postMarketplacePurchaseLog({ guild, actorDiscordId, item, quantit
       `Spent: ${spentAmount} $CHARM\n` +
       `Item ID: \`${item.id}\``
   });
+}
+
+async function postMarketplaceRefundLog({ guild, actorDiscordId, item, refundedCount, refundedAmount, failures = [] }) {
+  await postAdminSystemLog({
+    guild,
+    category: 'Marketplace Refund',
+    message:
+      `Actor: <@${actorDiscordId}>\n` +
+      `Item: **${item.name}**\n` +
+      `Type: ${normalizeMarketplaceItemType(item.item_type)}\n` +
+      `Refunded purchases: ${refundedCount}\n` +
+      `Refunded amount: ${refundedAmount} $CHARM\n` +
+      `Failures: ${failures.length ? failures.join(' | ').slice(0, 1200) : 'none'}\n` +
+      `Item ID: \`${item.id}\``
+  });
+}
+
+async function cancelMarketplaceRaffleAndRefund(guild, actorDiscordId, messageId) {
+  const item = await getMarketplaceItemByPublishedMessage(guild.id, messageId);
+  if (!item) return { ok: false, reason: 'No marketplace raffle found for that message ID.' };
+  if (normalizeMarketplaceItemType(item.item_type) !== 'raffle') {
+    return { ok: false, reason: 'That marketplace post is not a raffle.' };
+  }
+
+  const cancelledItem = String(item.status) === 'cancelled'
+    ? item
+    : await markMarketplaceItemCancelled(item.id, actorDiscordId);
+
+  await refreshMarketplaceItemMessage(item.id);
+
+  const refundablePurchases = await getRefundableMarketplacePurchases(item.id);
+  if (!refundablePurchases.length) {
+    return {
+      ok: true,
+      item: cancelledItem || item,
+      refundedCount: 0,
+      refundedAmount: 0,
+      failures: [],
+    };
+  }
+
+  const settings = await getGuildSettings(guild.id);
+  const botMemberId = resolveConfiguredDripSenderMemberId();
+  if (!settings?.drip_api_key || !settings?.drip_realm_id || !settings?.currency_id || !botMemberId) {
+    return { ok: false, reason: 'Refund failed: DRIP sender configuration is incomplete.' };
+  }
+
+  let refundedCount = 0;
+  let refundedAmount = 0;
+  const failures = [];
+
+  for (const purchase of refundablePurchases) {
+    try {
+      const resolved = await resolveMarketplaceMemberIds(guild.id, purchase.discord_id);
+      if (!resolved.memberIds.length) {
+        failures.push(`<@${purchase.discord_id}>: no DRIP member ID found`);
+        continue;
+      }
+      const amount = Math.floor(Number(purchase.spent_amount || 0));
+      if (!Number.isFinite(amount) || amount <= 0) {
+        failures.push(`<@${purchase.discord_id}>: invalid refund amount`);
+        continue;
+      }
+
+      await awardDripPoints(
+        settings.drip_realm_id,
+        resolved.memberIds,
+        amount,
+        settings.currency_id,
+        settings,
+        {
+          context: 'marketplace_refund',
+          initiatorDiscordId: actorDiscordId,
+          recipientDiscordId: purchase.discord_id,
+          senderMemberIdOverride: botMemberId,
+        }
+      );
+
+      await markMarketplacePurchaseRefunded(purchase.id, amount);
+      refundedCount += 1;
+      refundedAmount += amount;
+    } catch (err) {
+      failures.push(`<@${purchase.discord_id}>: ${String(err?.message || err || '').slice(0, 180)}`);
+    }
+  }
+
+  await postMarketplaceRefundLog({
+    guild,
+    actorDiscordId,
+    item: cancelledItem || item,
+    refundedCount,
+    refundedAmount,
+    failures,
+  });
+
+  return {
+    ok: true,
+    item: cancelledItem || item,
+    refundedCount,
+    refundedAmount,
+    failures,
+  };
 }
 
 async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
@@ -3965,6 +4130,37 @@ client.on('interactionCreate', async (interaction) => {
           embeds: [buildPrizeEditorEmbed(draft)],
           components: buildPrizeEditorRows(draft),
           flags: 64
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'endraffle') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const messageId = String(interaction.options.getString('message_id', true) || '').trim();
+        if (!/^\d{16,20}$/.test(messageId)) {
+          await interaction.editReply({ content: 'Invalid message ID.' });
+          return;
+        }
+
+        const result = await cancelMarketplaceRaffleAndRefund(interaction.guild, interaction.user.id, messageId);
+        if (!result.ok) {
+          await interaction.editReply({ content: result.reason || 'Could not end raffle.' });
+          return;
+        }
+
+        const failureText = result.failures.length
+          ? `\nRefund failures:\n${result.failures.map((x) => `- ${x}`).join('\n').slice(0, 1200)}`
+          : '';
+        await interaction.editReply({
+          content:
+            `Raffle cancelled: **${result.item.name}**\n` +
+            `Refunded purchases: **${result.refundedCount}**\n` +
+            `Refunded amount: **${result.refundedAmount} $CHARM**` +
+            failureText
         });
         return;
       }
