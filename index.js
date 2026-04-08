@@ -1196,6 +1196,8 @@ function formatMarketplaceTimeLeft(item) {
 
 function buildPrizeEditorEmbed(draft) {
   const type = normalizeMarketplaceItemType(draft?.itemType);
+  const limitLabel = type === 'raffle' ? 'Tickets available' : 'Per person limit';
+  const stockLabel = type === 'raffle' ? 'Winner count' : 'Total stock';
   return new EmbedBuilder()
     .setTitle(`Prize Editor | ${type === 'raffle' ? 'Raffle' : 'Buy Item'}`)
     .setColor(0xE67E22)
@@ -1206,8 +1208,8 @@ function buildPrizeEditorEmbed(draft) {
       `Thumbnail: ${draft?.thumbnailUrl ? draft.thumbnailUrl : '`not set`'}\n` +
       `Image: ${draft?.imageUrl ? draft.imageUrl : '`not set`'}\n` +
       `Price: ${draft?.price ? `**${draft.price} $CHARM**` : '`not set`'}\n` +
-      `Per person limit: ${draft?.perUserLimit ? `**${draft.perUserLimit}**` : 'Unlimited'}\n` +
-      `Total stock: ${draft?.totalStock ? `**${draft.totalStock}**` : 'Unlimited'}\n` +
+      `${limitLabel}: ${draft?.perUserLimit ? `**${draft.perUserLimit}**` : 'Unlimited'}\n` +
+      `${stockLabel}: ${draft?.totalStock ? `**${draft.totalStock}**` : (type === 'raffle' ? '`not set`' : 'Unlimited')}\n` +
       `Allowed roles: ${formatRoleMentions(draft?.allowedRoleIds)}\n` +
       `Publish channel: ${draft?.selectedChannelId ? `<#${draft.selectedChannelId}>` : '`not set`'}\n` +
       `Raffle timer: ${type === 'raffle'
@@ -1218,6 +1220,8 @@ function buildPrizeEditorEmbed(draft) {
 
 function buildPrizeEditorRows(draft) {
   const isRaffle = normalizeMarketplaceItemType(draft?.itemType) === 'raffle';
+  const limitLabel = isRaffle ? 'Tickets' : 'Per Person';
+  const stockLabel = isRaffle ? 'Winners' : 'Stock';
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prize_type_buy').setLabel('Type: Buy').setStyle(isRaffle ? ButtonStyle.Secondary : ButtonStyle.Primary),
@@ -1229,8 +1233,8 @@ function buildPrizeEditorRows(draft) {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prize_set_thumbnail').setLabel('Thumbnail').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_set_image').setLabel('Image').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('prize_set_limit').setLabel('Per Person').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('prize_set_stock').setLabel('Stock').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_limit').setLabel(limitLabel).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_set_stock').setLabel(stockLabel).setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_clear_roles').setLabel('Clear Roles').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
@@ -1275,14 +1279,20 @@ function validatePrizeDraft(draft) {
   const price = Number(draft?.price);
   if (!Number.isFinite(price) || price <= 0) problems.push('Price');
   const perUserLimit = String(draft?.perUserLimit || '').trim();
-  if (perUserLimit && (!Number.isInteger(Number(perUserLimit)) || Number(perUserLimit) < 1)) problems.push('Per person limit');
+  if (perUserLimit && (!Number.isInteger(Number(perUserLimit)) || Number(perUserLimit) < 1)) {
+    problems.push(itemType === 'raffle' ? 'Tickets available' : 'Per person limit');
+  }
   const totalStock = String(draft?.totalStock || '').trim();
-  if (totalStock && (!Number.isInteger(Number(totalStock)) || Number(totalStock) < 1)) problems.push('Total stock');
+  if (totalStock && (!Number.isInteger(Number(totalStock)) || Number(totalStock) < 1)) {
+    problems.push(itemType === 'raffle' ? 'Winner count' : 'Total stock');
+  }
   if (draft?.thumbnailUrl && !normalizeImageUrl(draft.thumbnailUrl)) problems.push('Thumbnail URL');
   if (draft?.imageUrl && !normalizeImageUrl(draft.imageUrl)) problems.push('Image URL');
   if (itemType === 'raffle') {
     const duration = Number(draft?.raffleDurationMinutes);
     if (!Number.isInteger(duration) || duration < 1) problems.push('Raffle time');
+    if (!perUserLimit) problems.push('Tickets available');
+    if (!totalStock) problems.push('Winner count');
   }
   return {
     ok: problems.length === 0,
@@ -1321,9 +1331,12 @@ async function getMarketplaceItemStats(itemId, discordId = null) {
 }
 
 function getMarketplaceRemainingStock(item, stats) {
-  const totalStock = Number(item?.total_stock);
-  if (!Number.isFinite(totalStock) || totalStock <= 0) return null;
-  return Math.max(0, totalStock - Number(stats?.totalPurchased || 0));
+  const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
+  const capacity = itemType === 'raffle'
+    ? Number(item?.per_user_limit)
+    : Number(item?.total_stock);
+  if (!Number.isFinite(capacity) || capacity <= 0) return null;
+  return Math.max(0, capacity - Number(stats?.totalPurchased || 0));
 }
 
 function buildMarketplaceItemEmbed(item, stats = {}) {
@@ -1338,13 +1351,21 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
     .setTitle(`${String(item?.name || 'Marketplace Item').slice(0, 220)} | ${titleType}`)
     .setColor(itemType === 'raffle' ? 0xF1C40F : 0x2ECC71)
     .setDescription(String(item?.description || '').slice(0, 4000))
-    .addFields(
-      { name: 'Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
-      { name: 'Available', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
-      { name: 'Per Person', value: Number(item?.per_user_limit) > 0 ? `**${item.per_user_limit}**` : 'Unlimited', inline: true },
-      { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
-      { name: itemType === 'raffle' ? 'Time Left Until Draw' : 'Status', value: itemType === 'raffle' ? formatMarketplaceTimeLeft(item) : 'Available while stock remains', inline: false },
-    )
+    .addFields(...(itemType === 'raffle'
+      ? [
+          { name: 'Ticket Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
+          { name: 'Tickets Remaining', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
+          { name: 'Winners', value: Number(item?.total_stock) > 0 ? `**${item.total_stock}**` : '`not set`', inline: true },
+          { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
+          { name: 'Time Left Until Draw', value: formatMarketplaceTimeLeft(item), inline: false },
+        ]
+      : [
+          { name: 'Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
+          { name: 'Available', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
+          { name: 'Per Person', value: Number(item?.per_user_limit) > 0 ? `**${item.per_user_limit}**` : 'Unlimited', inline: true },
+          { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
+          { name: 'Status', value: 'Available while stock remains', inline: false },
+        ]))
     .setFooter({ text: `Item ID ${item?.id || 'preview'}` });
   const thumb = normalizeImageUrl(item?.thumbnail_url || item?.thumbnailUrl || '');
   const image = normalizeImageUrl(item?.image_url || item?.imageUrl || '');
@@ -1540,7 +1561,7 @@ async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
     return { ok: false, reason: `Only ${remainingStock} remain for this item.` };
   }
   const perUserLimit = Number(item.per_user_limit);
-  if (Number.isFinite(perUserLimit) && perUserLimit > 0 && (stats.userQuantity + normalizedQuantity) > perUserLimit) {
+  if (itemType !== 'raffle' && Number.isFinite(perUserLimit) && perUserLimit > 0 && (stats.userQuantity + normalizedQuantity) > perUserLimit) {
     return { ok: false, reason: `You can only purchase ${perUserLimit} total for this item.` };
   }
 
@@ -1567,15 +1588,19 @@ async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
     const lockedStats = lockedStatsRes.rows[0] || {};
     const lockedTotalPurchased = Number(lockedStats.total_purchased || 0);
     const lockedUserQuantity = Number(lockedStats.user_quantity || 0);
-    const lockedRemainingStock = Number.isFinite(Number(lockedItem.total_stock)) && Number(lockedItem.total_stock) > 0
-      ? Math.max(0, Number(lockedItem.total_stock) - lockedTotalPurchased)
-      : null;
+    const lockedRemainingStock = itemType === 'raffle'
+      ? (Number.isFinite(Number(lockedItem.per_user_limit)) && Number(lockedItem.per_user_limit) > 0
+          ? Math.max(0, Number(lockedItem.per_user_limit) - lockedTotalPurchased)
+          : null)
+      : (Number.isFinite(Number(lockedItem.total_stock)) && Number(lockedItem.total_stock) > 0
+          ? Math.max(0, Number(lockedItem.total_stock) - lockedTotalPurchased)
+          : null);
     if (lockedRemainingStock != null && normalizedQuantity > lockedRemainingStock) {
       await db.query('ROLLBACK');
       return { ok: false, reason: `Only ${lockedRemainingStock} remain for this item.` };
     }
     const lockedPerUserLimit = Number(lockedItem.per_user_limit);
-    if (Number.isFinite(lockedPerUserLimit) && lockedPerUserLimit > 0 && (lockedUserQuantity + normalizedQuantity) > lockedPerUserLimit) {
+    if (itemType !== 'raffle' && Number.isFinite(lockedPerUserLimit) && lockedPerUserLimit > 0 && (lockedUserQuantity + normalizedQuantity) > lockedPerUserLimit) {
       await db.query('ROLLBACK');
       return { ok: false, reason: `You can only purchase ${lockedPerUserLimit} total for this item.` };
     }
@@ -4631,8 +4656,24 @@ client.on('interactionCreate', async (interaction) => {
           prize_set_price: ['prize_set_price_modal', 'Prize Price', 'prize_value', 'Price in $CHARM', TextInputStyle.Short, true, '250'],
           prize_set_thumbnail: ['prize_set_thumbnail_modal', 'Prize Thumbnail URL', 'prize_value', 'Optional thumbnail URL', TextInputStyle.Short, false, 'https://...'],
           prize_set_image: ['prize_set_image_modal', 'Prize Image URL', 'prize_value', 'Optional image URL', TextInputStyle.Short, false, 'https://...'],
-          prize_set_limit: ['prize_set_limit_modal', 'Per User Limit', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '3'],
-          prize_set_stock: ['prize_set_stock_modal', 'Total Stock', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '25'],
+          prize_set_limit: [
+            'prize_set_limit_modal',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? 'Tickets Available' : 'Per User Limit',
+            'prize_value',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? 'Total raffle tickets available' : 'Blank = unlimited',
+            TextInputStyle.Short,
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? '100' : '3'
+          ],
+          prize_set_stock: [
+            'prize_set_stock_modal',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? 'Winner Count' : 'Total Stock',
+            'prize_value',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? 'How many winners to draw' : 'Blank = unlimited',
+            TextInputStyle.Short,
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle',
+            normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? '3' : '25'
+          ],
           prize_set_raffle_time: ['prize_set_raffle_time_modal', 'Raffle Time', 'prize_value', 'Minutes until raffle draw', TextInputStyle.Short, true, '1440'],
         };
         const [modalId, title, inputId, label, style, required, placeholder] = modalConfig[interaction.customId];
