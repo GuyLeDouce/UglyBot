@@ -13,6 +13,7 @@ const {
   TextInputStyle,
   StringSelectMenuBuilder,
   RoleSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
   SlashCommandBuilder,
   REST,
   Routes,
@@ -1129,6 +1130,7 @@ function createEmptyPrizeDraft(guildId, discordId) {
     totalStock: '',
     allowedRoleIds: [],
     raffleDurationMinutes: '',
+    selectedChannelId: '',
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -1207,6 +1209,7 @@ function buildPrizeEditorEmbed(draft) {
       `Per person limit: ${draft?.perUserLimit ? `**${draft.perUserLimit}**` : 'Unlimited'}\n` +
       `Total stock: ${draft?.totalStock ? `**${draft.totalStock}**` : 'Unlimited'}\n` +
       `Allowed roles: ${formatRoleMentions(draft?.allowedRoleIds)}\n` +
+      `Publish channel: ${draft?.selectedChannelId ? `<#${draft.selectedChannelId}>` : '`not set`'}\n` +
       `Raffle timer: ${type === 'raffle'
         ? (draft?.raffleDurationMinutes ? `**${draft.raffleDurationMinutes} minute(s)**` : '`not set`')
         : 'Not used for buy items'}`
@@ -1228,23 +1231,39 @@ function buildPrizeEditorRows(draft) {
       new ButtonBuilder().setCustomId('prize_set_image').setLabel('Image').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_set_limit').setLabel('Per Person').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_set_stock').setLabel('Stock').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('prize_set_roles').setLabel('Roles').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_clear_roles').setLabel('Clear Roles').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prize_set_raffle_time').setLabel('Raffle Time').setStyle(ButtonStyle.Secondary).setDisabled(!isRaffle),
       new ButtonBuilder().setCustomId('prize_done').setLabel('Done').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('prize_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger),
     ),
+    new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder()
+        .setCustomId('prize_roles_select')
+        .setPlaceholder('Select allowed roles')
+        .setMinValues(1)
+        .setMaxValues(10)
+    ),
   ];
 }
 
-function buildPrizePreviewRows() {
+function buildPrizePreviewRows(draft = null) {
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('prize_publish').setLabel('Publish').setStyle(ButtonStyle.Success),
+      new ChannelSelectMenuBuilder()
+        .setCustomId('prize_publish_channel_select')
+        .setPlaceholder('Select publish channel')
+        .addChannelTypes(ChannelType.GuildText)
+        .setMinValues(1)
+        .setMaxValues(1)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_publish').setLabel('Publish').setStyle(ButtonStyle.Success).setDisabled(!draft?.selectedChannelId),
+      new ButtonBuilder().setCustomId('prize_clear_channel').setLabel('Clear Channel').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_edit').setLabel('Edit').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('prize_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger),
-    )
+    ),
   ];
 }
 
@@ -1459,12 +1478,8 @@ async function getMarketplaceSpendableBalance(guildId, discordId) {
   if (!settings?.currency_id) return { ok: false, reason: 'Marketplace unavailable: Currency ID is not configured.' };
   if (!botMemberId) return { ok: false, reason: 'Marketplace unavailable: bot DRIP member ID is not configured.' };
   if (!memberIds.length) return { ok: false, reason: 'Marketplace unavailable: no DRIP member ID found for your account.' };
-  const liveBalance = await getDripMemberCurrencyBalance(settings.drip_realm_id, memberIds, settings.currency_id, settings || {});
-  if (liveBalance == null) return { ok: false, reason: 'Marketplace unavailable: could not read your DRIP $CHARM balance right now.' };
   return {
     ok: true,
-    available: Math.max(0, Math.floor(Number(liveBalance || 0))),
-    liveBalance: Math.max(0, Math.floor(Number(liveBalance || 0))),
     settings,
     memberIds,
     botMemberId,
@@ -1531,9 +1546,6 @@ async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
 
   const totalCost = Math.floor(Number(item.price || 0)) * normalizedQuantity;
   if (totalCost <= 0) return { ok: false, reason: 'That item has an invalid price.' };
-  if (balance.available < totalCost) {
-    return { ok: false, reason: `You need ${totalCost} $CHARM but only have ${balance.available} in DRIP right now.` };
-  }
 
   const db = await prizesPool.connect();
   try {
@@ -1594,7 +1606,6 @@ async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
       item: lockedItem,
       quantity: normalizedQuantity,
       spentAmount: totalCost,
-      availableAfter: Math.max(0, balance.available - totalCost),
       transferResult,
     };
   } catch (err) {
@@ -4608,9 +4619,7 @@ client.on('interactionCreate', async (interaction) => {
         'prize_set_image',
         'prize_set_limit',
         'prize_set_stock',
-        'prize_set_roles',
         'prize_set_raffle_time',
-        'prize_publish',
       ].includes(interaction.customId)) {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -4624,9 +4633,7 @@ client.on('interactionCreate', async (interaction) => {
           prize_set_image: ['prize_set_image_modal', 'Prize Image URL', 'prize_value', 'Optional image URL', TextInputStyle.Short, false, 'https://...'],
           prize_set_limit: ['prize_set_limit_modal', 'Per User Limit', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '3'],
           prize_set_stock: ['prize_set_stock_modal', 'Total Stock', 'prize_value', 'Blank = unlimited', TextInputStyle.Short, false, '25'],
-          prize_set_roles: ['prize_set_roles_modal', 'Allowed Roles', 'prize_value', 'Role IDs or mentions, comma separated', TextInputStyle.Paragraph, false, '<@&123>, <@&456>'],
           prize_set_raffle_time: ['prize_set_raffle_time_modal', 'Raffle Time', 'prize_value', 'Minutes until raffle draw', TextInputStyle.Short, true, '1440'],
-          prize_publish: ['prize_publish_modal', 'Publish Prize', 'prize_value', 'Channel ID to publish into', TextInputStyle.Short, true, interaction.channel.id],
         };
         const [modalId, title, inputId, label, style, required, placeholder] = modalConfig[interaction.customId];
         const modal = new ModalBuilder().setCustomId(modalId).setTitle(title);
@@ -4641,6 +4648,19 @@ client.on('interactionCreate', async (interaction) => {
           )
         );
         await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'prize_clear_roles') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, { allowedRoleIds: [] });
+        await interaction.update({
+          embeds: [buildPrizeEditorEmbed(draft)],
+          components: buildPrizeEditorRows(draft),
+        });
         return;
       }
 
@@ -4681,7 +4701,74 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({
           content: 'Preview of the user-facing marketplace post:',
           embeds: [buildMarketplaceItemEmbed(previewItem, { totalPurchased: 0 })],
-          components: buildPrizePreviewRows(),
+          components: buildPrizePreviewRows(draft),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_clear_channel') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, { selectedChannelId: '' });
+        const previewItem = {
+          id: 'preview',
+          item_type: draft.itemType,
+          name: draft.name,
+          description: draft.description,
+          thumbnail_url: draft.thumbnailUrl || null,
+          image_url: draft.imageUrl || null,
+          price: draft.price,
+          per_user_limit: draft.perUserLimit || null,
+          total_stock: draft.totalStock || null,
+          allowed_role_ids: (draft.allowedRoleIds || []).join(','),
+          raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
+            ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+            : null,
+          status: 'published',
+        };
+        await interaction.update({
+          content: 'Preview of the user-facing marketplace post:',
+          embeds: [buildMarketplaceItemEmbed(previewItem, { totalPurchased: 0 })],
+          components: buildPrizePreviewRows(draft),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'prize_publish') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id);
+        if (!draft) {
+          await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
+          return;
+        }
+        if (!draft.selectedChannelId) {
+          await interaction.reply({ content: 'Select a publish channel first.', flags: 64 });
+          return;
+        }
+        const validation = validatePrizeDraft(draft);
+        if (!validation.ok) {
+          await interaction.reply({
+            content: `Prize draft is missing or invalid: ${validation.problems.join(', ')}`,
+            flags: 64
+          });
+          return;
+        }
+        await interaction.deferUpdate();
+        const item = await createMarketplaceItemFromDraft(interaction.guild.id, interaction.user.id, draft);
+        const published = await publishMarketplaceItem(item.id, draft.selectedChannelId, interaction.user.id);
+        clearPrizeDraft(interaction.guild.id, interaction.user.id);
+        await interaction.editReply({
+          content:
+            `Prize published.\n` +
+            `Item ID: \`${published.id}\`\n` +
+            `Channel: <#${draft.selectedChannelId}>`,
+          embeds: [],
+          components: [],
         });
         return;
       }
@@ -5377,6 +5464,53 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isRoleSelectMenu() && interaction.customId === 'prize_roles_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, {
+        allowedRoleIds: interaction.values || [],
+      });
+      await interaction.update({
+        embeds: [buildPrizeEditorEmbed(draft)],
+        components: buildPrizeEditorRows(draft),
+      });
+      return;
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId === 'prize_publish_channel_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, {
+        selectedChannelId: String(interaction.values?.[0] || '').trim(),
+      });
+      const previewItem = {
+        id: 'preview',
+        item_type: draft.itemType,
+        name: draft.name,
+        description: draft.description,
+        thumbnail_url: draft.thumbnailUrl || null,
+        image_url: draft.imageUrl || null,
+        price: draft.price,
+        per_user_limit: draft.perUserLimit || null,
+        total_stock: draft.totalStock || null,
+        allowed_role_ids: (draft.allowedRoleIds || []).join(','),
+        raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
+          ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+          : null,
+        status: 'published',
+      };
+      await interaction.update({
+        content: 'Preview of the user-facing marketplace post:',
+        embeds: [buildMarketplaceItemEmbed(previewItem, { totalPurchased: 0 })],
+        components: buildPrizePreviewRows(draft),
+      });
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'portal_select') {
       await portalEvent.handlePortalSelect(interaction);
       return;
@@ -5632,7 +5766,6 @@ client.on('interactionCreate', async (interaction) => {
         'prize_set_image_modal',
         'prize_set_limit_modal',
         'prize_set_stock_modal',
-        'prize_set_roles_modal',
         'prize_set_raffle_time_modal',
       ].includes(interaction.customId)) {
         if (!isAdmin(interaction)) {
@@ -5648,49 +5781,12 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.customId === 'prize_set_image_modal') patch.imageUrl = value;
         if (interaction.customId === 'prize_set_limit_modal') patch.perUserLimit = value;
         if (interaction.customId === 'prize_set_stock_modal') patch.totalStock = value;
-        if (interaction.customId === 'prize_set_roles_modal') patch.allowedRoleIds = parseRoleIdsInput(value, interaction.guild);
         if (interaction.customId === 'prize_set_raffle_time_modal') patch.raffleDurationMinutes = value;
         const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, patch);
         await interaction.reply({
           embeds: [buildPrizeEditorEmbed(draft)],
           components: buildPrizeEditorRows(draft),
           flags: 64
-        });
-        return;
-      }
-
-      if (interaction.customId === 'prize_publish_modal') {
-        if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', flags: 64 });
-          return;
-        }
-        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id);
-        if (!draft) {
-          await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
-          return;
-        }
-        const validation = validatePrizeDraft(draft);
-        if (!validation.ok) {
-          await interaction.reply({
-            content: `Prize draft is missing or invalid: ${validation.problems.join(', ')}`,
-            flags: 64
-          });
-          return;
-        }
-        const channelId = String(interaction.fields.getTextInputValue('prize_value') || '').trim().replace(/[<#>]/g, '');
-        if (!/^\d{16,20}$/.test(channelId)) {
-          await interaction.reply({ content: 'Enter a valid channel ID.', flags: 64 });
-          return;
-        }
-        await interaction.deferReply({ flags: 64 });
-        const item = await createMarketplaceItemFromDraft(interaction.guild.id, interaction.user.id, draft);
-        const published = await publishMarketplaceItem(item.id, channelId, interaction.user.id);
-        clearPrizeDraft(interaction.guild.id, interaction.user.id);
-        await interaction.editReply({
-          content:
-            `Prize published.\n` +
-            `Item ID: \`${published.id}\`\n` +
-            `Channel: <#${channelId}>`
         });
         return;
       }
@@ -5723,8 +5819,7 @@ client.on('interactionCreate', async (interaction) => {
             `${normalizeMarketplaceItemType(result.item.item_type) === 'raffle' ? 'Tickets purchased.' : 'Purchase complete.'}\n` +
             `Item: **${result.item.name}**\n` +
             `Quantity: **${result.quantity}**\n` +
-            `Spent: **${result.spentAmount} $CHARM**\n` +
-            `Marketplace balance remaining: **${result.availableAfter} $CHARM**`
+            `Spent: **${result.spentAmount} $CHARM**`
         });
         return;
       }
