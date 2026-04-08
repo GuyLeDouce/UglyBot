@@ -1435,7 +1435,16 @@ function getMarketplaceRemainingStock(item, stats) {
   return Math.max(0, capacity - Number(stats?.totalPurchased || 0));
 }
 
-function buildMarketplaceItemEmbed(item, stats = {}) {
+function formatMarketplaceRaffleWinnerSummary(winners) {
+  if (!Array.isArray(winners) || !winners.length) {
+    return 'No valid entries were available for this raffle.';
+  }
+  return winners
+    .map((winner, index) => `${index + 1}. <@${winner.discordId}> (${winner.ticketCount} ticket${winner.ticketCount === 1 ? '' : 's'})`)
+    .join('\n');
+}
+
+function buildMarketplaceItemEmbed(item, stats = {}, extras = {}) {
   const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
   const remainingStock = getMarketplaceRemainingStock(item, stats);
   const allowedRoleIds = String(item?.allowed_role_ids || '')
@@ -1451,9 +1460,19 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
       : formatMarketplaceTimeLeft(item);
   const embed = new EmbedBuilder()
     .setTitle(`${String(item?.name || 'Marketplace Item').slice(0, 220)} | ${titleType}`)
-    .setColor(itemType === 'raffle' ? 0xF1C40F : 0x2ECC71)
-    .setDescription(String(item?.description || '').slice(0, 4000))
-    .addFields(...(itemType === 'raffle'
+    .setColor(itemType === 'raffle' ? (status === 'completed' ? 0xE67E22 : 0xF1C40F) : 0x2ECC71)
+    .setDescription(String(item?.description || '').slice(0, 4000));
+
+  if (itemType === 'raffle' && status === 'completed') {
+    const winners = Array.isArray(extras?.raffleWinners) ? extras.raffleWinners : [];
+    embed.addFields(
+      { name: 'Winner Window', value: formatMarketplaceRaffleWinnerSummary(winners), inline: false },
+      { name: 'Total Tickets Purchased', value: `**${Math.max(0, Math.floor(Number(stats?.totalPurchased || 0)))}**`, inline: true },
+      { name: 'Winners Drawn', value: winners.length ? `**${winners.length}**` : '**0**', inline: true },
+      { name: 'Result', value: 'Claim button is restricted to the raffle winner(s).', inline: false },
+    );
+  } else {
+    embed.addFields(...(itemType === 'raffle'
       ? [
           { name: 'Ticket Cost', value: `**${Math.floor(Number(item?.price || 0))} $CHARM**`, inline: true },
           { name: 'Tickets Remaining', value: remainingStock == null ? 'Unlimited' : `**${remainingStock}**`, inline: true },
@@ -1467,7 +1486,10 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
           { name: 'Per Person', value: Number(item?.per_user_limit) > 0 ? `**${item.per_user_limit}**` : 'Unlimited', inline: true },
           { name: 'Roles Allowed', value: formatRoleMentions(allowedRoleIds), inline: false },
           { name: 'Status', value: 'Available while stock remains', inline: false },
-        ]))
+        ]));
+  }
+
+  embed
     .setFooter({ text: `Item ID ${item?.id || 'preview'}` });
   const thumb = normalizeImageUrl(item?.thumbnail_url || item?.thumbnailUrl || '');
   const image = normalizeImageUrl(item?.image_url || item?.imageUrl || '');
@@ -1476,12 +1498,29 @@ function buildMarketplaceItemEmbed(item, stats = {}) {
   return embed;
 }
 
-function buildMarketplaceItemButtons(item, stats = {}) {
+function buildMarketplaceItemButtons(item, stats = {}, extras = {}) {
   const itemType = normalizeMarketplaceItemType(item?.item_type || item?.itemType);
   const remainingStock = getMarketplaceRemainingStock(item, stats);
   const raffleClosed = itemType === 'raffle' && formatMarketplaceTimeLeft(item) === 'Closed';
   const soldOut = remainingStock != null && remainingStock <= 0;
   const disabled = soldOut || raffleClosed || String(item?.status || 'published') !== 'published';
+  const status = String(item?.status || 'published');
+  if (itemType === 'raffle' && status === 'completed') {
+    const winners = Array.isArray(extras?.raffleWinners) ? extras.raffleWinners : [];
+    return [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`market_entries_${item.id}`)
+          .setLabel('Entries')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`market_claim_${item.id}`)
+          .setLabel('Claim')
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!winners.length)
+      )
+    ];
+  }
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -1562,10 +1601,15 @@ async function refreshMarketplaceItemMessage(itemId) {
   if (!channel?.isTextBased()) return;
   const message = await channel.messages.fetch(item.published_message_id).catch(() => null);
   if (!message) return;
-  const stats = await getMarketplaceItemStats(itemId);
+  const [stats, raffleWinners] = await Promise.all([
+    getMarketplaceItemStats(itemId),
+    normalizeMarketplaceItemType(item.item_type) === 'raffle' && String(item.status) === 'completed'
+      ? getMarketplaceRaffleWinners(itemId)
+      : Promise.resolve([])
+  ]);
   await message.edit({
-    embeds: [buildMarketplaceItemEmbed(item, stats)],
-    components: buildMarketplaceItemButtons(item, stats),
+    embeds: [buildMarketplaceItemEmbed(item, stats, { raffleWinners })],
+    components: buildMarketplaceItemButtons(item, stats, { raffleWinners }),
   }).catch(() => null);
 }
 
@@ -1629,22 +1673,6 @@ async function storeMarketplaceRaffleWinners(itemId, guildId, winners) {
       [itemId, guildId, winner.discordId, i + 1, winner.ticketCount]
     );
   }
-}
-
-function buildMarketplaceWinnersAnnouncement(item, winners) {
-  const lines = winners.length
-    ? winners.map((winner, index) => `${index + 1}. <@${winner.discordId}> - ${winner.ticketCount} ticket${winner.ticketCount === 1 ? '' : 's'}`)
-    : ['No valid entries were available for this raffle.'];
-  return (
-    `**Raffle Complete: ${item.name}**\n` +
-    `${lines.join('\n')}`
-  );
-}
-
-async function announceMarketplaceRaffleWinners(item, winners) {
-  const channel = await client.channels.fetch(item.published_channel_id).catch(() => null);
-  if (!channel?.isTextBased()) return;
-  await channel.send({ content: buildMarketplaceWinnersAnnouncement(item, winners) }).catch(() => null);
 }
 
 async function getExpiredPublishedRaffles(limit = 10) {
@@ -1729,7 +1757,6 @@ async function completeMarketplaceRaffle(itemId, actorDiscordId = client.user?.i
     await db.query('COMMIT');
     const completedItem = await getMarketplaceItemById(itemId);
     await refreshMarketplaceItemMessage(itemId);
-    await announceMarketplaceRaffleWinners(completedItem || item, winners);
     return { ok: true, item: completedItem || item, winners };
   } catch (err) {
     await db.query('ROLLBACK').catch(() => null);
@@ -5315,6 +5342,44 @@ client.on('interactionCreate', async (interaction) => {
           content:
             `Entries for **${item.name}**\n` +
             `${lines.join('\n')}${truncated}`,
+          flags: 64
+        });
+        return;
+      }
+
+      const marketClaimMatch = interaction.customId.match(/^market_claim_(\d+)$/);
+      if (marketClaimMatch) {
+        const itemId = Number(marketClaimMatch[1]);
+        const item = await getMarketplaceItemById(itemId);
+        if (!item) {
+          await interaction.reply({ content: 'Marketplace item not found.', flags: 64 });
+          return;
+        }
+        if (normalizeMarketplaceItemType(item.item_type) !== 'raffle' || String(item.status) !== 'completed') {
+          await interaction.reply({ content: 'This raffle is not ready to be claimed yet.', flags: 64 });
+          return;
+        }
+        const winners = await getMarketplaceRaffleWinners(itemId);
+        const isWinner = winners.some((winner) => String(winner.discordId) === String(interaction.user.id));
+        if (!isWinner) {
+          await interaction.reply({
+            content: 'You did not win this raffle and cannot claim it.',
+            flags: 64
+          });
+          return;
+        }
+
+        const claimChannelUrl = `https://discord.com/channels/${interaction.guild.id}/${SUPPORT_TICKET_CHANNEL_ID}`;
+        await interaction.reply({
+          content: `You won **${item.name}**. Claim it in <#${SUPPORT_TICKET_CHANNEL_ID}>.`,
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setLabel('Open Claim Channel')
+                .setStyle(ButtonStyle.Link)
+                .setURL(claimChannelUrl)
+            )
+          ],
           flags: 64
         });
         return;
