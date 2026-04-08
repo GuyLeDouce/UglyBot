@@ -410,6 +410,40 @@ async function reassignWalletLink(guildId, discordId, walletAddress, verified = 
   }
 }
 
+async function verifyUserWalletLinks(guildId, discordId, dripMemberId = null) {
+  const normalizedDripMemberId = normalizeDripMemberId(dripMemberId);
+  const params = [guildId, discordId];
+
+  if (normalizedDripMemberId) {
+    const { rowCount } = await holdersPool.query(
+      `UPDATE wallet_links
+       SET verified = TRUE,
+           drip_member_id = COALESCE(NULLIF(TRIM(drip_member_id), ''), $3),
+           updated_at = NOW()
+       WHERE guild_id = $1
+         AND discord_id = $2
+         AND wallet_address IS NOT NULL
+         AND NULLIF(TRIM(wallet_address), '') IS NOT NULL`,
+      [guildId, discordId, normalizedDripMemberId]
+    );
+    return rowCount || 0;
+  }
+
+  const { rowCount } = await holdersPool.query(
+    `UPDATE wallet_links
+     SET verified = TRUE,
+         updated_at = NOW()
+     WHERE guild_id = $1
+       AND discord_id = $2
+       AND wallet_address IS NOT NULL
+       AND NULLIF(TRIM(wallet_address), '') IS NOT NULL
+       AND drip_member_id IS NOT NULL
+       AND NULLIF(TRIM(drip_member_id), '') IS NOT NULL`,
+    params
+  );
+  return rowCount || 0;
+}
+
 async function deleteWalletLink(guildId, discordId, walletAddress) {
   try {
     const { rowCount } = await holdersPool.query(
@@ -517,6 +551,16 @@ function buildSlashCommands() {
         opt
           .setName('wallet')
           .setDescription('Ethereum wallet address to remove')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('verifyuser')
+      .setDescription('Admin override: mark a user\'s linked wallet(s) as DRIP verified')
+      .addUserOption((opt) =>
+        opt
+          .setName('user')
+          .setDescription('Discord user to mark as verified')
           .setRequired(true)
       )
       .toJSON(),
@@ -3552,6 +3596,78 @@ client.on('interactionCreate', async (interaction) => {
             `Discord ID: \`${discordId}\`\n` +
             `Wallet: \`${walletAddress}\`\n` +
             `${syncSummary}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'verifyuser') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const targetUser = interaction.options.getUser('user', true);
+        const discordId = String(targetUser.id || '').trim();
+        const links = await getWalletLinks(interaction.guild.id, discordId);
+
+        if (!links.length) {
+          await interaction.editReply({ content: `No linked wallets found for <@${discordId}>.` });
+          return;
+        }
+
+        const existingDripMemberId = collectUniqueDripMemberIds(links.map((x) => x?.drip_member_id))[0] || null;
+        let resolvedDripMemberId = existingDripMemberId;
+
+        if (!resolvedDripMemberId) {
+          try {
+            const settings = await getGuildSettings(interaction.guild.id);
+            const candidateWallet = normalizeEthAddress(links.find((x) => x?.wallet_address)?.wallet_address || null);
+            const resolved = await resolveDripMemberForDiscordUser(
+              settings?.drip_realm_id,
+              discordId,
+              candidateWallet,
+              settings || {}
+            );
+            resolvedDripMemberId = collectDripMemberIdCandidates(resolved?.member || null)[0] || null;
+          } catch {}
+        }
+
+        if (!resolvedDripMemberId) {
+          await interaction.editReply({
+            content:
+              `Could not verify <@${discordId}>.\n` +
+              `They need at least one linked wallet and a stored or resolvable DRIP member ID first.`
+          });
+          return;
+        }
+
+        const updated = await verifyUserWalletLinks(interaction.guild.id, discordId, resolvedDripMemberId);
+        if (!updated) {
+          await interaction.editReply({
+            content:
+              `No wallet links were updated for <@${discordId}>.\n` +
+              `Make sure they already have a wallet connected.`
+          });
+          return;
+        }
+
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Override',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Action: /verifyuser\n` +
+            `Target: <@${discordId}>\n` +
+            `Wallet links updated: ${updated}\n` +
+            `DRIP User ID: \`${resolvedDripMemberId}\``
+        });
+
+        await interaction.editReply({
+          content:
+            `Manual verification override saved for <@${discordId}>.\n` +
+            `Wallet links marked DRIP verified: **${updated}**\n` +
+            `DRIP User ID: \`${resolvedDripMemberId}\``
         });
         return;
       }
