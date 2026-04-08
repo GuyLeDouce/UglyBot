@@ -95,7 +95,8 @@ console.log('ENV CHECK:', {
   hasAlchemy: !!ALCHEMY_API_KEY,
   hasOpenSea: !!OPENSEA_API_KEY,
   hasPointsDb: !!process.env.DATABASE_URL_POINTS,
-  hasClaimsDb: !!process.env.DATABASE_URL_CLAIMS
+  hasClaimsDb: !!process.env.DATABASE_URL_CLAIMS,
+  hasPrizesDb: !!process.env.DATABASE_URL_PRIZES
 });
 
 // ===== CONTRACTS =====
@@ -160,6 +161,7 @@ const DATABASE_URL_HOLDERS = process.env.DATABASE_URL_HOLDERS || process.env.DAT
 const DATABASE_URL_TEAM = process.env.DATABASE_URL_TEAM || process.env.DATABASE_URL || null;
 const DATABASE_URL_POINTS = process.env.DATABASE_URL_POINTS || null;
 const DATABASE_URL_CLAIMS = process.env.DATABASE_URL_CLAIMS || null;
+const DATABASE_URL_PRIZES = process.env.DATABASE_URL_PRIZES || null;
 const PGSSL = (process.env.PGSSL ?? 'true') !== 'false'; // default true on Railway
 
 const holdersPool = new Pool(
@@ -199,6 +201,12 @@ const claimsPool = DATABASE_URL_CLAIMS
       { connectionString: DATABASE_URL_CLAIMS, ssl: PGSSL ? { rejectUnauthorized: false } : false }
     )
   : holdersPool;
+
+const prizesPool = DATABASE_URL_PRIZES
+  ? new Pool(
+      { connectionString: DATABASE_URL_PRIZES, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+    )
+  : teamPool;
 
 async function ensureHoldersSchema() {
   await holdersPool.query(`
@@ -339,7 +347,7 @@ async function ensureClaimsSchema() {
 }
 
 async function ensureMarketplaceSchema() {
-  await teamPool.query(`
+  await prizesPool.query(`
     CREATE TABLE IF NOT EXISTS marketplace_items (
       id BIGSERIAL PRIMARY KEY,
       guild_id TEXT NOT NULL,
@@ -362,8 +370,8 @@ async function ensureMarketplaceSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_items_guild_status_idx ON marketplace_items (guild_id, status, updated_at DESC);`);
-  await teamPool.query(`
+  await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_items_guild_status_idx ON marketplace_items (guild_id, status, updated_at DESC);`);
+  await prizesPool.query(`
     CREATE TABLE IF NOT EXISTS marketplace_purchases (
       id BIGSERIAL PRIMARY KEY,
       item_id BIGINT NOT NULL REFERENCES marketplace_items(id) ON DELETE CASCADE,
@@ -375,9 +383,9 @@ async function ensureMarketplaceSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_item_idx ON marketplace_purchases (item_id, created_at DESC);`);
-  await teamPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_user_idx ON marketplace_purchases (guild_id, discord_id, created_at DESC);`);
-  console.log('✅ marketplace schema ready');
+  await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_item_idx ON marketplace_purchases (item_id, created_at DESC);`);
+  await prizesPool.query(`CREATE INDEX IF NOT EXISTS marketplace_purchases_user_idx ON marketplace_purchases (guild_id, discord_id, created_at DESC);`);
+  console.log(`✅ marketplace schema ready (${DATABASE_URL_PRIZES ? 'DATABASE_URL_PRIZES' : 'team database fallback'})`);
 }
 
 ensureHoldersSchema().catch(e => console.error('Holders schema error:', e.message));
@@ -1264,20 +1272,20 @@ function validatePrizeDraft(draft) {
 }
 
 async function getMarketplaceItemById(itemId) {
-  const { rows } = await teamPool.query(`SELECT * FROM marketplace_items WHERE id = $1 LIMIT 1`, [itemId]);
+  const { rows } = await prizesPool.query(`SELECT * FROM marketplace_items WHERE id = $1 LIMIT 1`, [itemId]);
   return rows[0] || null;
 }
 
 async function getMarketplaceItemStats(itemId, discordId = null) {
   const [{ rows: totals }, { rows: mine }] = await Promise.all([
-    teamPool.query(
+    prizesPool.query(
       `SELECT COALESCE(SUM(quantity), 0) AS total_purchased, COUNT(*) AS purchase_events
        FROM marketplace_purchases
        WHERE item_id = $1`,
       [itemId]
     ),
     discordId
-      ? teamPool.query(
+      ? prizesPool.query(
           `SELECT COALESCE(SUM(quantity), 0) AS user_quantity, COALESCE(SUM(spent_amount), 0) AS user_spent
            FROM marketplace_purchases
            WHERE item_id = $1 AND discord_id = $2`,
@@ -1356,7 +1364,7 @@ async function createMarketplaceItemFromDraft(guildId, actorDiscordId, draft) {
   const raffleEndsAt = itemType === 'raffle'
     ? new Date(Date.now() + (Number(draft?.raffleDurationMinutes || 0) * 60 * 1000))
     : null;
-  const { rows } = await teamPool.query(
+  const { rows } = await prizesPool.query(
     `INSERT INTO marketplace_items (
        guild_id, item_type, name, description, thumbnail_url, image_url, price, per_user_limit, total_stock,
        allowed_role_ids, raffle_ends_at, status, created_by_discord_id, updated_by_discord_id, updated_at
@@ -1391,7 +1399,7 @@ async function publishMarketplaceItem(itemId, channelId, actorDiscordId) {
     embeds: [buildMarketplaceItemEmbed(item, stats)],
     components: buildMarketplaceItemButtons({ ...item, status: 'published' }, stats),
   });
-  const { rows } = await teamPool.query(
+  const { rows } = await prizesPool.query(
     `UPDATE marketplace_items
      SET status = 'published',
          published_channel_id = $2,
@@ -1527,7 +1535,7 @@ async function purchaseMarketplaceItem(guild, discordId, itemId, quantity) {
     return { ok: false, reason: `You need ${totalCost} $CHARM but only have ${balance.available} in DRIP right now.` };
   }
 
-  const db = await teamPool.connect();
+  const db = await prizesPool.connect();
   try {
     await db.query('BEGIN');
     const { rows: lockedRows } = await db.query(`SELECT * FROM marketplace_items WHERE id = $1 FOR UPDATE`, [itemId]);
