@@ -106,20 +106,21 @@ function buildMarketplacePanelEmbed() {
     .setTitle('Malformed Marketplace')
     .setColor(0xd4a43b)
     .setDescription(
-      'Spend your $CHARM on marketplace rewards. Choose an item below to begin a private checkout. After a successful purchase, open a ticket to claim your reward.'
+      'Spend your $CHARM on marketplace rewards. Open the full marketplace with the button below and choose an item below to begin a your checkout.\nAfter a successful purchase, open a ticket to claim your reward.'
     )
     .addFields(
       {
         name: 'How It Works',
         value:
-          '1. Click the matching item button below.\n' +
-          '2. Confirm the purchase privately.\n' +
-          `3. Open a ticket in <#${MARKETPLACE_TICKET_CHANNEL_ID}> after checkout.`,
+          '1. Open the Malformed Marketplace with the button below\n' +
+          '2. Choose the matching item you wish to purchase\n' +
+          '3. Confirm the purchase privately\n' +
+          `4. Open a ticket in <#${MARKETPLACE_TICKET_CHANNEL_ID}> after checkout and confirm your wallet address`,
         inline: false,
       }
     )
     .setFooter({
-      text: 'Linked wallet required. Delivery is handled manually through tickets.',
+      text: 'A linked wallet in <#1476967108062740622> is required. Delivery is handled manually through tickets.',
     });
 }
 
