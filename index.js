@@ -6319,6 +6319,19 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu()) {
+      if (await marketplaceCommand.handleMarketplaceSelectMenu(interaction, {
+        clientUserId: client.user?.id || null,
+        getWalletLinks,
+        getMarketplaceSpendableBalance,
+        getDripMemberCurrencyBalance,
+        awardDripPoints,
+        postAdminSystemLog,
+      })) {
+        return;
+      }
+    }
+
     if (interaction.isModalSubmit()) {
       if ([
         'prize_set_name_modal',

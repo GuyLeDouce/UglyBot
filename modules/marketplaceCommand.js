@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 
@@ -14,6 +15,7 @@ const CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 
 const MARKETPLACE_ITEMS = [
   {
+    order: 1,
     key: 'charm',
     buttonId: 'marketplace_buy_charm',
     confirmationKey: 'charm',
@@ -22,6 +24,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'COTU',
   },
   {
+    order: 2,
     key: 'common',
     buttonId: 'marketplace_buy_common',
     confirmationKey: 'common',
@@ -30,6 +33,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'Common',
   },
   {
+    order: 3,
     key: 'uncommon',
     buttonId: 'marketplace_buy_uncommon',
     confirmationKey: 'uncommon',
@@ -38,6 +42,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'Uncommon',
   },
   {
+    order: 4,
     key: 'monster',
     buttonId: 'marketplace_buy_monster',
     confirmationKey: 'monster',
@@ -46,6 +51,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'Monster',
   },
   {
+    order: 5,
     key: 'rare',
     buttonId: 'marketplace_buy_rare',
     confirmationKey: 'rare',
@@ -54,6 +60,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'Rare',
   },
   {
+    order: 6,
     key: 'epic',
     buttonId: 'marketplace_buy_epic',
     confirmationKey: 'epic',
@@ -62,6 +69,7 @@ const MARKETPLACE_ITEMS = [
     buttonLabel: 'Epic',
   },
   {
+    order: 7,
     key: 'custom',
     buttonId: 'marketplace_buy_custom',
     confirmationKey: 'custom',
@@ -94,28 +102,26 @@ function getMarketplaceItem(itemKey) {
 }
 
 function buildMarketplacePanelEmbed() {
-  const fieldGroups = [
-    MARKETPLACE_ITEMS.slice(0, 3),
-    MARKETPLACE_ITEMS.slice(3, 5),
-    MARKETPLACE_ITEMS.slice(5),
-  ];
+  const rewardLines = MARKETPLACE_ITEMS
+    .map((item) => `**${item.order}. ${item.name}**\n${formatCharm(item.price)} $CHARM`)
+    .join('\n\n');
 
   return new EmbedBuilder()
     .setTitle('Malformed Marketplace')
-    .setColor(0x6ac4a6)
+    .setColor(0xd4a43b)
     .setDescription(
-      'Spend your $CHARM on marketplace rewards. Pick an item below to start a private checkout flow. After payment, open a ticket to claim your reward.'
+      'Spend your $CHARM on marketplace rewards. Choose an item below to begin a private checkout. After a successful purchase, open a ticket to claim your reward.'
     )
     .addFields(
-      ...fieldGroups.map((group, index) => ({
-        name: index === 0 ? 'Rewards' : '\u200b',
-        value: group.map((item) => `**${item.name}**\n${formatCharm(item.price)} $CHARM`).join('\n\n'),
-        inline: true,
-      })),
+      {
+        name: 'Available Rewards',
+        value: rewardLines,
+        inline: false,
+      },
       {
         name: 'How It Works',
         value:
-          '1. Click a button.\n' +
+          '1. Click the matching item button below.\n' +
           '2. Confirm the purchase privately.\n' +
           `3. Open a ticket in <#${MARKETPLACE_TICKET_CHANNEL_ID}> after checkout.`,
         inline: false,
@@ -127,22 +133,31 @@ function buildMarketplacePanelEmbed() {
 }
 
 function buildMarketplaceItemRows() {
-  const rowGroups = [
-    MARKETPLACE_ITEMS.slice(0, 3),
-    MARKETPLACE_ITEMS.slice(3, 5),
-    MARKETPLACE_ITEMS.slice(5),
-  ];
-
-  return rowGroups.map((group) =>
+  return [
     new ActionRowBuilder().addComponents(
-      ...group.map((item) =>
-        new ButtonBuilder()
-          .setCustomId(item.buttonId)
-          .setLabel(item.buttonLabel)
-          .setStyle(ButtonStyle.Success)
-      )
-    )
-  );
+      new ButtonBuilder()
+        .setCustomId('marketplace_open')
+        .setLabel('Open Marketplace')
+        .setStyle(ButtonStyle.Success)
+    ),
+  ];
+}
+
+function buildMarketplaceSelectRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('marketplace_select_item')
+        .setPlaceholder('Choose an item to purchase')
+        .addOptions(
+          MARKETPLACE_ITEMS.map((item) => ({
+            label: `${item.order}. ${item.name}`.slice(0, 100),
+            description: `${formatCharm(item.price)} $CHARM`.slice(0, 100),
+            value: item.key,
+          }))
+        )
+    ),
+  ];
 }
 
 function buildConfirmationEmbed(item) {
@@ -308,6 +323,15 @@ async function handleMarketplaceCommand(interaction) {
 
 // Handles public buy buttons and the private yes/no confirmation flow.
 async function handleMarketplaceButton(interaction, deps) {
+  if (interaction.customId === 'marketplace_open') {
+    await interaction.reply({
+      content: 'Select the item you want to purchase.',
+      components: buildMarketplaceSelectRows(),
+      flags: 64,
+    });
+    return true;
+  }
+
   const item = getMarketplaceItem(interaction.customId);
   if (item) {
     const wallet = await getLinkedWallet(deps, interaction.guildId, interaction.user.id);
@@ -488,6 +512,54 @@ async function handleMarketplaceButton(interaction, deps) {
   }
 }
 
+async function handleMarketplaceSelectMenu(interaction, deps) {
+  if (interaction.customId !== 'marketplace_select_item') return false;
+
+  const selectedKey = String(interaction.values?.[0] || '').trim();
+  const item = getMarketplaceItem(selectedKey);
+  if (!item) {
+    await interaction.reply({
+      content: 'That marketplace item is no longer available.',
+      flags: 64,
+    });
+    return true;
+  }
+
+  const wallet = await getLinkedWallet(deps, interaction.guildId, interaction.user.id);
+  if (!wallet.walletAddress) {
+    await interaction.reply({
+      content: 'You must link a wallet first before using the marketplace.',
+      flags: 64,
+    });
+    return true;
+  }
+
+  const balanceCheck = await checkUserCharmBalance(deps, interaction.guildId, interaction.user.id, item.price);
+  if (!balanceCheck.ok) {
+    await interaction.reply({
+      content: balanceCheck.reason || 'Could not verify your $CHARM balance right now.',
+      flags: 64,
+    });
+    return true;
+  }
+
+  if (!balanceCheck.hasEnough) {
+    await interaction.reply({
+      content: 'You cannot afford that item yet.',
+      flags: 64,
+    });
+    return true;
+  }
+
+  const token = createConfirmation(interaction, item);
+  await interaction.reply({
+    embeds: [buildConfirmationEmbed(item)],
+    components: buildConfirmationRows(token),
+    flags: 64,
+  });
+  return true;
+}
+
 module.exports = {
   MARKETPLACE_ITEMS,
   MARKETPLACE_RECEIPT_CHANNEL_ID,
@@ -501,4 +573,5 @@ module.exports = {
   sendMarketplaceReceipt,
   handleMarketplaceCommand,
   handleMarketplaceButton,
+  handleMarketplaceSelectMenu,
 };
