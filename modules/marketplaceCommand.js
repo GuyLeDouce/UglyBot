@@ -108,6 +108,7 @@ function buildMarketplacePanelEmbed() {
     .setDescription(
       'Spend your $CHARM on marketplace rewards. Open the full marketplace with the button below and choose an item below to begin a your checkout.\nAfter a successful purchase, open a ticket to claim your reward.'
     )
+    .setImage('https://i.imgur.com/1otRMta.jpeg')
     .addFields(
       {
         name: 'How It Works',
