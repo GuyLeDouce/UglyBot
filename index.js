@@ -1805,6 +1805,7 @@ async function resolveMarketplaceMemberIds(guildId, discordId) {
   return {
     settings,
     links,
+    resolvedMember: resolved?.member || null,
     memberIds: collectUniqueDripMemberIds([
       ...collectDripMemberIdCandidates(resolved?.member || null),
       ...links.map((x) => x?.drip_member_id),
@@ -1813,7 +1814,7 @@ async function resolveMarketplaceMemberIds(guildId, discordId) {
 }
 
 async function getMarketplaceSpendableBalance(guildId, discordId) {
-  const { settings, memberIds } = await resolveMarketplaceMemberIds(guildId, discordId);
+  const { settings, memberIds, resolvedMember } = await resolveMarketplaceMemberIds(guildId, discordId);
   const botMemberId = resolveConfiguredDripSenderMemberId();
   if (!settings?.drip_api_key || !settings?.drip_realm_id) {
     return { ok: false, reason: 'Marketplace unavailable: DRIP is not fully configured.' };
@@ -1825,6 +1826,7 @@ async function getMarketplaceSpendableBalance(guildId, discordId) {
     ok: true,
     settings,
     memberIds,
+    resolvedMember,
     botMemberId,
   };
 }
@@ -5013,6 +5015,7 @@ client.on('interactionCreate', async (interaction) => {
         getWalletLinks,
         getMarketplaceSpendableBalance,
         getDripMemberCurrencyBalance,
+        extractDripCurrencyAmountFromPayload,
         awardDripPoints,
         postAdminSystemLog,
       })) {
@@ -6325,6 +6328,7 @@ client.on('interactionCreate', async (interaction) => {
         getWalletLinks,
         getMarketplaceSpendableBalance,
         getDripMemberCurrencyBalance,
+        extractDripCurrencyAmountFromPayload,
         awardDripPoints,
         postAdminSystemLog,
       })) {

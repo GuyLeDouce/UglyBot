@@ -231,12 +231,18 @@ async function getUserCharmBalance(deps, guildId, userId) {
   const spendable = await deps.getMarketplaceSpendableBalance(guildId, userId);
   if (!spendable.ok) return spendable;
 
-  const balance = await deps.getDripMemberCurrencyBalance(
-    spendable.settings.drip_realm_id,
-    spendable.memberIds,
-    spendable.settings.currency_id,
-    spendable.settings
+  const resolvedMemberBalance = deps.extractDripCurrencyAmountFromPayload(
+    spendable.resolvedMember || null,
+    spendable.settings.currency_id
   );
+  const balance = resolvedMemberBalance != null
+    ? resolvedMemberBalance
+    : await deps.getDripMemberCurrencyBalance(
+        spendable.settings.drip_realm_id,
+        spendable.memberIds,
+        spendable.settings.currency_id,
+        spendable.settings
+      );
 
   if (!Number.isFinite(Number(balance))) {
     return {
