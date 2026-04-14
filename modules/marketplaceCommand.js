@@ -120,7 +120,7 @@ function buildMarketplacePanelEmbed() {
       }
     )
     .setFooter({
-      text: 'A linked wallet in <#1476967108062740622> is required. Delivery is handled manually through tickets.',
+      text: 'A linked wallet in the Verify Holder channel is required. Delivery is handled manually through tickets.',
     });
 }
 
