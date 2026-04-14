@@ -1,6 +1,7 @@
 // Load local .env when running outside Railway (Railway injects envs)
 try { require('dotenv').config(); } catch (_) {}
 
+
 const {
   Client,
   GatewayIntentBits,
