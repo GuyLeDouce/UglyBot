@@ -108,7 +108,7 @@ function buildMarketplacePanelEmbed() {
     .addFields(
       ...fieldGroups.map((group, index) => ({
         name: index === 0 ? 'Rewards' : '\u200b',
-        value: group.map((item) => `**${item.buttonLabel}**\n${formatCharm(item.price)} $CHARM`).join('\n\n'),
+        value: group.map((item) => `**${item.name}**\n${formatCharm(item.price)} $CHARM`).join('\n\n'),
         inline: true,
       })),
       {
@@ -309,6 +309,32 @@ async function handleMarketplaceCommand(interaction) {
 async function handleMarketplaceButton(interaction, deps) {
   const item = getMarketplaceItem(interaction.customId);
   if (item) {
+    const wallet = await getLinkedWallet(deps, interaction.guildId, interaction.user.id);
+    if (!wallet.walletAddress) {
+      await interaction.reply({
+        content: 'You must link a wallet first before using the marketplace.',
+        flags: 64,
+      });
+      return true;
+    }
+
+    const balanceCheck = await checkUserCharmBalance(deps, interaction.guildId, interaction.user.id, item.price);
+    if (!balanceCheck.ok) {
+      await interaction.reply({
+        content: balanceCheck.reason || 'Could not verify your $CHARM balance right now.',
+        flags: 64,
+      });
+      return true;
+    }
+
+    if (!balanceCheck.hasEnough) {
+      await interaction.reply({
+        content: 'You cannot afford that item yet.',
+        flags: 64,
+      });
+      return true;
+    }
+
     const token = createConfirmation(interaction, item);
     await interaction.reply({
       embeds: [buildConfirmationEmbed(item)],
