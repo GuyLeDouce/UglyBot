@@ -18,7 +18,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'charm',
     name: 'Random Charm of the Ugly',
     price: 15000,
-    buttonLabel: 'Buy Charm of the Ugly',
+    buttonLabel: 'COTU',
   },
   {
     key: 'common',
@@ -26,7 +26,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'common',
     name: 'Random Common Squig',
     price: 20000,
-    buttonLabel: 'Buy Common Squig',
+    buttonLabel: 'Common',
   },
   {
     key: 'uncommon',
@@ -34,7 +34,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'uncommon',
     name: 'Random Uncommon Squig',
     price: 30000,
-    buttonLabel: 'Buy Uncommon Squig',
+    buttonLabel: 'Uncommon',
   },
   {
     key: 'monster',
@@ -42,7 +42,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'monster',
     name: 'Random Ugly Monster',
     price: 45000,
-    buttonLabel: 'Buy Ugly Monster',
+    buttonLabel: 'Monster',
   },
   {
     key: 'rare',
@@ -50,7 +50,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'rare',
     name: 'Random Rare Squig',
     price: 90000,
-    buttonLabel: 'Buy Rare Squig',
+    buttonLabel: 'Rare',
   },
   {
     key: 'epic',
@@ -58,7 +58,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'epic',
     name: 'Random Epic Squig',
     price: 250000,
-    buttonLabel: 'Buy Epic Squig',
+    buttonLabel: 'Epic',
   },
   {
     key: 'custom',
@@ -66,7 +66,7 @@ const MARKETPLACE_ITEMS = [
     confirmationKey: 'custom',
     name: 'Custom Squig Edition',
     price: 1000000,
-    buttonLabel: 'Buy Custom Squig Edition',
+    buttonLabel: 'Custom Edition',
   },
 ];
 
@@ -93,40 +93,55 @@ function getMarketplaceItem(itemKey) {
 }
 
 function buildMarketplacePanelEmbed() {
-  const itemLines = MARKETPLACE_ITEMS
-    .map((item) => `• **${item.name}** — ${formatCharm(item.price)} $CHARM`)
-    .join('\n');
+  const fieldGroups = [
+    MARKETPLACE_ITEMS.slice(0, 3),
+    MARKETPLACE_ITEMS.slice(3, 5),
+    MARKETPLACE_ITEMS.slice(5),
+  ];
 
   return new EmbedBuilder()
     .setTitle('Malformed Marketplace')
     .setColor(0x6ac4a6)
     .setDescription(
-      'Spend your $CHARM on marketplace rewards. Click an item below to begin your purchase. Once your purchase is complete, open a ticket to claim your item.'
+      'Spend your $CHARM on marketplace rewards. Pick an item below to start a private checkout flow. After payment, open a ticket to claim your reward.'
     )
-    .addFields({
-      name: 'Available Rewards',
-      value: itemLines,
-    })
+    .addFields(
+      ...fieldGroups.map((group, index) => ({
+        name: index === 0 ? 'Rewards' : '\u200b',
+        value: group.map((item) => `**${item.buttonLabel}**\n${formatCharm(item.price)} $CHARM`).join('\n\n'),
+        inline: true,
+      })),
+      {
+        name: 'How It Works',
+        value:
+          '1. Click a button.\n' +
+          '2. Confirm the purchase privately.\n' +
+          `3. Open a ticket in <#${MARKETPLACE_TICKET_CHANNEL_ID}> after checkout.`,
+        inline: false,
+      }
+    )
     .setFooter({
-      text: 'All purchases require a linked wallet and manual claim fulfillment through a ticket.',
+      text: 'Linked wallet required. Delivery is handled manually through tickets.',
     });
 }
 
 function buildMarketplaceItemRows() {
-  const rows = [];
-  for (let index = 0; index < MARKETPLACE_ITEMS.length; index += 5) {
-    rows.push(
-      new ActionRowBuilder().addComponents(
-        ...MARKETPLACE_ITEMS.slice(index, index + 5).map((item) =>
-          new ButtonBuilder()
-            .setCustomId(item.buttonId)
-            .setLabel(item.buttonLabel)
-            .setStyle(ButtonStyle.Primary)
-        )
+  const rowGroups = [
+    MARKETPLACE_ITEMS.slice(0, 3),
+    MARKETPLACE_ITEMS.slice(3, 5),
+    MARKETPLACE_ITEMS.slice(5),
+  ];
+
+  return rowGroups.map((group) =>
+    new ActionRowBuilder().addComponents(
+      ...group.map((item) =>
+        new ButtonBuilder()
+          .setCustomId(item.buttonId)
+          .setLabel(item.buttonLabel)
+          .setStyle(item.key === 'custom' ? ButtonStyle.Secondary : ButtonStyle.Primary)
       )
-    );
-  }
-  return rows;
+    )
+  );
 }
 
 function buildConfirmationEmbed(item) {
