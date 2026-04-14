@@ -102,10 +102,6 @@ function getMarketplaceItem(itemKey) {
 }
 
 function buildMarketplacePanelEmbed() {
-  const rewardLines = MARKETPLACE_ITEMS
-    .map((item) => `**${item.order}. ${item.name}**\n${formatCharm(item.price)} $CHARM`)
-    .join('\n\n');
-
   return new EmbedBuilder()
     .setTitle('Malformed Marketplace')
     .setColor(0xd4a43b)
@@ -113,11 +109,6 @@ function buildMarketplacePanelEmbed() {
       'Spend your $CHARM on marketplace rewards. Choose an item below to begin a private checkout. After a successful purchase, open a ticket to claim your reward.'
     )
     .addFields(
-      {
-        name: 'Available Rewards',
-        value: rewardLines,
-        inline: false,
-      },
       {
         name: 'How It Works',
         value:
