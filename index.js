@@ -27,6 +27,7 @@ const path = require('path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { renderSquigCardExact } = require('./card_renderer');
 const portalEvent = require('./modules/portalEvent');
+const marketplaceCommand = require('./modules/marketplaceCommand');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
 
@@ -736,6 +737,7 @@ function buildSlashCommands() {
       .setName('mint')
       .setDescription('Show the Squigs mint embed')
       .toJSON(),
+    marketplaceCommand.buildMarketplaceSlashCommand().toJSON(),
   ];
 }
 
@@ -4996,10 +4998,26 @@ client.on('interactionCreate', async (interaction) => {
         });
         return;
       }
+
+      if (interaction.commandName === 'marketplace') {
+        await marketplaceCommand.handleMarketplaceCommand(interaction);
+        return;
+      }
       return;
     }
 
     if (interaction.isButton()) {
+      if (await marketplaceCommand.handleMarketplaceButton(interaction, {
+        clientUserId: client.user?.id || null,
+        getWalletLinks,
+        getMarketplaceSpendableBalance,
+        getDripMemberCurrencyBalance,
+        awardDripPoints,
+        postAdminSystemLog,
+      })) {
+        return;
+      }
+
       if (interaction.customId === 'portal_claim') {
         await portalEvent.handlePortalClaim(interaction);
         return;
