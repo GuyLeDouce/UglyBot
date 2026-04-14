@@ -139,7 +139,7 @@ function buildMarketplaceItemRows() {
         new ButtonBuilder()
           .setCustomId(item.buttonId)
           .setLabel(item.buttonLabel)
-          .setStyle(item.key === 'custom' ? ButtonStyle.Secondary : ButtonStyle.Primary)
+          .setStyle(ButtonStyle.Success)
       )
     )
   );
