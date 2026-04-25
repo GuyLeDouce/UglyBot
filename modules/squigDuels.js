@@ -19,11 +19,16 @@ const SQUIGS_CONTRACT = String(
 ).toLowerCase();
 const SQUIG_IMAGE_BASE = 'https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default';
 const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
+const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
+  process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
+).trim();
 const BOT_DUEL_WAGER = 50;
 const MAX_SELECT_OPTIONS = 25;
 const ACCEPT_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ACCEPT_TIMEOUT_MS || 10 * 60 * 1000);
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
 const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 30 * 1000);
+const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 1500);
+const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 10 * 1000);
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 6;
 const SUDDEN_DEATH_DAMAGE = 8;
@@ -150,6 +155,26 @@ function missedTurnPenalty(maxHp) {
   return Math.max(1, Math.round((Number(maxHp) || 0) * pct));
 }
 
+function delay(ms) {
+  const waitMs = Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
+function actionLabel(action) {
+  const labels = {
+    attack: 'Attack',
+    defend: 'Defend',
+    heal: 'Heal',
+    panic: 'Panic',
+    miss: 'Miss',
+  };
+  return labels[String(action || '').toLowerCase()] || String(action || 'Unknown');
+}
+
+function playerLabel(side) {
+  return side === 'challenger' ? 'Player 1' : 'Player 2';
+}
+
 function getDuel(id) {
   const duel = duels.get(String(id || ''));
   if (!duel) return null;
@@ -165,6 +190,28 @@ async function logDuel(guild, category, message) {
   } catch (err) {
     console.warn('[SquigDuels] log failed:', String(err?.message || err || ''));
   }
+}
+
+async function fetchPublicLogChannel(guild) {
+  if (!SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID) return null;
+  const fromGuild = guild?.channels?.fetch
+    ? await guild.channels.fetch(SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID).catch(() => null)
+    : null;
+  if (fromGuild?.isTextBased?.()) return fromGuild;
+  const cached = deps?.client?.channels?.cache?.get(SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID);
+  if (cached?.isTextBased?.()) return cached;
+  const fromClient = deps?.client?.channels?.fetch
+    ? await deps.client.channels.fetch(SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID).catch(() => null)
+    : null;
+  return fromClient?.isTextBased?.() ? fromClient : null;
+}
+
+async function postPublicDuelFinalLog(guild, content) {
+  const channel = await fetchPublicLogChannel(guild);
+  if (!channel) return;
+  await channel.send(content).catch((err) => {
+    console.warn('[SquigDuels] public final log failed:', String(err?.message || err || ''));
+  });
 }
 
 async function persistDuel(duel) {
@@ -535,7 +582,6 @@ async function transferFromBot(guild, userId, amount, context, initiatorDiscordI
       senderMemberIdOverride: spendable.botMemberId,
     }
   );
-  await logDuel(guild, context, `Sent ${formatCharm(amount)} $CHARM to <@${userId}>.`);
   return { ok: true };
 }
 
@@ -566,6 +612,8 @@ async function cancelDuel(guild, duel, reason) {
   if (duel.setupTimeout) clearTimeout(duel.setupTimeout);
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
+  const hadChallengerWager = Boolean(duel.challengerPaid);
+  const hadOpponentWager = Boolean(duel.opponentPaid);
   const failures = await refundPaidWagers(guild, duel, reason);
   duel.status = 'cancelled';
   duel.completedAt = Date.now();
@@ -578,6 +626,16 @@ async function cancelDuel(guild, duel, reason) {
       (failures.length ? `\nRefund issue(s): ${failures.join(' | ')}` : '')
     ).catch(() => null);
   }
+  const refunded = [];
+  if (hadChallengerWager && !duel.challengerPaid) refunded.push(`<@${duel.challengerId}>`);
+  if (hadOpponentWager && duel.opponentId && !duel.opponentPaid) refunded.push(`<@${duel.opponentId}>`);
+  await postPublicDuelFinalLog(
+    guild,
+    `Squig Duel final log\n` +
+    `Reason: ${reason}\n` +
+    `Refund: ${refunded.length ? `${formatCharm(duel.wagerAmount)} $CHARM each to ${refunded.join(' and ')}` : 'No paid wagers to refund.'}` +
+    (failures.length ? `\nRefund issue(s): ${failures.join(' | ')}` : '')
+  );
 }
 
 async function tryDirectUglyPointLookup(tokenId) {
@@ -1048,7 +1106,6 @@ async function handleSquigSelect(interaction) {
     }
     duel.challengerPaid = true;
     await persistDuel(duel);
-    await logDuel(interaction.guild, 'Squig Selected', `<@${duel.challengerId}> selected Squig #${chosen.tokenId}.`);
     if (isBotDuel(duel)) {
       if (duel.setupTimeout) clearTimeout(duel.setupTimeout);
       duel.setupTimeout = null;
@@ -1084,7 +1141,6 @@ async function handleSquigSelect(interaction) {
   }
   duel.opponentPaid = true;
   await persistDuel(duel);
-  await logDuel(interaction.guild, 'Squig Selected', `<@${duel.opponentId}> selected Squig #${chosen.tokenId}.`);
   await startDuel(interaction.guild, duel);
   await interaction.followUp({ content: 'Wager collected. Duel started.', flags: 64 }).catch(() => null);
   return true;
@@ -1113,7 +1169,6 @@ async function handleAcceptDecline(interaction) {
 
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   await interaction.update({ content: 'Duel accepted. Opponent is choosing a Squig.', components: [] });
-  await logDuel(interaction.guild, 'Accepted', `<@${duel.opponentId}> accepted duel \`${duel.id}\`.`);
   await interaction.followUp({ content: 'Choose your Squig in this thread.', flags: 64 }).catch(() => null);
   await sendSquigSelectionPrompt(interaction.guild, duel, 'opponent');
   return true;
@@ -1184,7 +1239,7 @@ async function startDuel(guild, duel) {
   if (!thread?.isTextBased()) return;
   const startDescription = isBotDuel(duel)
     ? `Bot test duel.\nTest wager: **${formatCharm(BOT_DUEL_WAGER)} $CHARM**\nYour wager is returned after the duel no matter who wins.`
-    : `Pot: **${formatCharm(duel.wagerAmount * 2)} $CHARM**\nRound actions are hidden until both players choose.`;
+    : `Pot: **${formatCharm(duel.wagerAmount * 2)} $CHARM**\nEach action selection posts publicly in this thread.`;
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
@@ -1192,7 +1247,6 @@ async function startDuel(guild, duel) {
       startDescription
     )],
   });
-  await logDuel(guild, 'Started', `Duel \`${duel.id}\` started.`);
   await beginRound(guild, duel);
 }
 
@@ -1207,7 +1261,7 @@ async function beginRound(guild, duel) {
   const sudden = duel.currentRound > SUDDEN_DEATH_AFTER_ROUND;
   const roundPrompt = isBotDuel(duel)
     ? `Choose your action within ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds.\nThe bot will answer immediately after you lock in.\n`
-    : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\n`;
+    : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\nSelections post in the thread as they are made.\n`;
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
@@ -1249,9 +1303,16 @@ async function handleActionButton(interaction) {
   if (isBotDuel(duel) && side === 'challenger') {
     duel.currentActions.opponent = randomBotAction();
   }
-  await interaction.reply({ content: `Action locked: ${action}.`, flags: 64 });
+  await interaction.reply({ content: `${playerLabel(side)} selected ${actionLabel(action)}` });
+  if (isBotDuel(duel) && side === 'challenger') {
+    const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
+    if (thread?.isTextBased()) {
+      await thread.send(`Player 2 selected ${actionLabel(duel.currentActions.opponent)}`).catch(() => null);
+    }
+  }
   if (duel.currentActions.challenger && duel.currentActions.opponent) {
     if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
+    await delay(ROUND_RESOLVE_DELAY_MS);
     await resolveRound(interaction.guild, duel, false);
   }
   return true;
@@ -1285,12 +1346,12 @@ function resolveRoundMath(duel, timedOut) {
   if (actions.challenger === 'miss') {
     const penalty = missedTurnPenalty(duel.challengerMaxHp);
     cHp -= penalty;
-    lines.push(`<@${duel.challengerId}> missed the action window and lost ${penalty} HP.`);
+    lines.push(`Player 1 missed the action window and lost ${penalty} HP.`);
   }
   if (actions.opponent === 'miss') {
     const penalty = missedTurnPenalty(duel.opponentMaxHp);
     oHp -= penalty;
-    lines.push(`<@${duel.opponentId}> missed the action window and lost ${penalty} HP.`);
+    lines.push(`Player 2 missed the action window and lost ${penalty} HP.`);
   }
 
   const cPanic = actions.challenger === 'panic';
@@ -1300,14 +1361,14 @@ function resolveRoundMath(duel, timedOut) {
     const enemyLoss = Math.round(duel.challengerMaxHp * 0.08);
     cHp -= selfLoss;
     oHp -= enemyLoss;
-    lines.push(`Squig #${duel.challengerSquigTokenId} panicked: -${selfLoss} self HP, -${enemyLoss} enemy HP.`);
+    lines.push(`Player 1 panicked: Player 1 loses ${selfLoss} HP and Player 2 loses ${enemyLoss} HP.`);
   }
   if (oPanic) {
     const selfLoss = Math.round(duel.opponentMaxHp * 0.12);
     const enemyLoss = Math.round(duel.opponentMaxHp * 0.08);
     oHp -= selfLoss;
     cHp -= enemyLoss;
-    lines.push(`Squig #${duel.opponentSquigTokenId} panicked: -${selfLoss} self HP, -${enemyLoss} enemy HP.`);
+    lines.push(`Player 2 panicked: Player 2 loses ${selfLoss} HP and Player 1 loses ${enemyLoss} HP.`);
   }
 
   const cBlockedByPanic = oPanic;
@@ -1317,52 +1378,54 @@ function resolveRoundMath(duel, timedOut) {
 
   if (actions.challenger === 'attack') {
     if (cBlockedByPanic) {
-      lines.push(`Squig #${duel.challengerSquigTokenId}'s attack missed in the panic.`);
+      lines.push(`Player 1's attack missed in the panic.`);
     } else {
       let dmg = attackDamage(baseAttack(duel.challengerUglyPoints));
       if (oDefends) {
         dmg = Math.max(1, Math.round(dmg * 0.25));
-        lines.push(`Squig #${duel.opponentSquigTokenId} defended and reduced the attack to ${dmg} damage.`);
+        cHp -= dmg;
+        lines.push(`Player 1 loses ${dmg} HP when blocked by Player 2.`);
       } else {
-        lines.push(`Squig #${duel.challengerSquigTokenId} attacked for ${dmg} damage.`);
+        oHp -= dmg;
+        lines.push(`Player 1 hits Player 2 for ${dmg} HP.`);
       }
-      oHp -= dmg;
     }
   }
 
   if (actions.opponent === 'attack') {
     if (oBlockedByPanic) {
-      lines.push(`Squig #${duel.opponentSquigTokenId}'s attack missed in the panic.`);
+      lines.push(`Player 2's attack missed in the panic.`);
     } else {
       let dmg = attackDamage(baseAttack(duel.opponentUglyPoints));
       if (cDefends) {
         dmg = Math.max(1, Math.round(dmg * 0.25));
-        lines.push(`Squig #${duel.challengerSquigTokenId} defended and reduced the attack to ${dmg} damage.`);
+        oHp -= dmg;
+        lines.push(`Player 2 loses ${dmg} HP when blocked by Player 1.`);
       } else {
-        lines.push(`Squig #${duel.opponentSquigTokenId} attacked for ${dmg} damage.`);
+        cHp -= dmg;
+        lines.push(`Player 2 hits Player 1 for ${dmg} HP.`);
       }
-      cHp -= dmg;
     }
   }
 
   if (actions.challenger === 'heal') {
     if (cBlockedByPanic || oDefends) {
-      lines.push(`Squig #${duel.challengerSquigTokenId}'s heal failed.`);
+      lines.push(`Player 1's heal failed.`);
     } else {
       const heal = Math.round(10 + duel.challengerMaxHp * 0.10);
       const beforeHeal = cHp;
       cHp = Math.min(duel.challengerMaxHp, cHp + heal);
-      lines.push(`Squig #${duel.challengerSquigTokenId} healed ${Math.max(0, cHp - beforeHeal)} HP.`);
+      lines.push(`Player 1 heals ${Math.max(0, cHp - beforeHeal)} HP.`);
     }
   }
   if (actions.opponent === 'heal') {
     if (oBlockedByPanic || cDefends) {
-      lines.push(`Squig #${duel.opponentSquigTokenId}'s heal failed.`);
+      lines.push(`Player 2's heal failed.`);
     } else {
       const heal = Math.round(10 + duel.opponentMaxHp * 0.10);
       const beforeHeal = oHp;
       oHp = Math.min(duel.opponentMaxHp, oHp + heal);
-      lines.push(`Squig #${duel.opponentSquigTokenId} healed ${Math.max(0, oHp - beforeHeal)} HP.`);
+      lines.push(`Player 2 heals ${Math.max(0, oHp - beforeHeal)} HP.`);
     }
   }
 
@@ -1401,28 +1464,39 @@ function determineWinner(duel, result) {
   return Math.random() < 0.5 ? duel.challengerId : duel.opponentId;
 }
 
+function duelCompletionReason(duel, winnerId, result = null) {
+  const cOut = duel.challengerCurrentHp <= 0;
+  const oOut = duel.opponentCurrentHp <= 0;
+  if (cOut && oOut) {
+    return `Both Squigs hit 0 HP; <@${winnerId}> won by tiebreaker.`;
+  }
+  if (cOut) {
+    return `Challenger Squig #${duel.challengerSquigTokenId} hit 0 HP.`;
+  }
+  if (oOut) {
+    return `Opponent Squig #${duel.opponentSquigTokenId} hit 0 HP.`;
+  }
+  if (result?.lines?.length) {
+    return result.lines[result.lines.length - 1];
+  }
+  return 'Duel completed.';
+}
+
 async function resolveRound(guild, duel, timedOut) {
   if (!duel || duel.status !== 'active' || duel.processingRound) return;
   duel.processingRound = true;
   if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
   const result = resolveRoundMath(duel, timedOut);
   await persistRound(duel, result);
-  await logDuel(guild, 'Round Result', `Duel \`${duel.id}\` round ${result.round}: ${result.lines.join(' | ')}`);
 
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
-  const actionText =
-    `<@${duel.challengerId}>: **${result.actions.challenger}**\n` +
-    `<@${duel.opponentId}>: **${result.actions.opponent}**`;
   if (thread?.isTextBased()) {
-    await thread.send({
-      embeds: [buildStatusEmbed(
-        duel,
-        `Round ${result.round} Results`,
-        `**Selected Actions**\n${actionText}\n\n` +
-        `**Result**\n${result.lines.join('\n') || 'No effects resolved.'}\n\n` +
-        `Remaining HP shown below.`
-      )],
-    });
+    const resultLines = result.lines.length ? result.lines.join('\n') : 'No effects resolved.';
+    await thread.send(
+      `Results:\n${resultLines}\n` +
+      `Stats: Challenger Squig #${duel.challengerSquigTokenId} HP: ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}, ` +
+      `Opponent Squig #${duel.opponentSquigTokenId} HP: ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
+    );
   }
 
   const winnerId = determineWinner(duel, result);
@@ -1431,6 +1505,10 @@ async function resolveRound(guild, duel, timedOut) {
     return;
   }
   duel.processingRound = false;
+  if (thread?.isTextBased()) {
+    await thread.send(`Next round starts in ${Math.round(NEXT_ROUND_DELAY_MS / 1000)} seconds.`);
+  }
+  await delay(NEXT_ROUND_DELAY_MS);
   await beginRound(guild, duel);
 }
 
@@ -1442,11 +1520,12 @@ function duelTaxPercent() {
   return Math.min(100, n);
 }
 
-async function completeDuel(guild, duel, winnerId) {
+async function completeDuel(guild, duel, winnerId, result = null) {
   duel.status = 'completed';
   duel.winnerId = winnerId;
   duel.completedAt = Date.now();
   releaseDuelUsers(duel);
+  const reason = duelCompletionReason(duel, winnerId, result);
   if (isBotDuel(duel)) {
     const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
     let refundOk = true;
@@ -1458,7 +1537,6 @@ async function completeDuel(guild, duel, winnerId) {
       } catch (err) {
         refundOk = false;
         refundError = String(err?.message || err || '').slice(0, 500);
-        await logDuel(guild, 'Bot Duel Refund Error', `Duel \`${duel.id}\` refund failed for <@${duel.challengerId}>: ${refundError}`);
       }
     }
     await persistDuel(duel);
@@ -1475,7 +1553,14 @@ async function completeDuel(guild, duel, winnerId) {
         )],
       }).catch(() => null);
     }
-    await logDuel(guild, 'Bot Duel Completed', `Duel \`${duel.id}\` winner <@${winnerId}> refund ${refundOk ? 'ok' : 'failed'}.`);
+    await postPublicDuelFinalLog(
+      guild,
+      `Squig Duel final log\n` +
+      `Reason: ${reason}\n` +
+      `Winner: <@${winnerId}>\n` +
+      `Refund: ${refundOk ? `${formatCharm(BOT_DUEL_WAGER)} $CHARM returned to <@${duel.challengerId}>` : `Failed: ${refundError}`}`
+    );
+    await logDuel(guild, 'Refund', `Bot duel \`${duel.id}\` winner <@${winnerId}> refund ${refundOk ? `${formatCharm(BOT_DUEL_WAGER)} $CHARM returned to <@${duel.challengerId}>` : `failed: ${refundError}`}.`);
     return;
   }
   const pot = Math.floor(Number(duel.wagerAmount || 0) * 2);
@@ -1491,7 +1576,6 @@ async function completeDuel(guild, duel, winnerId) {
   } catch (err) {
     payoutOk = false;
     payoutError = String(err?.message || err || '').slice(0, 500);
-    await logDuel(guild, 'Payout Error', `Duel \`${duel.id}\` payout failed for <@${winnerId}>: ${payoutError}`);
   }
   await persistDuel(duel);
 
@@ -1508,7 +1592,15 @@ async function completeDuel(guild, duel, winnerId) {
       )],
     }).catch(() => null);
   }
-  await logDuel(guild, 'Completed', `Duel \`${duel.id}\` winner <@${winnerId}> payout ${formatCharm(payout)} $CHARM.`);
+  await postPublicDuelFinalLog(
+    guild,
+    `Squig Duel final log\n` +
+    `Reason: ${reason}\n` +
+    `Winner: <@${winnerId}>\n` +
+    `Payout: ${payoutOk ? `${formatCharm(payout)} $CHARM` : `Failed: ${payoutError}`}` +
+    (taxAmount ? `\nTax: ${formatCharm(taxAmount)} $CHARM (${taxPercent}%)` : '')
+  );
+  await logDuel(guild, 'Payout', `Duel \`${duel.id}\` winner <@${winnerId}> payout ${payoutOk ? `${formatCharm(payout)} $CHARM` : `failed: ${payoutError}`}.`);
 }
 
 async function handleButton(interaction) {
