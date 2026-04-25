@@ -1174,8 +1174,14 @@ async function handleAcceptDecline(interaction) {
   return true;
 }
 
-function buildStatusEmbed(duel, title, description) {
-  return new EmbedBuilder()
+function buildStatusEmbed(duel, title, description, options = {}) {
+  const thumbnailUrl = Object.prototype.hasOwnProperty.call(options, 'thumbnailUrl')
+    ? options.thumbnailUrl
+    : squigImageUrl(duel.challengerSquigTokenId);
+  const imageUrl = Object.prototype.hasOwnProperty.call(options, 'imageUrl')
+    ? options.imageUrl
+    : squigImageUrl(duel.opponentSquigTokenId);
+  const embed = new EmbedBuilder()
     .setTitle(title)
     .setColor(0x7ADDC0)
     .setDescription(description)
@@ -1196,9 +1202,10 @@ function buildStatusEmbed(duel, title, description) {
           `HP: **${Math.max(0, duel.opponentCurrentHp)} / ${duel.opponentMaxHp}**`,
         inline: true,
       }
-    )
-    .setThumbnail(squigImageUrl(duel.challengerSquigTokenId))
-    .setImage(squigImageUrl(duel.opponentSquigTokenId));
+    );
+  if (thumbnailUrl) embed.setThumbnail(thumbnailUrl);
+  if (imageUrl) embed.setImage(imageUrl);
+  return embed;
 }
 
 function actionRows(duel) {
@@ -1244,7 +1251,8 @@ async function startDuel(guild, duel) {
     embeds: [buildStatusEmbed(
       duel,
       'Squig Duel Started',
-      startDescription
+      startDescription,
+      { imageUrl: SQUIG_DUEL_MENU_IMAGE }
     )],
   });
   await beginRound(guild, duel);
@@ -1267,7 +1275,8 @@ async function beginRound(guild, duel) {
       duel,
       `Round ${duel.currentRound}${sudden ? ' - Sudden Death' : ''}`,
       roundPrompt +
-      (sudden ? `Sudden Death: both Squigs lose ${SUDDEN_DEATH_DAMAGE} HP at the end of the round.` : '')
+      (sudden ? `Sudden Death: both Squigs lose ${SUDDEN_DEATH_DAMAGE} HP at the end of the round.` : ''),
+      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE }
     )],
     components: actionRows(duel),
   });
