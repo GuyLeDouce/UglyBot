@@ -29,6 +29,7 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { renderSquigCardExact } = require('./card_renderer');
 const portalEvent = require('./modules/portalEvent');
 const marketplaceCommand = require('./modules/marketplaceCommand');
+const squigDuels = require('./modules/squigDuels');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
 
@@ -417,6 +418,7 @@ ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
 ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message));
 ensureMarketplaceSchema().catch(e => console.error('Marketplace schema error:', e.message));
+squigDuels.ensureSquigDuelSchema(teamPool).catch(e => console.error('Squig duel schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   try {
@@ -739,6 +741,7 @@ function buildSlashCommands() {
       .setDescription('Show the Squigs mint embed')
       .toJSON(),
     marketplaceCommand.buildMarketplaceSlashCommand().toJSON(),
+    squigDuels.buildSquigDuelSlashCommand().toJSON(),
   ];
 }
 
@@ -4280,9 +4283,34 @@ portalEvent.initPortalEvent({
   awardDripPoints,
 });
 
+squigDuels.initSquigDuels({
+  client,
+  clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
+  pointsPool,
+  historyPool: teamPool,
+  getWalletLinks,
+  getGuildPointMappings,
+  getOwnedTokenIdsForContractMany,
+  getNftMetadataAlchemy,
+  getTraitsForToken,
+  normalizeTraits,
+  computeHpFromTraits,
+  hpTableForContract,
+  getMarketplaceSpendableBalance,
+  getDripMemberCurrencyBalance,
+  extractDripCurrencyAmountFromPayload,
+  awardDripPoints,
+  postAdminSystemLog,
+  isAdmin,
+});
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
+      if (await squigDuels.handleCommand(interaction)) {
+        return;
+      }
+
       if (interaction.commandName === 'launch-verification') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -5010,6 +5038,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton()) {
+      if (await squigDuels.handleButton(interaction)) {
+        return;
+      }
+
       if (await marketplaceCommand.handleMarketplaceButton(interaction, {
         clientUserId: client.user?.id || null,
         getWalletLinks,
@@ -6323,6 +6355,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu()) {
+      if (await squigDuels.handleSelectMenu(interaction)) {
+        return;
+      }
+
       if (await marketplaceCommand.handleMarketplaceSelectMenu(interaction, {
         clientUserId: client.user?.id || null,
         getWalletLinks,
@@ -6337,6 +6373,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (await squigDuels.handleModalSubmit(interaction)) {
+        return;
+      }
+
       if ([
         'prize_set_name_modal',
         'prize_set_description_modal',
@@ -6880,6 +6920,8 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author?.bot) return;
+
+  if (await squigDuels.handleMessageCreate(message)) return;
 
   const content = String(message.content || '').trim();
   if (!content.startsWith('!')) return;
