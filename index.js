@@ -3807,6 +3807,13 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
     transferErrors: transferErrors.slice(0, 6),
   });
 
+  if (options.requireTransfer) {
+    throw new Error(
+      `DRIP transfer failed and balance-credit fallback is disabled for ${context}. ` +
+      `Attempts: ${(transferErrors.length ? transferErrors : quiet404s).slice(0, 4).join(' | ') || 'none'}`
+    );
+  }
+
   const fallbackResult = await awardDripPointsProjectFallback(
     realmId,
     recipientCandidates,

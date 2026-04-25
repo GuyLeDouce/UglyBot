@@ -606,6 +606,7 @@ async function collectWager(guild, userId, amount, context) {
       recipientDiscordId: botUserId(),
       recipientMemberIdOverride: spendable.botMemberId,
       senderMemberIdOverride: spendable.memberIds[0],
+      requireTransfer: true,
     }
   );
   await logDuel(guild, 'Wager Collected', `<@${userId}> escrowed ${formatCharm(amount)} $CHARM for ${context}.`);
@@ -627,6 +628,7 @@ async function transferFromBot(guild, userId, amount, context, initiatorDiscordI
       initiatorDiscordId: initiatorDiscordId || botUserId(),
       recipientDiscordId: userId,
       senderMemberIdOverride: spendable.botMemberId,
+      requireTransfer: true,
     }
   );
   return { ok: true };
