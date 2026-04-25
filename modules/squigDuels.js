@@ -439,8 +439,8 @@ function challengerSetupModal(duelId) {
   return modal;
 }
 
-function opponentSelectRows(duelId) {
-  return [
+function opponentSelectRows(duelId, allowOpenChallenge = false) {
+  const rows = [
     new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`sd:opponent:${duelId}`)
@@ -448,13 +448,16 @@ function opponentSelectRows(duelId) {
         .setMinValues(1)
         .setMaxValues(1)
     ),
-    new ActionRowBuilder().addComponents(
+  ];
+  if (allowOpenChallenge) {
+    rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`sd:open:${duelId}`)
         .setLabel('Open Challenge')
         .setStyle(ButtonStyle.Primary)
-    ),
-  ];
+    ));
+  }
+  return rows;
 }
 
 function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerAmount = null, isBotDuel = false }) {
@@ -534,12 +537,15 @@ async function handleStartButton(interaction) {
   await persistDuel(duel);
   await logDuel(interaction.guild, 'Created', `Duel \`${duelId}\` created by <@${interaction.user.id}> in <#${thread.id}>.`);
 
+  const allowOpenChallenge = isAdmin(interaction);
   await thread.send({
     content:
       `<@${interaction.user.id}> started a Squig Duel setup.\n` +
       `Holders can spectate here. Only duel participants and admins should write in this thread.\n\n` +
-      `Select your opponent, or post an open challenge for holders to accept.`,
-    components: opponentSelectRows(duelId),
+      (allowOpenChallenge
+        ? `Select your opponent, or post an open challenge for holders to accept.`
+        : `Select your opponent. Start typing their name in the picker below.`),
+    components: opponentSelectRows(duelId, allowOpenChallenge),
   });
   await interaction.editReply({ content: `Duel thread created: <#${thread.id}>. Continue setup there.` });
   return true;
@@ -1047,6 +1053,10 @@ async function handleOpenChallengeButton(interaction) {
   }
   if (interaction.user.id !== duel.challengerId) {
     await interaction.reply({ content: 'Only the challenger can open this challenge.', flags: 64 });
+    return true;
+  }
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Open Challenge is admin only.', flags: 64 });
     return true;
   }
 
