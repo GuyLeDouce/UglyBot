@@ -3690,7 +3690,9 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
 
   const senderOverride = normalizeDripMemberId(options.senderMemberIdOverride);
   const configuredSender = resolveConfiguredDripSenderMemberId();
-  const senderCandidates = collectUniqueDripMemberIds([senderOverride, configuredSender]);
+  const senderCandidates = options.requireTransfer && senderOverride
+    ? collectUniqueDripMemberIds([senderOverride])
+    : collectUniqueDripMemberIds([senderOverride, configuredSender]);
   const initiatorId = normalizeDripMemberId(options.initiatorId || DRIP_INITIATOR_ID || options.initiatorDiscordId || null);
   const context = String(options.context || 'reward');
 
@@ -3732,8 +3734,9 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
   }
 
   const routeVariants = [
-    { baseUrl: `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}`, quiet404: false },
-    { baseUrl: `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}`, quiet404: true },
+    { baseUrl: `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}`, quiet404: false },
+    { baseUrl: `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}`, quiet404: true },
+    { baseUrl: `https://api.drip.re/api/v4/realms/${encodeURIComponent(realmId)}`, quiet404: true },
   ];
   const payloadVariants = [];
   if (currencyId) {
@@ -3761,7 +3764,7 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
           const res = await fetchWithTimeout(url, {
             timeoutMs: 15000,
             headers: buildDripHeaders(settings, true),
-            method: 'POST',
+            method: 'PATCH',
             body: JSON.stringify(payload),
           });
           if (res.ok) {
@@ -3772,7 +3775,7 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
               usedSenderId: senderId,
               endpoint: '/transfer',
               baseUrl: route.baseUrl,
-              method: 'POST',
+              method: 'PATCH',
             };
           }
           const body = await res.text().catch(() => '');
