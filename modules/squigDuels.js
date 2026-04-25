@@ -1472,7 +1472,7 @@ function resolveRoundMath(duel, timedOut) {
     if (cBlockedByPanic || oDefends) {
       lines.push(`${challenger}'s heal failed.`);
     } else {
-      const heal = Math.round(10 + duel.challengerMaxHp * 0.10);
+      const heal = Math.round(14 + duel.challengerMaxHp * 0.14);
       const beforeHeal = cHp;
       cHp = Math.min(duel.challengerMaxHp, cHp + heal);
       lines.push(`${challenger} heals ${Math.max(0, cHp - beforeHeal)} HP.`);
@@ -1482,7 +1482,7 @@ function resolveRoundMath(duel, timedOut) {
     if (oBlockedByPanic || cDefends) {
       lines.push(`${opponent}'s heal failed.`);
     } else {
-      const heal = Math.round(10 + duel.opponentMaxHp * 0.10);
+      const heal = Math.round(14 + duel.opponentMaxHp * 0.14);
       const beforeHeal = oHp;
       oHp = Math.min(duel.opponentMaxHp, oHp + heal);
       lines.push(`${opponent} heals ${Math.max(0, oHp - beforeHeal)} HP.`);
