@@ -29,6 +29,7 @@ const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 
 const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 30 * 1000);
 const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 1500);
 const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 10 * 1000);
+const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 6;
 const SUDDEN_DEATH_DAMAGE = 8;
@@ -171,8 +172,9 @@ function actionLabel(action) {
   return labels[String(action || '').toLowerCase()] || String(action || 'Unknown');
 }
 
-function playerLabel(side) {
-  return side === 'challenger' ? 'Player 1' : 'Player 2';
+function playerLabel(duel, side) {
+  const userId = side === 'challenger' ? duel?.challengerId : duel?.opponentId;
+  return userId ? `<@${userId}>` : (side === 'challenger' ? 'Player 1' : 'Player 2');
 }
 
 function getDuel(id) {
@@ -212,6 +214,21 @@ async function postPublicDuelFinalLog(guild, content) {
   await channel.send(content).catch((err) => {
     console.warn('[SquigDuels] public final log failed:', String(err?.message || err || ''));
   });
+}
+
+function scheduleDuelThreadDeletion(guild, duel) {
+  if (!guild || !duel?.threadId || duel.threadDeleteTimeout) return;
+  const threadId = duel.threadId;
+  duel.threadDeleteTimeout = setTimeout(async () => {
+    const thread = await guild.channels.fetch(threadId).catch(() => null);
+    if (!thread?.delete) return;
+    await thread.delete('Squig Duel ended; deleting thread after cleanup delay').catch((err) => {
+      console.warn('[SquigDuels] failed to delete ended duel thread:', String(err?.message || err || ''));
+    });
+  }, THREAD_DELETE_DELAY_MS);
+  if (typeof duel.threadDeleteTimeout.unref === 'function') {
+    duel.threadDeleteTimeout.unref();
+  }
 }
 
 async function persistDuel(duel) {
@@ -666,6 +683,7 @@ async function cancelDuel(guild, duel, reason) {
     `Refund: ${refunded.length ? `${formatCharm(duel.wagerAmount)} $CHARM each to ${refunded.join(' and ')}` : 'No paid wagers to refund.'}` +
     (failures.length ? `\nRefund issue(s): ${failures.join(' | ')}` : '')
   );
+  scheduleDuelThreadDeletion(guild, duel);
 }
 
 async function tryDirectUglyPointLookup(tokenId) {
@@ -1342,11 +1360,11 @@ async function handleActionButton(interaction) {
   if (isBotDuel(duel) && side === 'challenger') {
     duel.currentActions.opponent = randomBotAction();
   }
-  await interaction.reply({ content: `${playerLabel(side)} selected ${actionLabel(action)}` });
+  await interaction.reply({ content: `${playerLabel(duel, side)} selected ${actionLabel(action)}` });
   if (isBotDuel(duel) && side === 'challenger') {
     const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
     if (thread?.isTextBased()) {
-      await thread.send(`Player 2 selected ${actionLabel(duel.currentActions.opponent)}`).catch(() => null);
+      await thread.send(`${playerLabel(duel, 'opponent')} selected ${actionLabel(duel.currentActions.opponent)}`).catch(() => null);
     }
   }
   if (duel.currentActions.challenger && duel.currentActions.opponent) {
@@ -1381,16 +1399,18 @@ function resolveRoundMath(duel, timedOut) {
   let cHp = duel.challengerCurrentHp;
   let oHp = duel.opponentCurrentHp;
   const lines = [];
+  const challenger = playerLabel(duel, 'challenger');
+  const opponent = playerLabel(duel, 'opponent');
 
   if (actions.challenger === 'miss') {
     const penalty = missedTurnPenalty(duel.challengerMaxHp);
     cHp -= penalty;
-    lines.push(`Player 1 missed the action window and lost ${penalty} HP.`);
+    lines.push(`${challenger} missed the action window and lost ${penalty} HP.`);
   }
   if (actions.opponent === 'miss') {
     const penalty = missedTurnPenalty(duel.opponentMaxHp);
     oHp -= penalty;
-    lines.push(`Player 2 missed the action window and lost ${penalty} HP.`);
+    lines.push(`${opponent} missed the action window and lost ${penalty} HP.`);
   }
 
   const cPanic = actions.challenger === 'panic';
@@ -1400,14 +1420,14 @@ function resolveRoundMath(duel, timedOut) {
     const enemyLoss = Math.round(duel.challengerMaxHp * 0.08);
     cHp -= selfLoss;
     oHp -= enemyLoss;
-    lines.push(`Player 1 panicked: Player 1 loses ${selfLoss} HP and Player 2 loses ${enemyLoss} HP.`);
+    lines.push(`${challenger} panicked: ${challenger} loses ${selfLoss} HP and ${opponent} loses ${enemyLoss} HP.`);
   }
   if (oPanic) {
     const selfLoss = Math.round(duel.opponentMaxHp * 0.12);
     const enemyLoss = Math.round(duel.opponentMaxHp * 0.08);
     oHp -= selfLoss;
     cHp -= enemyLoss;
-    lines.push(`Player 2 panicked: Player 2 loses ${selfLoss} HP and Player 1 loses ${enemyLoss} HP.`);
+    lines.push(`${opponent} panicked: ${opponent} loses ${selfLoss} HP and ${challenger} loses ${enemyLoss} HP.`);
   }
 
   const cBlockedByPanic = oPanic;
@@ -1417,54 +1437,54 @@ function resolveRoundMath(duel, timedOut) {
 
   if (actions.challenger === 'attack') {
     if (cBlockedByPanic) {
-      lines.push(`Player 1's attack missed in the panic.`);
+      lines.push(`${challenger}'s attack missed in the panic.`);
     } else {
       let dmg = attackDamage(baseAttack(duel.challengerUglyPoints));
       if (oDefends) {
         dmg = Math.max(1, Math.round(dmg * 0.25));
         cHp -= dmg;
-        lines.push(`Player 1 loses ${dmg} HP when blocked by Player 2.`);
+        lines.push(`${challenger} loses ${dmg} HP when blocked by ${opponent}.`);
       } else {
         oHp -= dmg;
-        lines.push(`Player 1 hits Player 2 for ${dmg} HP.`);
+        lines.push(`${challenger} hits ${opponent} for ${dmg} HP.`);
       }
     }
   }
 
   if (actions.opponent === 'attack') {
     if (oBlockedByPanic) {
-      lines.push(`Player 2's attack missed in the panic.`);
+      lines.push(`${opponent}'s attack missed in the panic.`);
     } else {
       let dmg = attackDamage(baseAttack(duel.opponentUglyPoints));
       if (cDefends) {
         dmg = Math.max(1, Math.round(dmg * 0.25));
         oHp -= dmg;
-        lines.push(`Player 2 loses ${dmg} HP when blocked by Player 1.`);
+        lines.push(`${opponent} loses ${dmg} HP when blocked by ${challenger}.`);
       } else {
         cHp -= dmg;
-        lines.push(`Player 2 hits Player 1 for ${dmg} HP.`);
+        lines.push(`${opponent} hits ${challenger} for ${dmg} HP.`);
       }
     }
   }
 
   if (actions.challenger === 'heal') {
     if (cBlockedByPanic || oDefends) {
-      lines.push(`Player 1's heal failed.`);
+      lines.push(`${challenger}'s heal failed.`);
     } else {
       const heal = Math.round(10 + duel.challengerMaxHp * 0.10);
       const beforeHeal = cHp;
       cHp = Math.min(duel.challengerMaxHp, cHp + heal);
-      lines.push(`Player 1 heals ${Math.max(0, cHp - beforeHeal)} HP.`);
+      lines.push(`${challenger} heals ${Math.max(0, cHp - beforeHeal)} HP.`);
     }
   }
   if (actions.opponent === 'heal') {
     if (oBlockedByPanic || cDefends) {
-      lines.push(`Player 2's heal failed.`);
+      lines.push(`${opponent}'s heal failed.`);
     } else {
       const heal = Math.round(10 + duel.opponentMaxHp * 0.10);
       const beforeHeal = oHp;
       oHp = Math.min(duel.opponentMaxHp, oHp + heal);
-      lines.push(`Player 2 heals ${Math.max(0, oHp - beforeHeal)} HP.`);
+      lines.push(`${opponent} heals ${Math.max(0, oHp - beforeHeal)} HP.`);
     }
   }
 
@@ -1600,6 +1620,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
       `Refund: ${refundOk ? `${formatCharm(BOT_DUEL_WAGER)} $CHARM returned to <@${duel.challengerId}>` : `Failed: ${refundError}`}`
     );
     await logDuel(guild, 'Refund', `Bot duel \`${duel.id}\` winner <@${winnerId}> refund ${refundOk ? `${formatCharm(BOT_DUEL_WAGER)} $CHARM returned to <@${duel.challengerId}>` : `failed: ${refundError}`}.`);
+    scheduleDuelThreadDeletion(guild, duel);
     return;
   }
   const pot = Math.floor(Number(duel.wagerAmount || 0) * 2);
@@ -1640,6 +1661,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
     (taxAmount ? `\nTax: ${formatCharm(taxAmount)} $CHARM (${taxPercent}%)` : '')
   );
   await logDuel(guild, 'Payout', `Duel \`${duel.id}\` winner <@${winnerId}> payout ${payoutOk ? `${formatCharm(payout)} $CHARM` : `failed: ${payoutError}`}.`);
+  scheduleDuelThreadDeletion(guild, duel);
 }
 
 async function handleButton(interaction) {
