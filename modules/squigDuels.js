@@ -22,7 +22,9 @@ const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
 ).trim();
+const WALLET_CONNECT_CHANNEL_ID = '1476967108062740622';
 const BOT_DUEL_WAGER = 50;
+const MAX_DUEL_WAGER = 10000;
 const MAX_SELECT_OPTIONS = 25;
 const ACCEPT_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ACCEPT_TIMEOUT_MS || 10 * 60 * 1000);
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
@@ -113,6 +115,21 @@ function squigImageUrl(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return null;
   return `${SQUIG_IMAGE_BASE}/${tid}`;
+}
+
+function walletConnectMessage(prefix = 'Connect your wallet before joining a Squig Duel.') {
+  return `${prefix} Go to <#${WALLET_CONNECT_CHANNEL_ID}> to connect your wallet.`;
+}
+
+function walletConnectMessageForUser(userId) {
+  return userId
+    ? `<@${userId}> needs to connect their wallet in <#${WALLET_CONNECT_CHANNEL_ID}> before joining a Squig Duel.`
+    : walletConnectMessage();
+}
+
+async function hasConnectedWallet(guildId, userId) {
+  const links = await deps.getWalletLinks(guildId, userId).catch(() => []);
+  return links.some((x) => String(x?.wallet_address || '').trim());
 }
 
 function balancedHp(uglyPoints) {
@@ -395,6 +412,7 @@ function parseWager(input) {
   if (!/^\d+$/.test(raw)) return null;
   const amount = Number(raw);
   if (!Number.isSafeInteger(amount) || amount <= 0) return null;
+  if (amount > MAX_DUEL_WAGER) return null;
   return amount;
 }
 
@@ -567,7 +585,12 @@ async function handleBotDuelButton(interaction) {
 
 async function getSpendable(guildId, userId) {
   const result = await deps.getMarketplaceSpendableBalance(guildId, userId);
-  if (!result.ok) return result;
+  if (!result.ok) {
+    if (!(await hasConnectedWallet(guildId, userId))) {
+      return { ...result, reason: walletConnectMessage() };
+    }
+    return result;
+  }
 
   const resolvedMemberBalance = deps.extractDripCurrencyAmountFromPayload(
     result.resolvedMember || null,
@@ -586,6 +609,20 @@ async function getSpendable(guildId, userId) {
     return { ok: false, reason: 'Could not check your $CHARM balance right now.' };
   }
   return { ...result, ok: true, balance: Math.floor(Number(balance)) };
+}
+
+async function checkDuelWagerEligibility(guild, userId, amount = null) {
+  const spendable = await getSpendable(guild.id, userId);
+  if (!spendable.ok) return spendable;
+  if (amount != null && spendable.balance < amount) {
+    return {
+      ok: false,
+      reason: `You need ${formatCharm(amount)} $CHARM to join this Squig Duel.`,
+      balance: spendable.balance,
+      spendable,
+    };
+  }
+  return spendable;
 }
 
 async function collectWager(guild, userId, amount, context) {
@@ -736,7 +773,7 @@ async function fetchOwnedSquigs(guildId, userId) {
   const links = await deps.getWalletLinks(guildId, userId);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
-    return { ok: false, reason: 'You must link your wallet before joining a Squig Duel.' };
+    return { ok: false, reason: walletConnectMessage('You must link your wallet before joining a Squig Duel.') };
   }
 
   const tokenIds = await deps.getOwnedTokenIdsForContractMany(walletAddresses, SQUIGS_CONTRACT);
@@ -964,12 +1001,22 @@ async function handleOpponentSelect(interaction) {
     await interaction.reply({ content: 'That opponent does not have the holder role.', flags: 64 });
     return true;
   }
+  const opponentEligibility = await checkDuelWagerEligibility(interaction.guild, opponentId);
+  if (!opponentEligibility.ok) {
+    const reason = !(await hasConnectedWallet(interaction.guild.id, opponentId))
+      ? walletConnectMessageForUser(opponentId)
+      : (opponentEligibility.reason || 'They are not eligible for Squig Duels right now.');
+    await interaction.reply({
+      content: `That opponent cannot be selected yet. ${reason}`,
+      flags: 64,
+    });
+    return true;
+  }
 
   if (duel.opponentId && duel.opponentId !== opponentId) {
     activeUserToDuel.delete(String(duel.opponentId));
   }
   duel.opponentId = opponentId;
-  registerActiveUser(opponentId, duel.id);
   await persistDuel(duel);
   await interaction.showModal(challengerSetupModal(duel.id));
   return true;
@@ -1000,7 +1047,10 @@ async function handleSetupModal(interaction) {
     return true;
   }
   if (!wagerAmount) {
-    await interaction.reply({ content: 'Wager must be a whole number greater than 0.', flags: 64 });
+    await interaction.reply({
+      content: `Wager must be a whole number between 1 and ${formatCharm(MAX_DUEL_WAGER)} $CHARM.`,
+      flags: 64,
+    });
     return true;
   }
   const opponentActiveDuelId = activeUserToDuel.get(opponentId);
@@ -1010,6 +1060,32 @@ async function handleSetupModal(interaction) {
   }
   if (!(await hasHolderRole(interaction.guild, opponentId))) {
     await interaction.reply({ content: 'That opponent does not have the holder role.', flags: 64 });
+    return true;
+  }
+  const challengerEligibility = await checkDuelWagerEligibility(interaction.guild, interaction.user.id, wagerAmount);
+  if (!challengerEligibility.ok) {
+    await interaction.reply({
+      content: challengerEligibility.reason || walletConnectMessage('You need to connect your wallet before starting a Squig Duel.'),
+      flags: 64,
+    });
+    return true;
+  }
+  const opponentEligibility = await checkDuelWagerEligibility(interaction.guild, opponentId, wagerAmount);
+  if (!opponentEligibility.ok) {
+    if (duel.opponentId) {
+      activeUserToDuel.delete(String(duel.opponentId));
+    }
+    duel.opponentId = null;
+    await persistDuel(duel);
+    const reason = opponentEligibility.balance != null
+      ? `They need ${formatCharm(wagerAmount)} $CHARM but only have ${formatCharm(opponentEligibility.balance)}.`
+      : (!(await hasConnectedWallet(interaction.guild.id, opponentId))
+        ? walletConnectMessageForUser(opponentId)
+        : (opponentEligibility.reason || 'They are not eligible for Squig Duels right now.'));
+    await interaction.reply({
+      content: `That opponent cannot be selected for this wager. ${reason} Select another opponent to continue.`,
+      flags: 64,
+    });
     return true;
   }
 
