@@ -345,6 +345,34 @@ async function hasHolderRole(guild, userId) {
   return Boolean(member?.roles?.cache?.has(roleId));
 }
 
+async function ensureHolderThreadViewAccess(guild, thread) {
+  const roleId = holderRoleId();
+  if (!roleId || !thread) return;
+  const parent = thread.parentId
+    ? await guild.channels.fetch(thread.parentId).catch(() => null)
+    : thread.parent;
+  if (!parent?.permissionOverwrites?.edit) return;
+
+  const current = parent.permissionsFor(roleId);
+  if (
+    current?.has(PermissionFlagsBits.ViewChannel) &&
+    current?.has(PermissionFlagsBits.ReadMessageHistory)
+  ) {
+    return;
+  }
+
+  await parent.permissionOverwrites.edit(
+    roleId,
+    {
+      ViewChannel: true,
+      ReadMessageHistory: true,
+    },
+    { reason: 'Allow holders to spectate Squig Duel threads' }
+  ).catch((err) => {
+    console.warn('[SquigDuels] failed to grant holder thread visibility:', String(err?.message || err || ''));
+  });
+}
+
 function parseWager(input) {
   const raw = String(input || '').replace(/,/g, '').trim();
   if (!/^\d+$/.test(raw)) return null;
@@ -448,6 +476,7 @@ async function handleStartButton(interaction) {
     type: ChannelType.PublicThread,
     reason: `Squig Duel created by ${interaction.user.tag}`,
   });
+  await ensureHolderThreadViewAccess(interaction.guild, thread);
 
   const duel = createBaseDuel({ interaction, duelId, thread });
   duels.set(duelId, duel);
@@ -493,6 +522,7 @@ async function handleBotDuelButton(interaction) {
     type: ChannelType.PublicThread,
     reason: `Bot Squig Duel created by ${interaction.user.tag}`,
   });
+  await ensureHolderThreadViewAccess(interaction.guild, thread);
 
   const duel = createBaseDuel({
     interaction,
