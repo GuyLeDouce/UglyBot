@@ -24,6 +24,7 @@ const MAX_SELECT_OPTIONS = 25;
 const ACCEPT_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ACCEPT_TIMEOUT_MS || 10 * 60 * 1000);
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
 const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 30 * 1000);
+const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 6;
 const SUDDEN_DEATH_DAMAGE = 8;
 
@@ -140,6 +141,13 @@ function isBotDuel(duel) {
 function randomBotAction() {
   const weighted = ['attack', 'attack', 'defend', 'heal', 'panic'];
   return weighted[Math.floor(Math.random() * weighted.length)];
+}
+
+function missedTurnPenalty(maxHp) {
+  const pct = Number.isFinite(MISSED_TURN_HP_PENALTY_PERCENT)
+    ? Math.max(0, MISSED_TURN_HP_PENALTY_PERCENT)
+    : 0.10;
+  return Math.max(1, Math.round((Number(maxHp) || 0) * pct));
 }
 
 function getDuel(id) {
@@ -911,6 +919,35 @@ function challengeRows(duelId) {
   ];
 }
 
+function buildChallengeEmbed(duel) {
+  const tokenId = duel.challengerSquigTokenId || 'Unknown';
+  const imageUrl = squigImageUrl(tokenId);
+  const embed = new EmbedBuilder()
+    .setTitle('Squig Duel Challenge')
+    .setColor(0xd4a43b)
+    .setDescription(
+      `<@${duel.challengerId}> has chosen **Squig #${tokenId}**.\n` +
+      `<@${duel.opponentId}>, accept the duel to choose your Squig and match the wager.`
+    )
+    .addFields(
+      {
+        name: 'Challenger Squig',
+        value:
+          `Squig ID: **#${tokenId}**\n` +
+          `UglyPoints: **${duel.challengerUglyPoints ?? 'Unknown'}**\n` +
+          `HP: **${duel.challengerMaxHp ?? 'Unknown'}**`,
+        inline: true,
+      },
+      {
+        name: 'Wager',
+        value: `**${formatCharm(duel.wagerAmount)} $CHARM**`,
+        inline: true,
+      }
+    );
+  if (imageUrl) embed.setImage(imageUrl);
+  return embed;
+}
+
 async function postChallenge(guild, duel) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (!thread?.isTextBased()) return;
@@ -920,6 +957,7 @@ async function postChallenge(guild, duel) {
     content:
       `<@${duel.challengerId}> has challenged <@${duel.opponentId}> to a Squig Duel for ` +
       `${formatCharm(duel.wagerAmount)} $CHARM.`,
+    embeds: [buildChallengeEmbed(duel)],
     components: challengeRows(duel.id),
   });
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
@@ -1233,8 +1271,16 @@ function resolveRoundMath(duel, timedOut) {
   let oHp = duel.opponentCurrentHp;
   const lines = [];
 
-  if (actions.challenger === 'miss') lines.push(`<@${duel.challengerId}> missed the action window.`);
-  if (actions.opponent === 'miss') lines.push(`<@${duel.opponentId}> missed the action window.`);
+  if (actions.challenger === 'miss') {
+    const penalty = missedTurnPenalty(duel.challengerMaxHp);
+    cHp -= penalty;
+    lines.push(`<@${duel.challengerId}> missed the action window and lost ${penalty} HP.`);
+  }
+  if (actions.opponent === 'miss') {
+    const penalty = missedTurnPenalty(duel.opponentMaxHp);
+    oHp -= penalty;
+    lines.push(`<@${duel.opponentId}> missed the action window and lost ${penalty} HP.`);
+  }
 
   const cPanic = actions.challenger === 'panic';
   const oPanic = actions.opponent === 'panic';
