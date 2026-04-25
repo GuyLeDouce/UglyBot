@@ -1265,26 +1265,24 @@ function actionRows(duel) {
     ['heal', 'Heal', ButtonStyle.Success],
     ['panic', 'Panic', ButtonStyle.Secondary],
   ];
-  const challengerRow = new ActionRowBuilder().addComponents(
-    actions.map(([key, label, style]) =>
-      new ButtonBuilder()
-        .setCustomId(`sd:act:${duel.id}:challenger:${key}`)
-        .setLabel(isBotDuel(duel) ? label : `C: ${label}`)
-        .setStyle(style)
-    )
-  );
-  if (isBotDuel(duel)) return [challengerRow];
   return [
-    challengerRow,
     new ActionRowBuilder().addComponents(
       actions.map(([key, label, style]) =>
         new ButtonBuilder()
-          .setCustomId(`sd:act:${duel.id}:opponent:${key}`)
-          .setLabel(`O: ${label}`)
+          .setCustomId(`sd:act:${duel.id}:${duel.currentRound}:${key}`)
+          .setLabel(label)
           .setStyle(style)
       )
     ),
   ];
+}
+
+function roundImageUrl(duel) {
+  const challengerImage = squigImageUrl(duel.challengerSquigTokenId);
+  const opponentImage = squigImageUrl(duel.opponentSquigTokenId);
+  return duel.currentRound % 2 === 1
+    ? (challengerImage || opponentImage)
+    : (opponentImage || challengerImage);
 }
 
 async function startDuel(guild, duel) {
@@ -1296,7 +1294,7 @@ async function startDuel(guild, duel) {
   if (!thread?.isTextBased()) return;
   const startDescription = isBotDuel(duel)
     ? `Bot test duel.\nTest wager: **${formatCharm(BOT_DUEL_WAGER)} $CHARM**\nYour wager is returned after the duel no matter who wins.`
-    : `Pot: **${formatCharm(duel.wagerAmount * 2)} $CHARM**\nEach action selection posts publicly in this thread.`;
+    : `Pot: **${formatCharm(duel.wagerAmount * 2)} $CHARM**\nActions are selected privately and revealed after both players choose.`;
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
@@ -1318,15 +1316,15 @@ async function beginRound(guild, duel) {
   if (!thread?.isTextBased()) return;
   const sudden = duel.currentRound > SUDDEN_DEATH_AFTER_ROUND;
   const roundPrompt = isBotDuel(duel)
-    ? `Choose your action within ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds.\nThe bot will answer immediately after you lock in.\n`
-    : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\nSelections post in the thread as they are made.\n`;
+    ? `Choose your action within ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds.\nThe bot will answer after you lock in.\n`
+    : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\nSelections reveal after both players choose.\n`;
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
       `Round ${duel.currentRound}${sudden ? ' - Sudden Death' : ''}`,
       roundPrompt +
       (sudden ? `Sudden Death: both Squigs lose ${SUDDEN_DEATH_DAMAGE} HP at the end of the round.` : ''),
-      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE }
+      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE, imageUrl: roundImageUrl(duel) }
     )],
     components: actionRows(duel),
   });
@@ -1339,40 +1337,41 @@ async function beginRound(guild, duel) {
 }
 
 async function handleActionButton(interaction) {
-  const match = interaction.customId.match(/^sd:act:([a-f0-9]{12}):(challenger|opponent):(attack|defend|heal|panic)$/i);
+  const match = interaction.customId.match(/^sd:act:([a-f0-9]{12}):(\d+):(attack|defend|heal|panic)$/i);
   if (!match) return false;
   assertReady();
   const duel = getDuel(match[1]);
-  const side = match[2];
+  const round = Number(match[2]);
   const action = match[3].toLowerCase();
   if (!duel || duel.status !== 'active') {
     await interaction.reply({ content: 'This duel round is no longer active.', flags: 64 });
     return true;
   }
-  const expectedUserId = side === 'challenger' ? duel.challengerId : duel.opponentId;
-  if (interaction.user.id !== expectedUserId) {
-    await interaction.reply({ content: 'Only that duel participant can choose this action.', flags: 64 });
+  if (round !== duel.currentRound) {
+    await interaction.reply({ content: 'This action prompt is for an old round.', flags: 64 });
+    return true;
+  }
+  const side = interaction.user.id === duel.challengerId
+    ? 'challenger'
+    : (interaction.user.id === duel.opponentId ? 'opponent' : null);
+  if (!side || (side === 'opponent' && isBotDuel(duel))) {
+    await interaction.reply({ content: 'Only duel participants can choose an action.', flags: 64 });
     return true;
   }
   if (duel.currentActions[side]) {
-    await interaction.reply({ content: `You already chose ${duel.currentActions[side]}.`, flags: 64 });
+    await interaction.reply({ content: 'Action already received.', flags: 64 });
     return true;
   }
   duel.currentActions[side] = action;
   if (isBotDuel(duel) && side === 'challenger') {
     duel.currentActions.opponent = randomBotAction();
   }
-  await interaction.reply({ content: `${playerLabel(duel, side)} selected ${actionLabel(action)}` });
-  if (isBotDuel(duel) && side === 'challenger') {
-    const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
-    if (thread?.isTextBased()) {
-      await thread.send(`${playerLabel(duel, 'opponent')} selected ${actionLabel(duel.currentActions.opponent)}`).catch(() => null);
-    }
-  }
+  await interaction.reply({ content: 'Action received. It will be revealed after both players choose.', flags: 64 });
   if (duel.currentActions.challenger && duel.currentActions.opponent) {
     if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
     await delay(ROUND_RESOLVE_DELAY_MS);
-    await resolveRound(interaction.guild, duel, false);
+    const guild = interaction.guild || await deps?.client?.guilds?.fetch?.(duel.guildId).catch(() => null);
+    await resolveRound(guild, duel, false);
   }
   return true;
 }
@@ -1545,6 +1544,10 @@ function duelCompletionReason(duel, winnerId, result = null) {
 
 async function resolveRound(guild, duel, timedOut) {
   if (!duel || duel.status !== 'active' || duel.processingRound) return;
+  if (!guild) {
+    console.warn('[SquigDuels] cannot resolve round without guild context.');
+    return;
+  }
   duel.processingRound = true;
   if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
   const result = resolveRoundMath(duel, timedOut);
@@ -1552,8 +1555,12 @@ async function resolveRound(guild, duel, timedOut) {
 
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (thread?.isTextBased()) {
+    const actionText =
+      `${playerLabel(duel, 'challenger')}: **${actionLabel(result.actions.challenger)}**\n` +
+      `${playerLabel(duel, 'opponent')}: **${actionLabel(result.actions.opponent)}**`;
     const resultLines = result.lines.length ? result.lines.join('\n') : 'No effects resolved.';
     await thread.send(
+      `Selected Actions:\n${actionText}\n\n` +
       `Results:\n${resultLines}\n` +
       `Stats: Challenger Squig #${duel.challengerSquigTokenId} HP: ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}, ` +
       `Opponent Squig #${duel.opponentSquigTokenId} HP: ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
