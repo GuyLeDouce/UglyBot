@@ -393,6 +393,7 @@ async function handleStartButton(interaction) {
     await interaction.reply({ content: 'This channel cannot create duel threads.', flags: 64 });
     return true;
   }
+  await interaction.deferReply({ flags: 64 });
   const duelId = randomId();
   const thread = await interaction.channel.threads.create({
     name: `Squig Duel-${interaction.user.username}`.slice(0, 90),
@@ -409,15 +410,14 @@ async function handleStartButton(interaction) {
   await persistDuel(duel);
   await logDuel(interaction.guild, 'Created', `Duel \`${duelId}\` created by <@${interaction.user.id}> in <#${thread.id}>.`);
 
-  await thread.send(
-    `<@${interaction.user.id}> started a Squig Duel setup.\n` +
-    `Holders can spectate here. Only duel participants and admins should write in this thread.`
-  );
-  await interaction.reply({
-    content: 'Select your opponent. Start typing their name in the picker below.',
+  await thread.send({
+    content:
+      `<@${interaction.user.id}> started a Squig Duel setup.\n` +
+      `Holders can spectate here. Only duel participants and admins should write in this thread.\n\n` +
+      `Select your opponent. Start typing their name in the picker below.`,
     components: opponentSelectRows(duelId),
-    flags: 64,
   });
+  await interaction.editReply({ content: `Duel thread created: <#${thread.id}>. Continue setup there.` });
   return true;
 }
 
@@ -466,7 +466,8 @@ async function handleBotDuelButton(interaction) {
     `<@${interaction.user.id}> started a bot Squig Duel.\n` +
     `Test wager: ${BOT_DUEL_WAGER} $CHARM. The wager is returned after the duel no matter who wins.`
   );
-  await promptSquigSelection(interaction, duel, 'challenger');
+  await interaction.editReply({ content: `Bot duel thread created: <#${thread.id}>. Continue setup there.` });
+  await sendSquigSelectionPrompt(interaction.guild, duel, 'challenger');
   return true;
 }
 
@@ -813,6 +814,19 @@ async function promptSquigSelection(interaction, duel, side) {
   });
 }
 
+async function sendSquigSelectionPrompt(guild, duel, side) {
+  const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
+  if (!thread?.isTextBased()) return;
+  await promptSquigSelection(
+    {
+      guild,
+      editReply: (payload) => thread.send(payload),
+    },
+    duel,
+    side
+  );
+}
+
 async function handleOpponentSelect(interaction) {
   const match = interaction.customId.match(/^sd:opponent:([a-f0-9]{12})$/i);
   if (!match) return false;
@@ -899,8 +913,8 @@ async function handleSetupModal(interaction) {
   await persistDuel(duel);
   const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
   await thread?.members?.add(opponentId).catch(() => null);
-  await interaction.deferReply({ flags: 64 });
-  await promptSquigSelection(interaction, duel, 'challenger');
+  await interaction.reply({ content: 'Setup saved. Choose your Squig in this thread.', flags: 64 });
+  await sendSquigSelectionPrompt(interaction.guild, duel, 'challenger');
   return true;
 }
 
@@ -1099,12 +1113,8 @@ async function handleAcceptDecline(interaction) {
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   await interaction.update({ content: 'Duel accepted. Opponent is choosing a Squig.', components: [] });
   await logDuel(interaction.guild, 'Accepted', `<@${duel.opponentId}> accepted duel \`${duel.id}\`.`);
-  await interaction.followUp({ content: 'Choose your Squig privately.', flags: 64 }).catch(() => null);
-  const followUp = {
-    ...interaction,
-    editReply: (payload) => interaction.followUp({ ...payload, flags: 64 }),
-  };
-  await promptSquigSelection(followUp, duel, 'opponent');
+  await interaction.followUp({ content: 'Choose your Squig in this thread.', flags: 64 }).catch(() => null);
+  await sendSquigSelectionPrompt(interaction.guild, duel, 'opponent');
   return true;
 }
 
