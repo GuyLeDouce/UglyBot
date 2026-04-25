@@ -6372,6 +6372,12 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    if (interaction.isUserSelectMenu()) {
+      if (await squigDuels.handleSelectMenu(interaction)) {
+        return;
+      }
+    }
+
     if (interaction.isModalSubmit()) {
       if (await squigDuels.handleModalSubmit(interaction)) {
         return;
