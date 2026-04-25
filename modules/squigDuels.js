@@ -1010,13 +1010,14 @@ async function handleSquigSelect(interaction) {
     return true;
   }
 
+  await interaction.deferUpdate();
+
   const ownership = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
   if (!ownership.ok || !ownership.squigs.some((s) => String(s.tokenId) === tokenId)) {
-    await interaction.reply({ content: 'That Squig is no longer found in your connected wallet.', flags: 64 });
+    await interaction.followUp({ content: 'That Squig is no longer found in your connected wallet.', flags: 64 }).catch(() => null);
     return true;
   }
 
-  await interaction.deferUpdate();
   pendingSquigSelections.delete(pendingKey);
 
   if (side === 'challenger') {
