@@ -152,6 +152,37 @@ function tokenIdForSide(duel, side) {
   return side === 'challenger' ? duel.challengerSquigTokenId : duel.opponentSquigTokenId;
 }
 
+function squigDisplayName(squig) {
+  const tokenId = String(squig?.tokenId || '').trim();
+  const nickname = String(squig?.nickname || '').trim();
+  return nickname ? `${nickname} (#${tokenId})` : `Squig #${tokenId}`;
+}
+
+function squigListLine(squig) {
+  return `${squigDisplayName(squig)} - ${squig.uglyPoints} UglyPoints - ${squig.maxHp} HP`;
+}
+
+function squigOptionLabel(squig) {
+  const name = squigDisplayName(squig);
+  return `${name} | ${squig.uglyPoints} UP`.slice(0, 100);
+}
+
+function squigOptionDescription(squig) {
+  const favorite = squig.isFavorite ? 'Favorite | ' : '';
+  return `${favorite}HP ${squig.maxHp} | Attack ${squig.attackPower}`.slice(0, 100);
+}
+
+function squigNameForSide(duel, side) {
+  const tokenId = tokenIdForSide(duel, side);
+  const nickname = String(side === 'challenger' ? duel.challengerSquigName || '' : duel.opponentSquigName || '').trim();
+  return nickname ? `${nickname} (#${tokenId})` : `Squig #${tokenId}`;
+}
+
+function squigCanvasNameForSide(duel, side) {
+  const full = squigNameForSide(duel, side);
+  return full.length > 24 ? `${full.slice(0, 21)}...` : full;
+}
+
 async function fetchImageBuffer(source) {
   const response = await fetch(source);
   if (!response.ok) throw new Error(`Image HTTP ${response.status}`);
@@ -416,6 +447,19 @@ async function saveMySquigProfile(guildId, userId, profile) {
   }
 }
 
+function applySavedSquigNameToActiveDuels(guildId, userId, tokenId, nickname) {
+  const normalizedTokenId = String(tokenId || '');
+  for (const duel of duels.values()) {
+    if (String(duel.guildId) !== String(guildId)) continue;
+    if (String(duel.challengerId) === String(userId) && String(duel.challengerSquigTokenId) === normalizedTokenId) {
+      duel.challengerSquigName = nickname || null;
+    }
+    if (String(duel.opponentId) === String(userId) && String(duel.opponentSquigTokenId) === normalizedTokenId) {
+      duel.opponentSquigName = nickname || null;
+    }
+  }
+}
+
 function buildMenuEmbed() {
   return new EmbedBuilder()
     .setTitle('⚔️ Squig Duels')
@@ -597,6 +641,8 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     opponentPaid: false,
     challengerSquigTokenId: null,
     opponentSquigTokenId: null,
+    challengerSquigName: null,
+    opponentSquigName: null,
     challengerUglyPoints: null,
     opponentUglyPoints: null,
     challengerMaxHp: null,
@@ -926,14 +972,18 @@ async function fetchOwnedSquigs(guildId, userId) {
     return { ok: false, reason: 'No Squigs found in your connected wallet.' };
   }
 
+  const savedSquig = await getSavedMySquig(guildId, userId);
   const squigs = [];
   for (const tokenId of tokenIds.slice(0, 200)) {
     try {
       const uglyPoints = await calculateUglyPoints(guildId, tokenId);
       if (!Number.isFinite(Number(uglyPoints))) continue;
       const hp = balancedHp(uglyPoints);
+      const isSavedToken = savedSquig && String(savedSquig.tokenId) === String(tokenId);
       squigs.push({
         tokenId: String(tokenId),
+        nickname: isSavedToken ? savedSquig.nickname : '',
+        isFavorite: isSavedToken ? Boolean(savedSquig.isFavorite) : false,
         uglyPoints: Math.floor(Number(uglyPoints)),
         maxHp: hp,
         attackPower: baseAttack(uglyPoints),
@@ -997,8 +1047,8 @@ function buildSquigSelectRows(duelId, side, squigs, page = 0) {
   const safePage = clampSquigPage(squigs, page);
   const pageItems = squigPageItems(squigs, safePage);
   const options = pageItems.map((s) => ({
-    label: `Squig #${s.tokenId} | ${s.uglyPoints} UP`.slice(0, 100),
-    description: `HP ${s.maxHp} | Attack ${s.attackPower}`.slice(0, 100),
+    label: squigOptionLabel(s),
+    description: squigOptionDescription(s),
     value: String(s.tokenId),
   }));
   return [
@@ -1016,8 +1066,8 @@ function buildViewSquigRows(userId, squigs, page = 0) {
   const safePage = clampSquigPage(squigs, page);
   const pageItems = squigPageItems(squigs, safePage);
   const options = pageItems.map((s) => ({
-    label: `Squig #${s.tokenId}`.slice(0, 100),
-    description: `${s.uglyPoints} UglyPoints | ${s.maxHp} HP | ${s.attackPower} Attack`.slice(0, 100),
+    label: squigDisplayName(s).slice(0, 100),
+    description: `${s.isFavorite ? 'Favorite | ' : ''}${s.uglyPoints} UglyPoints | ${s.maxHp} HP | ${s.attackPower} Attack`.slice(0, 100),
     value: String(s.tokenId),
   }));
   return [
@@ -1034,9 +1084,7 @@ function buildViewSquigRows(userId, squigs, page = 0) {
 function buildSquigSelectionEmbed(squigs, page = 0) {
   const safePage = clampSquigPage(squigs, page);
   const shown = squigPageItems(squigs, safePage);
-  const lines = shown.slice(0, 12).map((s) =>
-    `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
-  );
+  const lines = shown.slice(0, 12).map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
     .setTitle('Choose Your Squig')
     .setColor(0xB0DEEE)
@@ -1044,7 +1092,7 @@ function buildSquigSelectionEmbed(squigs, page = 0) {
     .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints` });
   if (shown[0]?.imageUrl) {
     embed.setImage(shown[0].imageUrl);
-    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints | Preview: Squig #${shown[0].tokenId}` });
+    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints | Preview: ${squigDisplayName(shown[0])}` });
   }
   return embed;
 }
@@ -1055,9 +1103,7 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
   const selected = selectedTokenId
     ? squigs.find((s) => String(s.tokenId) === String(selectedTokenId))
     : pageItems[0];
-  const lines = pageItems.map((s) =>
-    `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
-  );
+  const lines = pageItems.map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
     .setTitle(`${user.username}'s Squigs`)
     .setColor(0xB0DEEE)
@@ -1070,7 +1116,7 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
   if (selected?.imageUrl) {
     embed.setImage(selected.imageUrl);
     embed.addFields({
-      name: `Selected Squig #${selected.tokenId}`,
+      name: `Selected ${squigDisplayName(selected)}`,
       value:
         `UglyPoints: **${selected.uglyPoints}**\n` +
         `Balanced HP: **${selected.maxHp}**\n` +
@@ -1146,7 +1192,7 @@ async function handleViewSquigSelect(interaction) {
     return true;
   }
   await interaction.update({
-    content: `Selected Squig #${selected.tokenId}.`,
+    content: `Selected ${squigDisplayName(selected)}.`,
     embeds: [buildOwnedSquigsEmbed(interaction.user, state.squigs, selected.tokenId, state.page || 0)],
     components: buildViewSquigRows(interaction.user.id, state.squigs, state.page || 0),
   });
@@ -1185,8 +1231,8 @@ function buildMySquigRows(userId, state) {
   const squigs = state.squigs || [];
   const page = clampSquigPage(squigs, state.page || 0);
   const options = squigPageItems(squigs, page).map((s) => ({
-    label: `Squig #${s.tokenId} | ${s.uglyPoints} UP`.slice(0, 100),
-    description: `HP ${s.maxHp} | Attack ${s.attackPower}`.slice(0, 100),
+    label: squigOptionLabel(s),
+    description: squigOptionDescription(s),
     value: String(s.tokenId),
     default: String(s.tokenId) === String(state.selectedTokenId || ''),
   }));
@@ -1223,9 +1269,7 @@ function buildMySquigEmbed(user, state) {
   const squigs = state.squigs || [];
   const page = clampSquigPage(squigs, state.page || 0);
   const selected = selectedMySquig(state);
-  const lines = squigPageItems(squigs, page).slice(0, 12).map((s) =>
-    `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
-  );
+  const lines = squigPageItems(squigs, page).slice(0, 12).map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
     .setTitle(`${user.username}'s Saved Squig`)
     .setColor(0xB0DEEE)
@@ -1236,7 +1280,7 @@ function buildMySquigEmbed(user, state) {
   if (selected?.imageUrl) embed.setImage(selected.imageUrl);
   if (selected) {
     embed.addFields({
-      name: state.nickname ? state.nickname : `Squig #${selected.tokenId}`,
+      name: state.nickname ? `${state.nickname} (#${selected.tokenId})` : squigDisplayName(selected),
       value:
         `Token: **#${selected.tokenId}**\n` +
         `Favorite: **${state.isFavorite ? 'Yes' : 'No'}**\n` +
@@ -1257,7 +1301,7 @@ function buildMySquigEmbed(user, state) {
 function buildMySquigPayload(interaction, state, content = null) {
   const selected = selectedMySquig(state);
   const defaultContent = selected
-    ? `Editing your saved Squig profile. Selected Squig #${selected.tokenId}.`
+    ? `Editing your saved Squig profile. Selected ${squigDisplayName({ ...selected, nickname: state.nickname })}.`
     : 'Editing your saved Squig profile.';
   return {
     content: content || defaultContent,
@@ -1355,7 +1399,7 @@ async function handleMySquigSelect(interaction) {
   }
   state.selectedTokenId = tokenId;
   state.saved = false;
-  await updateMySquigInteraction(interaction, state, `Selected Squig #${tokenId}. Add a name or favorite it, then press Save.`);
+  await updateMySquigInteraction(interaction, state, `Selected ${squigDisplayName(state.squigsById.get(tokenId))}. Add a name or favorite it, then press Save.`);
   return true;
 }
 
@@ -1390,6 +1434,8 @@ async function handleMySquigNameModal(interaction) {
     return true;
   }
   state.nickname = normalizeSquigNickname(interaction.fields.getTextInputValue('squig_name'));
+  const selected = selectedMySquig(state);
+  if (selected) selected.nickname = state.nickname;
   state.saved = false;
   await updateMySquigInteraction(interaction, state, state.nickname ? `Name set to "${state.nickname}". Press Save to keep it.` : 'Name cleared. Press Save to keep it.');
   return true;
@@ -1409,6 +1455,8 @@ async function handleMySquigFavoriteButton(interaction) {
     return true;
   }
   state.isFavorite = !state.isFavorite;
+  const selected = selectedMySquig(state);
+  if (selected) selected.isFavorite = state.isFavorite;
   state.saved = false;
   await updateMySquigInteraction(interaction, state, state.isFavorite ? 'Marked as favorite. Press Save to keep it.' : 'Favorite removed. Press Save to keep it.');
   return true;
@@ -1437,8 +1485,11 @@ async function handleMySquigSaveButton(interaction) {
     await interaction.reply({ content: saved.reason || 'Could not save your Squig profile.', flags: 64 });
     return true;
   }
+  selected.nickname = state.nickname;
+  selected.isFavorite = state.isFavorite;
+  applySavedSquigNameToActiveDuels(interaction.guild.id, interaction.user.id, selected.tokenId, state.nickname);
   state.saved = true;
-  await updateMySquigInteraction(interaction, state, `Saved Squig #${selected.tokenId}. This profile will persist through bot updates.`);
+  await updateMySquigInteraction(interaction, state, `Saved ${squigDisplayName(selected)}. This profile will persist through bot updates.`);
   return true;
 }
 
@@ -1711,18 +1762,19 @@ function challengeRows(duel) {
 function buildChallengeEmbed(duel) {
   const tokenId = duel.challengerSquigTokenId || 'Unknown';
   const imageUrl = squigImageUrl(tokenId);
+  const challengerSquigName = squigNameForSide(duel, 'challenger');
   const embed = new EmbedBuilder()
     .setTitle(duel.openChallenge ? 'Open Squig Duel Challenge' : 'Squig Duel Challenge')
     .setColor(0xd4a43b)
     .setDescription(
-      `<@${duel.challengerId}> has chosen **Squig #${tokenId}**.\n` +
+      `<@${duel.challengerId}> has chosen **${challengerSquigName}**.\n` +
       (duel.openChallenge
         ? `Any eligible holder can accept this duel and match the wager.`
         : `<@${duel.opponentId}>, accept the duel to choose your Squig and match the wager.`)
     )
     .addFields(
       {
-        name: 'Challenger Squig',
+        name: challengerSquigName,
         value:
           `Squig ID: **#${tokenId}**\n` +
           `UglyPoints: **${duel.challengerUglyPoints ?? 'Unknown'}**\n` +
@@ -1790,6 +1842,7 @@ async function switchOpenChallengeToBot(guild, duel) {
   duel.isBotDuel = true;
   duel.opponentId = botUserId();
   duel.opponentSquigTokenId = duel.challengerSquigTokenId;
+  duel.opponentSquigName = duel.challengerSquigName;
   duel.opponentUglyPoints = duel.challengerUglyPoints;
   duel.opponentMaxHp = duel.challengerMaxHp;
   duel.opponentCurrentHp = duel.challengerCurrentHp;
@@ -1840,11 +1893,13 @@ async function handleSquigSelect(interaction) {
 
   if (side === 'challenger') {
     duel.challengerSquigTokenId = chosen.tokenId;
+    duel.challengerSquigName = chosen.nickname || null;
     duel.challengerUglyPoints = chosen.uglyPoints;
     duel.challengerMaxHp = chosen.maxHp;
     duel.challengerCurrentHp = chosen.maxHp;
     if (isBotDuel(duel)) {
       duel.opponentSquigTokenId = chosen.tokenId;
+      duel.opponentSquigName = chosen.nickname || null;
       duel.opponentUglyPoints = chosen.uglyPoints;
       duel.opponentMaxHp = chosen.maxHp;
       duel.opponentCurrentHp = chosen.maxHp;
@@ -1852,7 +1907,7 @@ async function handleSquigSelect(interaction) {
     await persistDuel(duel);
     await interaction.editReply({
       content:
-        `Selected Squig #${chosen.tokenId} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
+        `Selected ${squigDisplayName(chosen)} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
         `Collecting your ${formatCharm(duel.wagerAmount)} $CHARM wager...`,
       embeds: [],
       components: [],
@@ -1882,13 +1937,14 @@ async function handleSquigSelect(interaction) {
   }
 
   duel.opponentSquigTokenId = chosen.tokenId;
+  duel.opponentSquigName = chosen.nickname || null;
   duel.opponentUglyPoints = chosen.uglyPoints;
   duel.opponentMaxHp = chosen.maxHp;
   duel.opponentCurrentHp = chosen.maxHp;
   await persistDuel(duel);
   await interaction.editReply({
     content:
-      `Selected Squig #${chosen.tokenId} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
+      `Selected ${squigDisplayName(chosen)} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
       `Collecting your ${formatCharm(duel.wagerAmount)} $CHARM wager...`,
     embeds: [],
     components: [],
@@ -2009,7 +2065,7 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
   }
 
   drawReadyText(ctx, isChallenger ? 'CHALLENGER' : 'OPPONENT', panel.x + 34, panel.y + 30, 24, 900, accent);
-  drawReadyText(ctx, `Squig #${tokenId}`, panel.x + 34, panel.y + 62, 34, 900);
+  drawReadyText(ctx, squigCanvasNameForSide(duel, side), panel.x + 34, panel.y + 62, 34, 900);
   drawReadyBadge(ctx, sideReadyLabel(duel, side), panel.x + panel.w - 210, panel.y + 34, ready);
 
   const statsY = panel.y + panel.h - 96;
@@ -2070,8 +2126,8 @@ function buildReadyFallbackEmbeds(duel, title = 'Ready to Duel?') {
     .setColor(0xd4a43b)
     .setDescription(
       `<@${duel.challengerId}> and <@${duel.opponentId}>, confirm you are ready to start.\n\n` +
-      `Challenger Squig #${duel.challengerSquigTokenId}: UglyPoints **${duel.challengerUglyPoints}**, HP **${duel.challengerCurrentHp} / ${duel.challengerMaxHp}**, Attack **${baseAttack(duel.challengerUglyPoints)}**\n` +
-      `Opponent Squig #${duel.opponentSquigTokenId}: UglyPoints **${duel.opponentUglyPoints}**, HP **${duel.opponentCurrentHp} / ${duel.opponentMaxHp}**, Attack **${baseAttack(duel.opponentUglyPoints)}**\n\n` +
+      `Challenger ${squigNameForSide(duel, 'challenger')}: UglyPoints **${duel.challengerUglyPoints}**, HP **${duel.challengerCurrentHp} / ${duel.challengerMaxHp}**, Attack **${baseAttack(duel.challengerUglyPoints)}**\n` +
+      `Opponent ${squigNameForSide(duel, 'opponent')}: UglyPoints **${duel.opponentUglyPoints}**, HP **${duel.opponentCurrentHp} / ${duel.opponentMaxHp}**, Attack **${baseAttack(duel.opponentUglyPoints)}**\n\n` +
       readyStatusText(duel)
     )
     .setImage(SQUIG_DUEL_MENU_IMAGE)];
@@ -2240,7 +2296,7 @@ function buildStatusEmbed(duel, title, description, options = {}) {
     .setDescription(description)
     .addFields(
       {
-        name: `Challenger Squig #${duel.challengerSquigTokenId}`,
+        name: `Challenger ${squigNameForSide(duel, 'challenger')}`,
         value:
           `<@${duel.challengerId}>\n` +
           `UglyPoints: **${duel.challengerUglyPoints}**\n` +
@@ -2248,7 +2304,7 @@ function buildStatusEmbed(duel, title, description, options = {}) {
         inline: true,
       },
       {
-        name: `Opponent Squig #${duel.opponentSquigTokenId}`,
+        name: `Opponent ${squigNameForSide(duel, 'opponent')}`,
         value:
           `<@${duel.opponentId}>\n` +
           `UglyPoints: **${duel.opponentUglyPoints}**\n` +
@@ -2406,7 +2462,7 @@ async function buildLoserSquigAttachment(duel, winnerId) {
       files: [
         new AttachmentBuilder(canvas.toBuffer('image/png'), {
           name: SQUIG_DUEL_LOSER_IMAGE_NAME,
-          description: `Losing Squig #${loserTokenId}`,
+          description: `Losing ${squigNameForSide(duel, side)}`,
         }),
       ],
     };
@@ -2706,10 +2762,10 @@ function duelCompletionReason(duel, winnerId, result = null) {
     return `Both Squigs hit 0 HP; <@${winnerId}> won by tiebreaker.`;
   }
   if (cOut) {
-    return `Challenger Squig #${duel.challengerSquigTokenId} hit 0 HP.`;
+    return `Challenger ${squigNameForSide(duel, 'challenger')} hit 0 HP.`;
   }
   if (oOut) {
-    return `Opponent Squig #${duel.opponentSquigTokenId} hit 0 HP.`;
+    return `Opponent ${squigNameForSide(duel, 'opponent')} hit 0 HP.`;
   }
   if (result?.lines?.length) {
     return result.lines[result.lines.length - 1];
@@ -2737,8 +2793,8 @@ async function resolveRound(guild, duel, timedOut) {
     await thread.send(
       `Selected Actions:\n${actionText}\n\n` +
       `Results:\n${resultLines}\n` +
-      `Stats: Challenger Squig #${duel.challengerSquigTokenId} HP: ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}, ` +
-      `Opponent Squig #${duel.opponentSquigTokenId} HP: ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
+      `Stats: Challenger ${squigNameForSide(duel, 'challenger')} HP: ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}, ` +
+      `Opponent ${squigNameForSide(duel, 'opponent')} HP: ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
     );
   }
 
