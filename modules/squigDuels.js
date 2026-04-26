@@ -37,6 +37,8 @@ const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 6;
 const SUDDEN_DEATH_DAMAGE = 8;
+const HEAL_VS_DEFEND_MULTIPLIER = 0.55;
+const HEAL_VS_ATTACK_MULTIPLIER = 1.30;
 
 let deps = null;
 
@@ -341,8 +343,8 @@ function buildMenuEmbed() {
       '- Every round you choose Attack, Defend, Heal, or Panic\n\n' +
       '**Actions:**\n' +
       'Attack — damage your opponent unless blocked\n' +
-      'Defend — block attacks and stop enemy healing\n' +
-      'Heal — recover HP unless stopped\n' +
+      'Defend — block attacks and reduce enemy healing\n' +
+      'Heal — recover HP; stronger against attacks\n' +
       'Panic — force chaos, but both Squigs lose HP'
     )
     .setImage(SQUIG_DUEL_MENU_IMAGE)
@@ -1584,6 +1586,23 @@ function attackDamage(attackPower) {
   return Math.max(1, Math.round((Number(attackPower) || 1) * multiplier));
 }
 
+function healAmount(maxHp, opposingAction) {
+  const baseHealAmount = Math.round(14 + (Number(maxHp) || 0) * 0.14);
+  if (opposingAction === 'defend') {
+    return Math.max(1, Math.round(baseHealAmount * HEAL_VS_DEFEND_MULTIPLIER));
+  }
+  if (opposingAction === 'attack') {
+    return Math.max(1, Math.round(baseHealAmount * HEAL_VS_ATTACK_MULTIPLIER));
+  }
+  return Math.max(1, baseHealAmount);
+}
+
+function healContext(opposingAction) {
+  if (opposingAction === 'defend') return ' through the defense';
+  if (opposingAction === 'attack') return ' under pressure';
+  return '';
+}
+
 function clampHp(value, maxHp) {
   return Math.max(0, Math.min(Math.round(Number(value) || 0), Math.round(Number(maxHp) || 0)));
 }
@@ -1672,23 +1691,23 @@ function resolveRoundMath(duel, timedOut) {
   }
 
   if (actions.challenger === 'heal') {
-    if (cBlockedByPanic || oDefends) {
+    if (cBlockedByPanic) {
       lines.push(`${challenger}'s heal failed.`);
     } else {
-      const heal = Math.round(14 + duel.challengerMaxHp * 0.14);
+      const heal = healAmount(duel.challengerMaxHp, actions.opponent);
       const beforeHeal = cHp;
       cHp = Math.min(duel.challengerMaxHp, cHp + heal);
-      lines.push(`${challenger} heals ${Math.max(0, cHp - beforeHeal)} HP.`);
+      lines.push(`${challenger} heals ${Math.max(0, cHp - beforeHeal)} HP${healContext(actions.opponent)}.`);
     }
   }
   if (actions.opponent === 'heal') {
-    if (oBlockedByPanic || cDefends) {
+    if (oBlockedByPanic) {
       lines.push(`${opponent}'s heal failed.`);
     } else {
-      const heal = Math.round(14 + duel.opponentMaxHp * 0.14);
+      const heal = healAmount(duel.opponentMaxHp, actions.challenger);
       const beforeHeal = oHp;
       oHp = Math.min(duel.opponentMaxHp, oHp + heal);
-      lines.push(`${opponent} heals ${Math.max(0, oHp - beforeHeal)} HP.`);
+      lines.push(`${opponent} heals ${Math.max(0, oHp - beforeHeal)} HP${healContext(actions.challenger)}.`);
     }
   }
 
