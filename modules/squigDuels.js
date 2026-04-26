@@ -1,7 +1,12 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const fetch = require('node-fetch');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const {
   SlashCommandBuilder,
   EmbedBuilder,
+  AttachmentBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -22,13 +27,16 @@ const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
 ).trim();
+const SQUIG_DUEL_LOSER_IMAGE_NAME = 'squig-duel-loser.png';
+const SQUIG_DUEL_PUNCH_OVERLAY_PATH = path.join(__dirname, '..', 'squig_duel_punch_overlay.png');
 const WALLET_CONNECT_CHANNEL_ID = '1476967108062740622';
 const OPEN_CHALLENGE_ROLE_ID = '1389076094245671002';
 const BOT_DUEL_WAGER = 50;
 const MAX_DUEL_WAGER = 10000;
 const MAX_SELECT_OPTIONS = 25;
-const ACCEPT_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ACCEPT_TIMEOUT_MS || 10 * 60 * 1000);
-const OPEN_CHALLENGE_TIMEOUT_MS = 2 * 60 * 1000;
+const ACCEPT_TIMEOUT_MINUTE_OPTIONS = [1, 2, 3, 5];
+const DEFAULT_ACCEPT_TIMEOUT_MINUTES = 3;
+const DEFAULT_ACCEPT_TIMEOUT_MS = DEFAULT_ACCEPT_TIMEOUT_MINUTES * 60 * 1000;
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
 const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 30 * 1000);
 const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 1500);
@@ -46,6 +54,7 @@ const duels = new Map();
 const activeUserToDuel = new Map();
 const pendingSquigSelections = new Map();
 const pendingSquigViews = new Map();
+const pendingMySquigProfiles = new Map();
 
 function initSquigDuels(injectedDeps) {
   deps = injectedDeps;
@@ -90,6 +99,18 @@ async function ensureSquigDuelSchema(pool) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS squig_duel_player_squigs (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      token_id TEXT NOT NULL,
+      nickname TEXT,
+      is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+  `);
 }
 
 function buildSquigDuelSlashCommand() {
@@ -121,6 +142,23 @@ function squigImageUrl(tokenId) {
   return `${SQUIG_IMAGE_BASE}/${tid}`;
 }
 
+function loserSide(duel, winnerId) {
+  if (String(winnerId) === String(duel.challengerId)) return 'opponent';
+  if (String(winnerId) === String(duel.opponentId)) return 'challenger';
+  return duel.challengerCurrentHp <= duel.opponentCurrentHp ? 'challenger' : 'opponent';
+}
+
+function tokenIdForSide(duel, side) {
+  return side === 'challenger' ? duel.challengerSquigTokenId : duel.opponentSquigTokenId;
+}
+
+async function fetchImageBuffer(source) {
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`Image HTTP ${response.status}`);
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 function walletConnectMessage(prefix = 'Connect your wallet before joining a Squig Duel.') {
   return `${prefix} Go to <#${WALLET_CONNECT_CHANNEL_ID}> to connect your wallet.`;
 }
@@ -149,7 +187,7 @@ function randomId() {
 }
 
 function activeStatuses() {
-  return new Set(['setup', 'awaiting_accept', 'active']);
+  return new Set(['setup', 'awaiting_accept', 'awaiting_ready', 'active']);
 }
 
 function registerActiveUser(userId, duelId) {
@@ -324,6 +362,60 @@ async function persistRound(duel, result) {
   }
 }
 
+async function getSavedMySquig(guildId, userId) {
+  const pool = deps?.historyPool;
+  if (!pool?.query) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT token_id, nickname, is_favorite
+       FROM squig_duel_player_squigs
+       WHERE guild_id = $1 AND user_id = $2
+       LIMIT 1`,
+      [String(guildId), String(userId)]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      tokenId: String(row.token_id || ''),
+      nickname: String(row.nickname || '').trim(),
+      isFavorite: Boolean(row.is_favorite),
+    };
+  } catch (err) {
+    console.warn('[SquigDuels] saved Squig lookup failed:', String(err?.message || err || ''));
+    return null;
+  }
+}
+
+async function saveMySquigProfile(guildId, userId, profile) {
+  const pool = deps?.historyPool;
+  if (!pool?.query) {
+    return { ok: false, reason: 'Profile storage is unavailable right now.' };
+  }
+  const tokenId = String(profile?.tokenId || '').trim();
+  if (!/^\d+$/.test(tokenId)) {
+    return { ok: false, reason: 'Choose a Squig before saving.' };
+  }
+  const nickname = String(profile?.nickname || '').trim().slice(0, 40) || null;
+  const isFavorite = Boolean(profile?.isFavorite);
+  try {
+    await pool.query(
+      `INSERT INTO squig_duel_player_squigs
+       (guild_id, user_id, token_id, nickname, is_favorite, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (guild_id, user_id) DO UPDATE SET
+         token_id = EXCLUDED.token_id,
+         nickname = EXCLUDED.nickname,
+         is_favorite = EXCLUDED.is_favorite,
+         updated_at = NOW()`,
+      [String(guildId), String(userId), tokenId, nickname, isFavorite]
+    );
+    return { ok: true };
+  } catch (err) {
+    console.warn('[SquigDuels] saved Squig persist failed:', String(err?.message || err || ''));
+    return { ok: false, reason: 'Could not save your Squig profile right now.' };
+  }
+}
+
 function buildMenuEmbed() {
   return new EmbedBuilder()
     .setTitle('⚔️ Squig Duels')
@@ -333,7 +425,7 @@ function buildMenuEmbed() {
       '**How it works:**\n' +
       '1. Click Start Duel\n' +
       '2. Pick an opponent\n' +
-      '3. Choose your $CHARM wager\n' +
+      '3. Choose your $CHARM wager and opponent response time\n' +
       '4. Select one of your wallet-linked Squigs\n' +
       '5. Opponent accepts and matches the wager\n' +
       '6. Both Squigs battle round by round until one hits 0 HP\n\n' +
@@ -361,6 +453,10 @@ function buildMenuRow() {
       .setCustomId('sd:view')
       .setLabel('View Squigs')
       .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('sd:my_squig')
+      .setLabel('Set My Squig')
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId('sd:bot')
       .setLabel('Bot Duel')
@@ -424,10 +520,28 @@ function parseWager(input) {
   return amount;
 }
 
+function parseAcceptTimeoutMinutes(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  const match = raw.match(/^(\d+)(?:\s*(?:m|min|mins|minute|minutes))?$/);
+  if (!match) return null;
+  const minutes = Number(match[1]);
+  return ACCEPT_TIMEOUT_MINUTE_OPTIONS.includes(minutes) ? minutes : null;
+}
+
+function acceptTimeoutMs(duel) {
+  const ms = Number(duel?.acceptTimeoutMs);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_ACCEPT_TIMEOUT_MS;
+}
+
+function formatAcceptTimeout(ms) {
+  const minutes = Math.max(1, Math.round((Number(ms) || DEFAULT_ACCEPT_TIMEOUT_MS) / 60000));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
 function challengerSetupModal(duelId) {
   const modal = new ModalBuilder()
     .setCustomId(`sd:setup:${duelId}`)
-    .setTitle('Set Squig Duel Wager');
+    .setTitle('Set Squig Duel Rules');
   modal.addComponents(
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
@@ -435,6 +549,14 @@ function challengerSetupModal(duelId) {
         .setLabel('Wager amount in $CHARM')
         .setRequired(true)
         .setPlaceholder('100')
+        .setStyle(TextInputStyle.Short)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('accept_timeout_minutes')
+        .setLabel('Opponent time: 1, 2, 3, or 5 min')
+        .setRequired(true)
+        .setPlaceholder(String(DEFAULT_ACCEPT_TIMEOUT_MINUTES))
         .setStyle(TextInputStyle.Short)
     )
   );
@@ -483,9 +605,11 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     opponentCurrentHp: null,
     currentRound: 0,
     currentActions: {},
+    readyUsers: {},
     status: 'setup',
     isBotDuel,
     openChallenge: false,
+    acceptTimeoutMs: DEFAULT_ACCEPT_TIMEOUT_MS,
     createdAt: Date.now(),
     setupTimeout: null,
     acceptTimeout: null,
@@ -828,8 +952,51 @@ async function fetchOwnedSquigs(guildId, userId) {
   return { ok: true, squigs, links };
 }
 
-function buildSquigSelectRows(duelId, side, squigs) {
-  const options = squigs.slice(0, MAX_SELECT_OPTIONS).map((s) => ({
+function squigPageCount(squigs) {
+  return Math.max(1, Math.ceil((Array.isArray(squigs) ? squigs.length : 0) / MAX_SELECT_OPTIONS));
+}
+
+function clampSquigPage(squigs, page = 0) {
+  const maxPage = squigPageCount(squigs) - 1;
+  return Math.max(0, Math.min(maxPage, Math.floor(Number(page) || 0)));
+}
+
+function squigPageItems(squigs, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const start = safePage * MAX_SELECT_OPTIONS;
+  return squigs.slice(start, start + MAX_SELECT_OPTIONS);
+}
+
+function squigPageLabel(squigs, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const total = Array.isArray(squigs) ? squigs.length : 0;
+  const start = total ? (safePage * MAX_SELECT_OPTIONS) + 1 : 0;
+  const end = Math.min(total, (safePage + 1) * MAX_SELECT_OPTIONS);
+  return `Showing ${start}-${end} of ${total} Squigs`;
+}
+
+function buildSquigPageButtons(prefix, page, pageCount) {
+  if (pageCount <= 1) return [];
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${prefix}:${Math.max(0, page - 1)}`)
+        .setLabel('Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page <= 0),
+      new ButtonBuilder()
+        .setCustomId(`${prefix}:${Math.min(pageCount - 1, page + 1)}`)
+        .setLabel('Next')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page >= pageCount - 1)
+    ),
+  ];
+}
+
+function buildSquigSelectRows(duelId, side, squigs, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const pageItems = squigPageItems(squigs, safePage);
+  const options = pageItems.map((s) => ({
     label: `Squig #${s.tokenId} | ${s.uglyPoints} UP`.slice(0, 100),
     description: `HP ${s.maxHp} | Attack ${s.attackPower}`.slice(0, 100),
     value: String(s.tokenId),
@@ -841,11 +1008,14 @@ function buildSquigSelectRows(duelId, side, squigs) {
         .setPlaceholder('Choose your Squig')
         .addOptions(options)
     ),
+    ...buildSquigPageButtons(`sd:select_page:${duelId}:${side}`, safePage, squigPageCount(squigs)),
   ];
 }
 
-function buildViewSquigRows(userId, squigs) {
-  const options = squigs.slice(0, MAX_SELECT_OPTIONS).map((s) => ({
+function buildViewSquigRows(userId, squigs, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const pageItems = squigPageItems(squigs, safePage);
+  const options = pageItems.map((s) => ({
     label: `Squig #${s.tokenId}`.slice(0, 100),
     description: `${s.uglyPoints} UglyPoints | ${s.maxHp} HP | ${s.attackPower} Attack`.slice(0, 100),
     value: String(s.tokenId),
@@ -857,30 +1027,35 @@ function buildViewSquigRows(userId, squigs) {
         .setPlaceholder('Scroll to view your Squigs')
         .addOptions(options)
     ),
+    ...buildSquigPageButtons(`sd:view_page:${userId}`, safePage, squigPageCount(squigs)),
   ];
 }
 
-function buildSquigSelectionEmbed(squigs) {
-  const shown = squigs.slice(0, MAX_SELECT_OPTIONS);
+function buildSquigSelectionEmbed(squigs, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const shown = squigPageItems(squigs, safePage);
   const lines = shown.slice(0, 12).map((s) =>
     `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
   );
   const embed = new EmbedBuilder()
     .setTitle('Choose Your Squig')
     .setColor(0xB0DEEE)
-    .setDescription(lines.join('\n') || 'Select one of your owned Squigs below.');
+    .setDescription(lines.join('\n') || 'Select one of your owned Squigs below.')
+    .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints` });
   if (shown[0]?.imageUrl) {
     embed.setImage(shown[0].imageUrl);
-    embed.setFooter({ text: `Preview: Squig #${shown[0].tokenId}` });
+    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints | Preview: Squig #${shown[0].tokenId}` });
   }
   return embed;
 }
 
-function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null) {
+function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
+  const safePage = clampSquigPage(squigs, page);
+  const pageItems = squigPageItems(squigs, safePage);
   const selected = selectedTokenId
     ? squigs.find((s) => String(s.tokenId) === String(selectedTokenId))
-    : squigs[0];
-  const lines = squigs.slice(0, MAX_SELECT_OPTIONS).map((s) =>
+    : pageItems[0];
+  const lines = pageItems.map((s) =>
     `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
   );
   const embed = new EmbedBuilder()
@@ -889,7 +1064,7 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null) {
     .setDescription(lines.join('\n') || 'No Squigs found.')
     .setFooter({
       text: squigs.length > MAX_SELECT_OPTIONS
-        ? `Showing top ${MAX_SELECT_OPTIONS} Squigs by UglyPoints`
+        ? `${squigPageLabel(squigs, safePage)} sorted by UglyPoints`
         : `${squigs.length} Squig${squigs.length === 1 ? '' : 's'} found`,
     });
   if (selected?.imageUrl) {
@@ -919,14 +1094,38 @@ async function handleViewSquigsButton(interaction) {
     createdAt: Date.now(),
     squigsById: new Map(result.squigs.map((s) => [String(s.tokenId), s])),
     squigs: result.squigs,
+    page: 0,
   });
   const extra = result.squigs.length > MAX_SELECT_OPTIONS
-    ? ` Showing your top ${MAX_SELECT_OPTIONS} Squigs by UglyPoints.`
+    ? ` Use Previous and Next to browse all ${result.squigs.length} Squigs.`
     : '';
   await interaction.editReply({
     content: `Your Squigs are listed below.${extra}`,
-    embeds: [buildOwnedSquigsEmbed(interaction.user, result.squigs)],
-    components: buildViewSquigRows(interaction.user.id, result.squigs),
+    embeds: [buildOwnedSquigsEmbed(interaction.user, result.squigs, null, 0)],
+    components: buildViewSquigRows(interaction.user.id, result.squigs, 0),
+  });
+  return true;
+}
+
+async function handleViewSquigPageButton(interaction) {
+  const match = interaction.customId.match(/^sd:view_page:(\d{16,22}):(\d+)$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig viewer is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingSquigViews.get(`${interaction.guild.id}:${interaction.user.id}`);
+  if (!state?.squigs?.length) {
+    await interaction.reply({ content: 'This Squig viewer expired. Click View Squigs again.', flags: 64 });
+    return true;
+  }
+  const page = clampSquigPage(state.squigs, match[2]);
+  state.page = page;
+  await interaction.update({
+    content: `Your Squigs are listed below. ${squigPageLabel(state.squigs, page)}.`,
+    embeds: [buildOwnedSquigsEmbed(interaction.user, state.squigs, null, page)],
+    components: buildViewSquigRows(interaction.user.id, state.squigs, page),
   });
   return true;
 }
@@ -948,9 +1147,298 @@ async function handleViewSquigSelect(interaction) {
   }
   await interaction.update({
     content: `Selected Squig #${selected.tokenId}.`,
-    embeds: [buildOwnedSquigsEmbed(interaction.user, state.squigs, selected.tokenId)],
-    components: buildViewSquigRows(interaction.user.id, state.squigs),
+    embeds: [buildOwnedSquigsEmbed(interaction.user, state.squigs, selected.tokenId, state.page || 0)],
+    components: buildViewSquigRows(interaction.user.id, state.squigs, state.page || 0),
   });
+  return true;
+}
+
+function mySquigStateKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function selectedMySquig(state) {
+  return state?.squigsById?.get(String(state.selectedTokenId || '')) || null;
+}
+
+function normalizeSquigNickname(input) {
+  return String(input || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+}
+
+function mySquigNameModal(userId, currentName = '') {
+  const modal = new ModalBuilder()
+    .setCustomId(`sd:my_squig_name_modal:${userId}`)
+    .setTitle('Name Your Squig');
+  const input = new TextInputBuilder()
+    .setCustomId('squig_name')
+    .setLabel('Squig name')
+    .setRequired(false)
+    .setPlaceholder('Blank clears the saved name')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(40);
+  if (currentName) input.setValue(currentName);
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return modal;
+}
+
+function buildMySquigRows(userId, state) {
+  const squigs = state.squigs || [];
+  const page = clampSquigPage(squigs, state.page || 0);
+  const options = squigPageItems(squigs, page).map((s) => ({
+    label: `Squig #${s.tokenId} | ${s.uglyPoints} UP`.slice(0, 100),
+    description: `HP ${s.maxHp} | Attack ${s.attackPower}`.slice(0, 100),
+    value: String(s.tokenId),
+    default: String(s.tokenId) === String(state.selectedTokenId || ''),
+  }));
+  const selected = selectedMySquig(state);
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`sd:my_squig_select:${userId}`)
+        .setPlaceholder('Choose your saved Squig')
+        .addOptions(options)
+    ),
+    ...buildSquigPageButtons(`sd:my_squig_page:${userId}`, page, squigPageCount(squigs)),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`sd:my_squig_name:${userId}`)
+        .setLabel('Name')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(!selected),
+      new ButtonBuilder()
+        .setCustomId(`sd:my_squig_favorite:${userId}`)
+        .setLabel(state.isFavorite ? 'Unfavorite' : 'Favorite')
+        .setStyle(state.isFavorite ? ButtonStyle.Secondary : ButtonStyle.Success)
+        .setDisabled(!selected),
+      new ButtonBuilder()
+        .setCustomId(`sd:my_squig_save:${userId}`)
+        .setLabel('Save')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(!selected)
+    ),
+  ];
+}
+
+function buildMySquigEmbed(user, state) {
+  const squigs = state.squigs || [];
+  const page = clampSquigPage(squigs, state.page || 0);
+  const selected = selectedMySquig(state);
+  const lines = squigPageItems(squigs, page).slice(0, 12).map((s) =>
+    `#${s.tokenId} - ${s.uglyPoints} UglyPoints - ${s.maxHp} HP`
+  );
+  const embed = new EmbedBuilder()
+    .setTitle(`${user.username}'s Saved Squig`)
+    .setColor(0xB0DEEE)
+    .setDescription(
+      `${squigPageLabel(squigs, page)} sorted by UglyPoints.\n\n` +
+      (lines.join('\n') || 'Choose one of your owned Squigs below.')
+    );
+  if (selected?.imageUrl) embed.setImage(selected.imageUrl);
+  if (selected) {
+    embed.addFields({
+      name: state.nickname ? state.nickname : `Squig #${selected.tokenId}`,
+      value:
+        `Token: **#${selected.tokenId}**\n` +
+        `Favorite: **${state.isFavorite ? 'Yes' : 'No'}**\n` +
+        `UglyPoints: **${selected.uglyPoints}**\n` +
+        `Balanced HP: **${selected.maxHp}**\n` +
+        `Attack Power: **${selected.attackPower}**`,
+      inline: false,
+    });
+  }
+  embed.setFooter({
+    text: state.saved
+      ? 'Saved. This profile will persist through bot updates.'
+      : 'Choose a Squig, optionally name/favorite it, then press Save.',
+  });
+  return embed;
+}
+
+function buildMySquigPayload(interaction, state, content = null) {
+  const selected = selectedMySquig(state);
+  const defaultContent = selected
+    ? `Editing your saved Squig profile. Selected Squig #${selected.tokenId}.`
+    : 'Editing your saved Squig profile.';
+  return {
+    content: content || defaultContent,
+    embeds: [buildMySquigEmbed(interaction.user, state)],
+    components: buildMySquigRows(interaction.user.id, state),
+  };
+}
+
+async function updateMySquigInteraction(interaction, state, content = null) {
+  const payload = buildMySquigPayload(interaction, state, content);
+  if (typeof interaction.update === 'function') {
+    try {
+      await interaction.update(payload);
+      return;
+    } catch {}
+  }
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply(payload).catch(() => null);
+    return;
+  }
+  await interaction.reply({ ...payload, flags: 64 }).catch(() => null);
+}
+
+async function handleSetMySquigButton(interaction) {
+  if (interaction.customId !== 'sd:my_squig') return false;
+  assertReady();
+  await interaction.deferReply({ flags: 64 });
+  const result = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
+  if (!result.ok) {
+    await interaction.editReply({ content: result.reason });
+    return true;
+  }
+  const saved = await getSavedMySquig(interaction.guild.id, interaction.user.id);
+  const savedOwned = saved?.tokenId && result.squigs.some((s) => String(s.tokenId) === String(saved.tokenId));
+  const selectedTokenId = savedOwned ? saved.tokenId : result.squigs[0]?.tokenId;
+  const state = {
+    createdAt: Date.now(),
+    userId: interaction.user.id,
+    squigs: result.squigs,
+    squigsById: new Map(result.squigs.map((s) => [String(s.tokenId), s])),
+    page: selectedTokenId
+      ? Math.floor(result.squigs.findIndex((s) => String(s.tokenId) === String(selectedTokenId)) / MAX_SELECT_OPTIONS)
+      : 0,
+    selectedTokenId,
+    nickname: savedOwned ? saved.nickname : '',
+    isFavorite: savedOwned ? Boolean(saved.isFavorite) : false,
+    saved: Boolean(savedOwned),
+  };
+  pendingMySquigProfiles.set(mySquigStateKey(interaction.guild.id, interaction.user.id), state);
+  const extra = result.squigs.length > MAX_SELECT_OPTIONS
+    ? ` Use Previous and Next to browse all ${result.squigs.length} Squigs.`
+    : '';
+  const missingSaved = saved?.tokenId && !savedOwned
+    ? ` Your previously saved Squig #${saved.tokenId} is not currently in your connected wallet.`
+    : '';
+  await interaction.editReply(buildMySquigPayload(
+    interaction,
+    state,
+    `Set your saved Squig for Squig Duels.${extra}${missingSaved}`
+  ));
+  return true;
+}
+
+async function handleMySquigPageButton(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_page:(\d{16,22}):(\d+)$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  if (!state?.squigs?.length) {
+    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    return true;
+  }
+  state.page = clampSquigPage(state.squigs, match[2]);
+  await updateMySquigInteraction(interaction, state, `Editing your saved Squig profile. ${squigPageLabel(state.squigs, state.page)}.`);
+  return true;
+}
+
+async function handleMySquigSelect(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_select:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  const tokenId = String(interaction.values?.[0] || '').trim();
+  if (!state?.squigsById?.has(tokenId)) {
+    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    return true;
+  }
+  state.selectedTokenId = tokenId;
+  state.saved = false;
+  await updateMySquigInteraction(interaction, state, `Selected Squig #${tokenId}. Add a name or favorite it, then press Save.`);
+  return true;
+}
+
+async function handleMySquigNameButton(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_name:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  if (!state || !selectedMySquig(state)) {
+    await interaction.reply({ content: 'Choose a Squig before naming it.', flags: 64 });
+    return true;
+  }
+  await interaction.showModal(mySquigNameModal(interaction.user.id, state.nickname));
+  return true;
+}
+
+async function handleMySquigNameModal(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_name_modal:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  if (!state || !selectedMySquig(state)) {
+    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    return true;
+  }
+  state.nickname = normalizeSquigNickname(interaction.fields.getTextInputValue('squig_name'));
+  state.saved = false;
+  await updateMySquigInteraction(interaction, state, state.nickname ? `Name set to "${state.nickname}". Press Save to keep it.` : 'Name cleared. Press Save to keep it.');
+  return true;
+}
+
+async function handleMySquigFavoriteButton(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_favorite:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  if (!state || !selectedMySquig(state)) {
+    await interaction.reply({ content: 'Choose a Squig before marking it as favorite.', flags: 64 });
+    return true;
+  }
+  state.isFavorite = !state.isFavorite;
+  state.saved = false;
+  await updateMySquigInteraction(interaction, state, state.isFavorite ? 'Marked as favorite. Press Save to keep it.' : 'Favorite removed. Press Save to keep it.');
+  return true;
+}
+
+async function handleMySquigSaveButton(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_save:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  const selected = selectedMySquig(state);
+  if (!state || !selected) {
+    await interaction.reply({ content: 'Choose a Squig before saving.', flags: 64 });
+    return true;
+  }
+  const saved = await saveMySquigProfile(interaction.guild.id, interaction.user.id, {
+    tokenId: selected.tokenId,
+    nickname: state.nickname,
+    isFavorite: state.isFavorite,
+  });
+  if (!saved.ok) {
+    await interaction.reply({ content: saved.reason || 'Could not save your Squig profile.', flags: 64 });
+    return true;
+  }
+  state.saved = true;
+  await updateMySquigInteraction(interaction, state, `Saved Squig #${selected.tokenId}. This profile will persist through bot updates.`);
   return true;
 }
 
@@ -966,18 +1454,53 @@ async function promptSquigSelection(interaction, duel, side) {
     side,
     userId,
     squigsById: new Map(result.squigs.map((s) => [String(s.tokenId), s])),
+    squigs: result.squigs,
+    page: 0,
     createdAt: Date.now(),
   });
   const extra = result.squigs.length > MAX_SELECT_OPTIONS
-    ? `\nShowing your top ${MAX_SELECT_OPTIONS} Squigs by UglyPoints.`
+    ? `\nUse Previous and Next to browse all ${result.squigs.length} Squigs.`
     : '';
   await interaction.editReply({
     content:
       `Choose your Squig.${extra}\n` +
       `Each option shows Squig ID, UglyPoints, Balanced HP, and attack power.`,
-    embeds: [buildSquigSelectionEmbed(result.squigs)],
-    components: buildSquigSelectRows(duel.id, side, result.squigs),
+    embeds: [buildSquigSelectionEmbed(result.squigs, 0)],
+    components: buildSquigSelectRows(duel.id, side, result.squigs, 0),
   });
+}
+
+async function handleSquigSelectionPageButton(interaction) {
+  const match = interaction.customId.match(/^sd:select_page:([a-f0-9]{12}):(challenger|opponent):(\d+)$/i);
+  if (!match) return false;
+  assertReady();
+  const duel = getDuel(match[1]);
+  const side = match[2];
+  if (!duel || !activeStatuses().has(duel.status)) {
+    await interaction.reply({ content: 'This duel is no longer active.', flags: 64 });
+    return true;
+  }
+  const expectedUserId = side === 'challenger' ? duel.challengerId : duel.opponentId;
+  if (interaction.user.id !== expectedUserId) {
+    await interaction.reply({ content: 'This Squig selection is not for you.', flags: 64 });
+    return true;
+  }
+  const pendingKey = `${duel.id}:${side}:${interaction.user.id}`;
+  const pending = pendingSquigSelections.get(pendingKey);
+  if (!pending?.squigs?.length) {
+    await interaction.reply({ content: 'This Squig selection expired. Start your selection again.', flags: 64 });
+    return true;
+  }
+  const page = clampSquigPage(pending.squigs, match[3]);
+  pending.page = page;
+  await interaction.update({
+    content:
+      `Choose your Squig.\n` +
+      `${squigPageLabel(pending.squigs, page)}. Each option shows Squig ID, UglyPoints, Balanced HP, and attack power.`,
+    embeds: [buildSquigSelectionEmbed(pending.squigs, page)],
+    components: buildSquigSelectRows(duel.id, side, pending.squigs, page),
+  });
+  return true;
 }
 
 async function sendSquigSelectionPrompt(guild, duel, side) {
@@ -1089,6 +1612,7 @@ async function handleSetupModal(interaction) {
   const isOpenChallenge = Boolean(duel.openChallenge);
   const opponentId = duel.opponentId;
   const wagerAmount = parseWager(interaction.fields.getTextInputValue('wager'));
+  const acceptTimeoutMinutes = parseAcceptTimeoutMinutes(interaction.fields.getTextInputValue('accept_timeout_minutes'));
   if (!opponentId && !isOpenChallenge) {
     await interaction.reply({ content: 'Select an opponent first.', flags: 64 });
     return true;
@@ -1100,6 +1624,13 @@ async function handleSetupModal(interaction) {
   if (!wagerAmount) {
     await interaction.reply({
       content: `Wager must be a whole number between 1 and ${formatCharm(MAX_DUEL_WAGER)} $CHARM.`,
+      flags: 64,
+    });
+    return true;
+  }
+  if (!acceptTimeoutMinutes) {
+    await interaction.reply({
+      content: `Opponent response time must be ${ACCEPT_TIMEOUT_MINUTE_OPTIONS.join(', ')} minutes.`,
       flags: 64,
     });
     return true;
@@ -1147,6 +1678,7 @@ async function handleSetupModal(interaction) {
   duel.opponentId = opponentId || null;
   duel.openChallenge = isOpenChallenge;
   duel.wagerAmount = wagerAmount;
+  duel.acceptTimeoutMs = acceptTimeoutMinutes * 60 * 1000;
   if (duel.setupTimeout) clearTimeout(duel.setupTimeout);
   duel.setupTimeout = null;
   if (opponentId) registerActiveUser(opponentId, duel.id);
@@ -1201,6 +1733,11 @@ function buildChallengeEmbed(duel) {
         name: 'Wager',
         value: `**${formatCharm(duel.wagerAmount)} $CHARM**`,
         inline: true,
+      },
+      {
+        name: 'Response Time',
+        value: `**${formatAcceptTimeout(acceptTimeoutMs(duel))}**`,
+        inline: true,
       }
     );
   if (imageUrl) embed.setImage(imageUrl);
@@ -1213,12 +1750,15 @@ async function postChallenge(guild, duel) {
   duel.status = 'awaiting_accept';
   await persistDuel(duel);
   const openChallenge = Boolean(duel.openChallenge);
+  const responseTimeMs = acceptTimeoutMs(duel);
+  const responseTimeText = formatAcceptTimeout(responseTimeMs);
   await thread.send({
     content:
       (openChallenge
         ? `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> is looking for a Squig Duel opponent for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
-          `First eligible holder to accept within ${Math.round(OPEN_CHALLENGE_TIMEOUT_MS / 1000)} seconds gets the duel. If nobody accepts, this switches to a bot battle.`
-        : `<@${duel.challengerId}> has challenged <@${duel.opponentId}> to a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.`),
+          `First eligible holder to accept within ${responseTimeText} gets the duel. If nobody accepts, this switches to a bot battle.`
+        : `<@${duel.challengerId}> has challenged <@${duel.opponentId}> to a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
+          `<@${duel.opponentId}> has ${responseTimeText} to accept.`),
     embeds: [buildChallengeEmbed(duel)],
     components: challengeRows(duel),
   });
@@ -1235,7 +1775,7 @@ async function postChallenge(guild, duel) {
     cancelDuel(guild, active, 'Opponent did not respond in time.').catch((err) => {
       console.warn('[SquigDuels] accept timeout cancel failed:', String(err?.message || err || ''));
     });
-  }, openChallenge ? OPEN_CHALLENGE_TIMEOUT_MS : ACCEPT_TIMEOUT_MS);
+  }, responseTimeMs);
 }
 
 async function switchOpenChallengeToBot(guild, duel) {
@@ -1361,8 +1901,266 @@ async function handleSquigSelect(interaction) {
   }
   duel.opponentPaid = true;
   await persistDuel(duel);
-  await startDuel(interaction.guild, duel);
-  await interaction.followUp({ content: 'Wager collected. Duel started.', flags: 64 }).catch(() => null);
+  await postReadyCheck(interaction.guild, duel);
+  await interaction.followUp({ content: 'Wager collected. Ready check posted in the duel thread.', flags: 64 }).catch(() => null);
+  return true;
+}
+
+function readyRows(duel, disabled = false) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`sd:ready:${duel.id}`)
+        .setLabel('Ready')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled)
+    ),
+  ];
+}
+
+function readyStatusText(duel) {
+  const challengerReady = duel.readyUsers?.challenger ? 'Ready' : 'Waiting';
+  const opponentReady = duel.readyUsers?.opponent ? 'Ready' : 'Waiting';
+  return `<@${duel.challengerId}>: **${challengerReady}**\n<@${duel.opponentId}>: **${opponentReady}**`;
+}
+
+function sideReadyLabel(duel, side) {
+  return duel.readyUsers?.[side] ? 'READY' : 'WAITING';
+}
+
+function containRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = Math.round(sourceWidth * scale);
+  const height = Math.round(sourceHeight * scale);
+  return {
+    x: Math.round((targetWidth - width) / 2),
+    y: Math.round((targetHeight - height) / 2),
+    width,
+    height,
+  };
+}
+
+function readyRoundRectPath(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function fillReadyRoundRect(ctx, x, y, width, height, radius, fill, stroke = null, lineWidth = 4) {
+  readyRoundRectPath(ctx, x, y, width, height, radius);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = stroke;
+    ctx.stroke();
+  }
+}
+
+function drawReadyBadge(ctx, text, x, y, ready) {
+  fillReadyRoundRect(ctx, x, y, 176, 48, 24, ready ? '#24b36b' : '#232b2a', '#111816', 4);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '900 24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x + 88, y + 25);
+}
+
+function drawReadyText(ctx, text, x, y, size = 28, weight = 800, color = '#ffffff', align = 'left') {
+  ctx.fillStyle = color;
+  ctx.font = `${weight} ${size}px sans-serif`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'top';
+  ctx.fillText(text, x, y);
+}
+
+async function drawReadySquigPanel(ctx, duel, side, panel) {
+  const isChallenger = side === 'challenger';
+  const tokenId = isChallenger ? duel.challengerSquigTokenId : duel.opponentSquigTokenId;
+  const uglyPoints = isChallenger ? duel.challengerUglyPoints : duel.opponentUglyPoints;
+  const maxHp = isChallenger ? duel.challengerMaxHp : duel.opponentMaxHp;
+  const currentHp = isChallenger ? duel.challengerCurrentHp : duel.opponentCurrentHp;
+  const ready = Boolean(duel.readyUsers?.[side]);
+  const imageUrl = squigImageUrl(tokenId);
+  const accent = isChallenger ? '#d4a43b' : '#7ADDC0';
+
+  fillReadyRoundRect(ctx, panel.x, panel.y, panel.w, panel.h, 34, 'rgba(13, 17, 16, 0.86)', accent, 6);
+  const artBox = {
+    x: panel.x + 32,
+    y: panel.y + 112,
+    w: panel.w - 64,
+    h: panel.h - 226,
+  };
+  fillReadyRoundRect(ctx, artBox.x, artBox.y, artBox.w, artBox.h, 24, '#eef5f0', '#111816', 5);
+
+  if (imageUrl) {
+    try {
+      const squig = await loadImage(await fetchImageBuffer(imageUrl));
+      const art = containRect(squig.width, squig.height, artBox.w - 24, artBox.h - 24);
+      ctx.drawImage(squig, artBox.x + 12 + art.x, artBox.y + 12 + art.y, art.width, art.height);
+    } catch (err) {
+      console.warn('[SquigDuels] ready squig image failed:', String(err?.message || err || ''));
+    }
+  }
+
+  drawReadyText(ctx, isChallenger ? 'CHALLENGER' : 'OPPONENT', panel.x + 34, panel.y + 30, 24, 900, accent);
+  drawReadyText(ctx, `Squig #${tokenId}`, panel.x + 34, panel.y + 62, 34, 900);
+  drawReadyBadge(ctx, sideReadyLabel(duel, side), panel.x + panel.w - 210, panel.y + 34, ready);
+
+  const statsY = panel.y + panel.h - 96;
+  drawReadyText(ctx, `UP ${uglyPoints ?? 'Unknown'}`, panel.x + 34, statsY, 26, 900, '#ffffff');
+  drawReadyText(ctx, `HP ${Math.max(0, currentHp ?? 0)} / ${maxHp ?? 'Unknown'}`, panel.x + 210, statsY, 26, 900, '#ffffff');
+  drawReadyText(ctx, `ATK ${baseAttack(uglyPoints)}`, panel.x + 430, statsY, 26, 900, '#ffffff');
+}
+
+async function buildReadyDuelAttachment(duel) {
+  const width = 1400;
+  const height = 900;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, '#101715');
+  gradient.addColorStop(0.55, '#22231c');
+  gradient.addColorStop(1, '#0b0f0e');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  try {
+    const lobby = await loadImage(await fetchImageBuffer(SQUIG_DUEL_MENU_IMAGE));
+    const bg = coverRect(lobby.width, lobby.height, width, height);
+    ctx.globalAlpha = 0.18;
+    ctx.drawImage(lobby, bg.x, bg.y, bg.width, bg.height);
+    ctx.globalAlpha = 1;
+  } catch (err) {
+    console.warn('[SquigDuels] ready lobby image failed:', String(err?.message || err || ''));
+  }
+
+  drawReadyText(ctx, 'SQUIG DUEL', width / 2, 38, 42, 900, '#f1d66d', 'center');
+  drawReadyText(ctx, 'READY CHECK', width / 2, 90, 74, 900, '#ffffff', 'center');
+  drawReadyText(ctx, 'Both fighters must lock in before Round 1 starts', width / 2, 174, 26, 700, '#b9c9c2', 'center');
+
+  await drawReadySquigPanel(ctx, duel, 'challenger', { x: 58, y: 232, w: 560, h: 590 });
+  await drawReadySquigPanel(ctx, duel, 'opponent', { x: 782, y: 232, w: 560, h: 590 });
+
+  fillReadyRoundRect(ctx, 620, 420, 160, 118, 30, '#f1d66d', '#111816', 7);
+  drawReadyText(ctx, 'VS', 700, 444, 58, 900, '#111816', 'center');
+
+  const readyCount = Number(Boolean(duel.readyUsers?.challenger)) + Number(Boolean(duel.readyUsers?.opponent));
+  drawReadyText(ctx, `${readyCount}/2 READY`, width / 2, 835, 30, 900, readyCount === 2 ? '#7ADDC0' : '#f1d66d', 'center');
+
+  const readyKey = `${duel.readyUsers?.challenger ? 'c' : 'w'}${duel.readyUsers?.opponent ? 'o' : 'w'}`;
+  const name = `squig-duel-ready-${duel.id}-${readyKey}.png`;
+  return {
+    imageUrl: `attachment://${name}`,
+    files: [new AttachmentBuilder(canvas.toBuffer('image/png'), { name })],
+  };
+}
+
+function buildReadyFallbackEmbeds(duel, title = 'Ready to Duel?') {
+  return [new EmbedBuilder()
+    .setTitle(title)
+    .setColor(0xd4a43b)
+    .setDescription(
+      `<@${duel.challengerId}> and <@${duel.opponentId}>, confirm you are ready to start.\n\n` +
+      `Challenger Squig #${duel.challengerSquigTokenId}: UglyPoints **${duel.challengerUglyPoints}**, HP **${duel.challengerCurrentHp} / ${duel.challengerMaxHp}**, Attack **${baseAttack(duel.challengerUglyPoints)}**\n` +
+      `Opponent Squig #${duel.opponentSquigTokenId}: UglyPoints **${duel.opponentUglyPoints}**, HP **${duel.opponentCurrentHp} / ${duel.opponentMaxHp}**, Attack **${baseAttack(duel.opponentUglyPoints)}**\n\n` +
+      readyStatusText(duel)
+    )
+    .setImage(SQUIG_DUEL_MENU_IMAGE)];
+}
+
+async function buildReadyCheckMessage(duel, title = 'Ready to Duel?') {
+  try {
+    const readyImage = await buildReadyDuelAttachment(duel);
+    return {
+      embeds: [new EmbedBuilder()
+        .setTitle(title)
+        .setColor(0xd4a43b)
+        .setDescription(
+          `<@${duel.challengerId}> and <@${duel.opponentId}>, confirm you are ready to start.\n\n` +
+          readyStatusText(duel)
+        )
+        .setImage(readyImage.imageUrl)],
+      files: readyImage.files,
+    };
+  } catch (err) {
+    console.warn('[SquigDuels] ready check image render failed:', String(err?.message || err || ''));
+    return { embeds: buildReadyFallbackEmbeds(duel, title), files: [] };
+  }
+}
+
+async function postReadyCheck(guild, duel) {
+  const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
+  if (!thread?.isTextBased()) return;
+  duel.status = 'awaiting_ready';
+  duel.readyUsers = {};
+  await persistDuel(duel);
+  const readyMessage = await buildReadyCheckMessage(duel);
+  await thread.send({
+    content:
+      `<@${duel.challengerId}> <@${duel.opponentId}>\n` +
+      `Both Squigs are locked in. If you are ready to duel, hit the Ready button.`,
+    embeds: readyMessage.embeds,
+    ...(readyMessage.files.length ? { files: readyMessage.files } : {}),
+    components: readyRows(duel),
+  });
+}
+
+async function handleReadyButton(interaction) {
+  const match = interaction.customId.match(/^sd:ready:([a-f0-9]{12})$/i);
+  if (!match) return false;
+  assertReady();
+  const duel = getDuel(match[1]);
+  if (!duel || duel.status !== 'awaiting_ready') {
+    await interaction.reply({ content: 'This duel is no longer waiting for ready checks.', flags: 64 });
+    return true;
+  }
+
+  const side = interaction.user.id === duel.challengerId
+    ? 'challenger'
+    : (interaction.user.id === duel.opponentId ? 'opponent' : null);
+  if (!side) {
+    await interaction.reply({ content: 'Only duel participants can ready up.', flags: 64 });
+    return true;
+  }
+
+  duel.readyUsers = duel.readyUsers || {};
+  if (duel.readyUsers[side]) {
+    await interaction.reply({ content: 'You are already marked ready.', flags: 64 });
+    return true;
+  }
+
+  duel.readyUsers[side] = true;
+  await persistDuel(duel);
+
+  const bothReady = Boolean(duel.readyUsers.challenger && duel.readyUsers.opponent);
+  if (bothReady) {
+    duel.status = 'starting';
+    await persistDuel(duel);
+  }
+  const readyMessage = await buildReadyCheckMessage(duel, bothReady ? 'Duel Starting' : 'Ready to Duel?');
+  await interaction.update({
+    content:
+      `<@${duel.challengerId}> <@${duel.opponentId}>\n` +
+      (bothReady
+        ? `Both players are ready. Duel starting.`
+        : `Both Squigs are locked in. If you are ready to duel, hit the Ready button.`),
+    embeds: readyMessage.embeds,
+    ...(readyMessage.files.length ? { files: readyMessage.files } : {}),
+    components: readyRows(duel, bothReady),
+  });
+
+  if (bothReady) {
+    await startDuel(interaction.guild, duel);
+  }
   return true;
 }
 
@@ -1461,6 +2259,161 @@ function buildStatusEmbed(duel, title, description, options = {}) {
   if (thumbnailUrl) embed.setThumbnail(thumbnailUrl);
   if (imageUrl) embed.setImage(imageUrl);
   return embed;
+}
+
+function drawImpactOverlay(ctx, width, height) {
+  ctx.save();
+  ctx.translate(width * 0.51, height * 0.56);
+  ctx.rotate(-0.08);
+
+  const scale = Math.min(width, height) / 1000;
+  ctx.scale(scale, scale);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  ctx.save();
+  ctx.translate(135, -60);
+  ctx.strokeStyle = '#17201d';
+  ctx.fillStyle = '#ffffff';
+  ctx.lineWidth = 34;
+  ctx.beginPath();
+  ctx.moveTo(-85, -55);
+  ctx.lineTo(-35, -178);
+  ctx.lineTo(36, -92);
+  ctx.lineTo(150, -182);
+  ctx.lineTo(134, -43);
+  ctx.lineTo(330, -68);
+  ctx.lineTo(214, 78);
+  ctx.lineTo(390, 148);
+  ctx.lineTo(205, 184);
+  ctx.lineTo(324, 346);
+  ctx.lineTo(124, 293);
+  ctx.lineTo(114, 510);
+  ctx.lineTo(-38, 350);
+  ctx.lineTo(-196, 410);
+  ctx.lineTo(-140, 210);
+  ctx.lineTo(-285, 122);
+  ctx.lineTo(-128, 31);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fill();
+  ctx.restore();
+
+  ctx.strokeStyle = '#17201d';
+  ctx.fillStyle = '#a36f42';
+  ctx.lineWidth = 34;
+  ctx.beginPath();
+  ctx.moveTo(-760, 225);
+  ctx.lineTo(-500, 150);
+  ctx.lineTo(-405, 290);
+  ctx.lineTo(-730, 382);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fill();
+
+  ctx.fillStyle = '#d8340b';
+  ctx.beginPath();
+  ctx.moveTo(-470, 95);
+  ctx.bezierCurveTo(-365, 60, -295, -12, -165, -30);
+  ctx.bezierCurveTo(7, -55, 127, 15, 162, 170);
+  ctx.bezierCurveTo(204, 354, 95, 476, -112, 504);
+  ctx.bezierCurveTo(-240, 522, -302, 487, -400, 522);
+  ctx.bezierCurveTo(-480, 552, -555, 435, -613, 327);
+  ctx.bezierCurveTo(-675, 210, -603, 140, -470, 95);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(-210, 45);
+  ctx.bezierCurveTo(-115, -18, -42, -50, 80, -33);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(88, 110);
+  ctx.bezierCurveTo(116, 229, 82, 329, 5, 395);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+async function loadPunchOverlay() {
+  if (globalThis.__SQUIG_DUEL_PUNCH_OVERLAY) return globalThis.__SQUIG_DUEL_PUNCH_OVERLAY;
+  const buffer = await fs.promises.readFile(SQUIG_DUEL_PUNCH_OVERLAY_PATH);
+  const overlay = await loadImage(buffer);
+  globalThis.__SQUIG_DUEL_PUNCH_OVERLAY = overlay;
+  return overlay;
+}
+
+function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = Math.round(sourceWidth * scale);
+  const height = Math.round(sourceHeight * scale);
+  return {
+    x: Math.round((targetWidth - width) / 2),
+    y: Math.round((targetHeight - height) / 2),
+    width,
+    height,
+  };
+}
+
+async function drawPunchOverlay(ctx, width, height) {
+  const overlay = await loadPunchOverlay();
+  const overlayCanvas = createCanvas(width, height);
+  const overlayCtx = overlayCanvas.getContext('2d');
+  overlayCtx.imageSmoothingEnabled = true;
+  overlayCtx.imageSmoothingQuality = 'high';
+  const placement = coverRect(overlay.width, overlay.height, width, height);
+  overlayCtx.drawImage(overlay, placement.x, placement.y, placement.width, placement.height);
+
+  const imageData = overlayCtx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] < 8 && data[i + 1] < 8 && data[i + 2] < 8) {
+      data[i + 3] = 0;
+    }
+  }
+  overlayCtx.putImageData(imageData, 0, 0);
+  ctx.drawImage(overlayCanvas, 0, 0);
+}
+
+async function buildLoserSquigAttachment(duel, winnerId) {
+  const side = loserSide(duel, winnerId);
+  const loserTokenId = tokenIdForSide(duel, side);
+  const imageUrl = squigImageUrl(loserTokenId);
+  if (!imageUrl) return { imageUrl: null, files: [] };
+
+  try {
+    const squig = await loadImage(await fetchImageBuffer(imageUrl));
+    const maxSide = 1200;
+    const scale = Math.min(1, maxSide / Math.max(squig.width, squig.height));
+    const width = Math.max(1, Math.round(squig.width * scale));
+    const height = Math.max(1, Math.round(squig.height * scale));
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(squig, 0, 0, width, height);
+    try {
+      await drawPunchOverlay(ctx, width, height);
+    } catch (err) {
+      console.warn('[SquigDuels] punch overlay asset failed:', String(err?.message || err || ''));
+      drawImpactOverlay(ctx, width, height);
+    }
+
+    return {
+      imageUrl: `attachment://${SQUIG_DUEL_LOSER_IMAGE_NAME}`,
+      files: [
+        new AttachmentBuilder(canvas.toBuffer('image/png'), {
+          name: SQUIG_DUEL_LOSER_IMAGE_NAME,
+          description: `Losing Squig #${loserTokenId}`,
+        }),
+      ],
+    };
+  } catch (err) {
+    console.warn('[SquigDuels] loser image render failed:', String(err?.message || err || ''));
+    return { imageUrl, files: [] };
+  }
 }
 
 function actionRows(duel) {
@@ -1816,6 +2769,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
   duel.completedAt = Date.now();
   releaseDuelUsers(duel);
   const reason = duelCompletionReason(duel, winnerId, result);
+  const loserImage = await buildLoserSquigAttachment(duel, winnerId);
   if (isBotDuel(duel)) {
     const wagerAmount = botWagerAmount(duel);
     const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
@@ -1840,8 +2794,10 @@ async function completeDuel(guild, duel, winnerId, result = null) {
           `Test wager: **${formatCharm(wagerAmount)} $CHARM**\n` +
           (refundOk
             ? `Returned **${formatCharm(wagerAmount)} $CHARM** to <@${duel.challengerId}>.`
-            : `Refund failed and needs admin review: ${refundError}`)
+            : `Refund failed and needs admin review: ${refundError}`),
+          { imageUrl: loserImage.imageUrl }
         )],
+        ...(loserImage.files.length ? { files: loserImage.files } : {}),
       }).catch(() => null);
     }
     await postPublicDuelFinalLog(
@@ -1880,8 +2836,10 @@ async function completeDuel(guild, duel, winnerId, result = null) {
         `Pot: **${formatCharm(pot)} $CHARM**\n` +
         `Tax: **${formatCharm(taxAmount)} $CHARM** (${taxPercent}%)\n` +
         `Payout: **${formatCharm(payout)} $CHARM**\n` +
-        (payoutOk ? 'Payout completed.' : `Payout failed and needs admin review: ${payoutError}`)
+        (payoutOk ? 'Payout completed.' : `Payout failed and needs admin review: ${payoutError}`),
+        { imageUrl: loserImage.imageUrl }
       )],
+      ...(loserImage.files.length ? { files: loserImage.files } : {}),
     }).catch(() => null);
   }
   await postPublicDuelFinalLog(
@@ -1899,10 +2857,18 @@ async function completeDuel(guild, duel, winnerId, result = null) {
 async function handleButton(interaction) {
   if (!String(interaction.customId || '').startsWith('sd:')) return false;
   if (await handleViewSquigsButton(interaction)) return true;
+  if (await handleViewSquigPageButton(interaction)) return true;
+  if (await handleSetMySquigButton(interaction)) return true;
+  if (await handleMySquigPageButton(interaction)) return true;
+  if (await handleMySquigNameButton(interaction)) return true;
+  if (await handleMySquigFavoriteButton(interaction)) return true;
+  if (await handleMySquigSaveButton(interaction)) return true;
   if (await handleBotDuelButton(interaction)) return true;
   if (await handleStartButton(interaction)) return true;
   if (await handleOpenChallengeButton(interaction)) return true;
   if (await handleAcceptDecline(interaction)) return true;
+  if (await handleReadyButton(interaction)) return true;
+  if (await handleSquigSelectionPageButton(interaction)) return true;
   if (await handleActionButton(interaction)) return true;
   return false;
 }
@@ -1910,14 +2876,17 @@ async function handleButton(interaction) {
 async function handleSelectMenu(interaction) {
   const customId = String(interaction.customId || '');
   if (customId.startsWith('sd:opponent:')) return handleOpponentSelect(interaction);
+  if (customId.startsWith('sd:my_squig_select:')) return handleMySquigSelect(interaction);
   if (customId.startsWith('sd:view_select:')) return handleViewSquigSelect(interaction);
   if (customId.startsWith('sd:select:')) return handleSquigSelect(interaction);
   return false;
 }
 
 async function handleModalSubmit(interaction) {
-  if (!String(interaction.customId || '').startsWith('sd:setup:')) return false;
-  return handleSetupModal(interaction);
+  const customId = String(interaction.customId || '');
+  if (customId.startsWith('sd:my_squig_name_modal:')) return handleMySquigNameModal(interaction);
+  if (customId.startsWith('sd:setup:')) return handleSetupModal(interaction);
+  return false;
 }
 
 async function handleMessageCreate(message) {
