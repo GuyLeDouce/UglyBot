@@ -34,6 +34,8 @@ const OPEN_CHALLENGE_ROLE_ID = '1389076094245671002';
 const BOT_DUEL_WAGER = 50;
 const MAX_DUEL_WAGER = 10000;
 const MAX_SELECT_OPTIONS = 25;
+const MAX_FAVORITE_SQUIGS = 10;
+const SQUIG_SORT_LABEL = 'favorites first, then UglyPoints';
 const ACCEPT_TIMEOUT_MINUTE_OPTIONS = [1, 2, 3, 5];
 const DEFAULT_ACCEPT_TIMEOUT_MINUTES = 3;
 const DEFAULT_ACCEPT_TIMEOUT_MS = DEFAULT_ACCEPT_TIMEOUT_MINUTES * 60 * 1000;
@@ -108,8 +110,33 @@ async function ensureSquigDuelSchema(pool) {
       is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, user_id)
+      PRIMARY KEY (guild_id, user_id, token_id)
     );
+  `);
+  await pool.query(`
+    DO $$
+    DECLARE
+      pk_name TEXT;
+      pk_cols TEXT[];
+    BEGIN
+      SELECT tc.constraint_name, array_agg(kcu.column_name::TEXT ORDER BY kcu.ordinal_position)
+      INTO pk_name, pk_cols
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+       AND tc.table_schema = kcu.table_schema
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'squig_duel_player_squigs'
+        AND tc.constraint_type = 'PRIMARY KEY'
+      GROUP BY tc.constraint_name;
+
+      IF pk_name IS NOT NULL AND pk_cols = ARRAY['guild_id', 'user_id']::TEXT[] THEN
+        EXECUTE format('ALTER TABLE public.squig_duel_player_squigs DROP CONSTRAINT %I', pk_name);
+        ALTER TABLE public.squig_duel_player_squigs ADD PRIMARY KEY (guild_id, user_id, token_id);
+      ELSIF pk_name IS NULL THEN
+        ALTER TABLE public.squig_duel_player_squigs ADD PRIMARY KEY (guild_id, user_id, token_id);
+      END IF;
+    END $$;
   `);
 }
 
@@ -159,7 +186,8 @@ function squigDisplayName(squig) {
 }
 
 function squigListLine(squig) {
-  return `${squigDisplayName(squig)} - ${squig.uglyPoints} UglyPoints - ${squig.maxHp} HP`;
+  const favorite = squig.isFavorite ? '[Favorite] ' : '';
+  return `${favorite}${squigDisplayName(squig)} - ${squig.uglyPoints} UglyPoints - ${squig.maxHp} HP`;
 }
 
 function squigOptionLabel(squig) {
@@ -393,28 +421,30 @@ async function persistRound(duel, result) {
   }
 }
 
-async function getSavedMySquig(guildId, userId) {
+async function getSavedSquigProfiles(guildId, userId) {
   const pool = deps?.historyPool;
-  if (!pool?.query) return null;
+  const profiles = new Map();
+  if (!pool?.query) return profiles;
   try {
     const { rows } = await pool.query(
       `SELECT token_id, nickname, is_favorite
        FROM squig_duel_player_squigs
-       WHERE guild_id = $1 AND user_id = $2
-       LIMIT 1`,
+       WHERE guild_id = $1 AND user_id = $2`,
       [String(guildId), String(userId)]
     );
-    const row = rows[0];
-    if (!row) return null;
-    return {
-      tokenId: String(row.token_id || ''),
-      nickname: String(row.nickname || '').trim(),
-      isFavorite: Boolean(row.is_favorite),
-    };
+    for (const row of rows) {
+      const tokenId = String(row.token_id || '').trim();
+      if (!tokenId) continue;
+      profiles.set(tokenId, {
+        tokenId,
+        nickname: String(row.nickname || '').trim(),
+        isFavorite: Boolean(row.is_favorite),
+      });
+    }
   } catch (err) {
     console.warn('[SquigDuels] saved Squig lookup failed:', String(err?.message || err || ''));
-    return null;
   }
+  return profiles;
 }
 
 async function saveMySquigProfile(guildId, userId, profile) {
@@ -429,12 +459,34 @@ async function saveMySquigProfile(guildId, userId, profile) {
   const nickname = String(profile?.nickname || '').trim().slice(0, 40) || null;
   const isFavorite = Boolean(profile?.isFavorite);
   try {
+    if (!nickname && !isFavorite) {
+      await pool.query(
+        `DELETE FROM squig_duel_player_squigs
+         WHERE guild_id = $1 AND user_id = $2 AND token_id = $3`,
+        [String(guildId), String(userId), tokenId]
+      );
+      return { ok: true, deleted: true };
+    }
+    if (isFavorite) {
+      const favoriteCount = await pool.query(
+        `SELECT COUNT(*)::INTEGER AS count
+         FROM squig_duel_player_squigs
+         WHERE guild_id = $1
+           AND user_id = $2
+           AND is_favorite = TRUE
+           AND token_id <> $3`,
+        [String(guildId), String(userId), tokenId]
+      );
+      const count = Number(favoriteCount.rows?.[0]?.count || 0);
+      if (count >= MAX_FAVORITE_SQUIGS) {
+        return { ok: false, reason: `You can save up to ${MAX_FAVORITE_SQUIGS} favorite Squigs. Unfavorite one before adding another.` };
+      }
+    }
     await pool.query(
       `INSERT INTO squig_duel_player_squigs
        (guild_id, user_id, token_id, nickname, is_favorite, updated_at)
        VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (guild_id, user_id) DO UPDATE SET
-         token_id = EXCLUDED.token_id,
+       ON CONFLICT (guild_id, user_id, token_id) DO UPDATE SET
          nickname = EXCLUDED.nickname,
          is_favorite = EXCLUDED.is_favorite,
          updated_at = NOW()`,
@@ -499,7 +551,7 @@ function buildMenuRow() {
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('sd:my_squig')
-      .setLabel('Set My Squig')
+      .setLabel('Manage Squigs')
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId('sd:bot')
@@ -960,6 +1012,17 @@ async function calculateUglyPoints(guildId, tokenId) {
   return Number.isFinite(n) ? Math.floor(n) : null;
 }
 
+function sortSquigsForDisplay(squigs) {
+  squigs.sort((a, b) => {
+    const fav = Number(Boolean(b.isFavorite)) - Number(Boolean(a.isFavorite));
+    if (fav) return fav;
+    const up = Number(b.uglyPoints) - Number(a.uglyPoints);
+    if (up) return up;
+    return Number(a.tokenId) - Number(b.tokenId);
+  });
+  return squigs;
+}
+
 async function fetchOwnedSquigs(guildId, userId) {
   const links = await deps.getWalletLinks(guildId, userId);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
@@ -972,18 +1035,18 @@ async function fetchOwnedSquigs(guildId, userId) {
     return { ok: false, reason: 'No Squigs found in your connected wallet.' };
   }
 
-  const savedSquig = await getSavedMySquig(guildId, userId);
+  const savedProfiles = await getSavedSquigProfiles(guildId, userId);
   const squigs = [];
   for (const tokenId of tokenIds.slice(0, 200)) {
     try {
       const uglyPoints = await calculateUglyPoints(guildId, tokenId);
       if (!Number.isFinite(Number(uglyPoints))) continue;
       const hp = balancedHp(uglyPoints);
-      const isSavedToken = savedSquig && String(savedSquig.tokenId) === String(tokenId);
+      const savedProfile = savedProfiles.get(String(tokenId));
       squigs.push({
         tokenId: String(tokenId),
-        nickname: isSavedToken ? savedSquig.nickname : '',
-        isFavorite: isSavedToken ? Boolean(savedSquig.isFavorite) : false,
+        nickname: savedProfile?.nickname || '',
+        isFavorite: Boolean(savedProfile?.isFavorite),
         uglyPoints: Math.floor(Number(uglyPoints)),
         maxHp: hp,
         attackPower: baseAttack(uglyPoints),
@@ -998,8 +1061,8 @@ async function fetchOwnedSquigs(guildId, userId) {
     return { ok: false, reason: 'No UglyPoints mapping found for your Squigs.' };
   }
 
-  squigs.sort((a, b) => Number(b.uglyPoints) - Number(a.uglyPoints));
-  return { ok: true, squigs, links };
+  sortSquigsForDisplay(squigs);
+  return { ok: true, squigs, links, savedProfiles };
 }
 
 function squigPageCount(squigs) {
@@ -1089,10 +1152,10 @@ function buildSquigSelectionEmbed(squigs, page = 0) {
     .setTitle('Choose Your Squig')
     .setColor(0xB0DEEE)
     .setDescription(lines.join('\n') || 'Select one of your owned Squigs below.')
-    .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints` });
+    .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}` });
   if (shown[0]?.imageUrl) {
     embed.setImage(shown[0].imageUrl);
-    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by UglyPoints | Preview: ${squigDisplayName(shown[0])}` });
+    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL} | Preview: ${squigDisplayName(shown[0])}` });
   }
   return embed;
 }
@@ -1110,7 +1173,7 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
     .setDescription(lines.join('\n') || 'No Squigs found.')
     .setFooter({
       text: squigs.length > MAX_SELECT_OPTIONS
-        ? `${squigPageLabel(squigs, safePage)} sorted by UglyPoints`
+        ? `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}`
         : `${squigs.length} Squig${squigs.length === 1 ? '' : 's'} found`,
     });
   if (selected?.imageUrl) {
@@ -1253,8 +1316,8 @@ function buildMySquigRows(userId, state) {
         .setDisabled(!selected),
       new ButtonBuilder()
         .setCustomId(`sd:my_squig_favorite:${userId}`)
-        .setLabel(state.isFavorite ? 'Unfavorite' : 'Favorite')
-        .setStyle(state.isFavorite ? ButtonStyle.Secondary : ButtonStyle.Success)
+        .setLabel(selected?.isFavorite ? 'Unfavorite' : 'Favorite')
+        .setStyle(selected?.isFavorite ? ButtonStyle.Secondary : ButtonStyle.Success)
         .setDisabled(!selected),
       new ButtonBuilder()
         .setCustomId(`sd:my_squig_save:${userId}`)
@@ -1271,19 +1334,19 @@ function buildMySquigEmbed(user, state) {
   const selected = selectedMySquig(state);
   const lines = squigPageItems(squigs, page).slice(0, 12).map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
-    .setTitle(`${user.username}'s Saved Squig`)
+    .setTitle(`${user.username}'s Saved Squigs`)
     .setColor(0xB0DEEE)
     .setDescription(
-      `${squigPageLabel(squigs, page)} sorted by UglyPoints.\n\n` +
+      `${squigPageLabel(squigs, page)} sorted by ${SQUIG_SORT_LABEL}.\n\n` +
       (lines.join('\n') || 'Choose one of your owned Squigs below.')
     );
   if (selected?.imageUrl) embed.setImage(selected.imageUrl);
   if (selected) {
     embed.addFields({
-      name: state.nickname ? `${state.nickname} (#${selected.tokenId})` : squigDisplayName(selected),
+      name: squigDisplayName(selected),
       value:
         `Token: **#${selected.tokenId}**\n` +
-        `Favorite: **${state.isFavorite ? 'Yes' : 'No'}**\n` +
+        `Favorite: **${selected.isFavorite ? 'Yes' : 'No'}**\n` +
         `UglyPoints: **${selected.uglyPoints}**\n` +
         `Balanced HP: **${selected.maxHp}**\n` +
         `Attack Power: **${selected.attackPower}**`,
@@ -1292,8 +1355,8 @@ function buildMySquigEmbed(user, state) {
   }
   embed.setFooter({
     text: state.saved
-      ? 'Saved. This profile will persist through bot updates.'
-      : 'Choose a Squig, optionally name/favorite it, then press Save.',
+      ? 'Saved. This Squig profile will persist through bot updates.'
+      : `Choose a Squig, optionally name/favorite it, then press Save. Up to ${MAX_FAVORITE_SQUIGS} favorites.`,
   });
   return embed;
 }
@@ -1301,8 +1364,8 @@ function buildMySquigEmbed(user, state) {
 function buildMySquigPayload(interaction, state, content = null) {
   const selected = selectedMySquig(state);
   const defaultContent = selected
-    ? `Editing your saved Squig profile. Selected ${squigDisplayName({ ...selected, nickname: state.nickname })}.`
-    : 'Editing your saved Squig profile.';
+    ? `Editing saved Squig profiles. Selected ${squigDisplayName(selected)}.`
+    : 'Editing saved Squig profiles.';
   return {
     content: content || defaultContent,
     embeds: [buildMySquigEmbed(interaction.user, state)],
@@ -1334,9 +1397,11 @@ async function handleSetMySquigButton(interaction) {
     await interaction.editReply({ content: result.reason });
     return true;
   }
-  const saved = await getSavedMySquig(interaction.guild.id, interaction.user.id);
-  const savedOwned = saved?.tokenId && result.squigs.some((s) => String(s.tokenId) === String(saved.tokenId));
-  const selectedTokenId = savedOwned ? saved.tokenId : result.squigs[0]?.tokenId;
+  const selectedTokenId =
+    result.squigs.find((s) => s.isFavorite)?.tokenId ||
+    result.squigs.find((s) => String(s.nickname || '').trim())?.tokenId ||
+    result.squigs[0]?.tokenId;
+  const initiallySelected = result.squigs.find((s) => String(s.tokenId) === String(selectedTokenId));
   const state = {
     createdAt: Date.now(),
     userId: interaction.user.id,
@@ -1346,21 +1411,21 @@ async function handleSetMySquigButton(interaction) {
       ? Math.floor(result.squigs.findIndex((s) => String(s.tokenId) === String(selectedTokenId)) / MAX_SELECT_OPTIONS)
       : 0,
     selectedTokenId,
-    nickname: savedOwned ? saved.nickname : '',
-    isFavorite: savedOwned ? Boolean(saved.isFavorite) : false,
-    saved: Boolean(savedOwned),
+    saved: Boolean(initiallySelected?.nickname || initiallySelected?.isFavorite),
   };
   pendingMySquigProfiles.set(mySquigStateKey(interaction.guild.id, interaction.user.id), state);
   const extra = result.squigs.length > MAX_SELECT_OPTIONS
     ? ` Use Previous and Next to browse all ${result.squigs.length} Squigs.`
     : '';
-  const missingSaved = saved?.tokenId && !savedOwned
-    ? ` Your previously saved Squig #${saved.tokenId} is not currently in your connected wallet.`
+  const ownedTokenIds = new Set(result.squigs.map((s) => String(s.tokenId)));
+  const missingSavedCount = [...(result.savedProfiles || new Map()).keys()].filter((tokenId) => !ownedTokenIds.has(String(tokenId))).length;
+  const missingSaved = missingSavedCount
+    ? ` ${missingSavedCount} saved Squig profile${missingSavedCount === 1 ? ' is' : 's are'} not currently in your connected wallet.`
     : '';
   await interaction.editReply(buildMySquigPayload(
     interaction,
     state,
-    `Set your saved Squig for Squig Duels.${extra}${missingSaved}`
+    `Manage saved names and favorites for your Squigs.${extra}${missingSaved}`
   ));
   return true;
 }
@@ -1375,11 +1440,11 @@ async function handleMySquigPageButton(interaction) {
   }
   const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
   if (!state?.squigs?.length) {
-    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    await interaction.reply({ content: 'This editor expired. Click Manage Squigs again.', flags: 64 });
     return true;
   }
   state.page = clampSquigPage(state.squigs, match[2]);
-  await updateMySquigInteraction(interaction, state, `Editing your saved Squig profile. ${squigPageLabel(state.squigs, state.page)}.`);
+  await updateMySquigInteraction(interaction, state, `Editing saved Squig profiles. ${squigPageLabel(state.squigs, state.page)}.`);
   return true;
 }
 
@@ -1394,12 +1459,13 @@ async function handleMySquigSelect(interaction) {
   const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
   const tokenId = String(interaction.values?.[0] || '').trim();
   if (!state?.squigsById?.has(tokenId)) {
-    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    await interaction.reply({ content: 'This editor expired. Click Manage Squigs again.', flags: 64 });
     return true;
   }
   state.selectedTokenId = tokenId;
-  state.saved = false;
-  await updateMySquigInteraction(interaction, state, `Selected ${squigDisplayName(state.squigsById.get(tokenId))}. Add a name or favorite it, then press Save.`);
+  const selected = state.squigsById.get(tokenId);
+  state.saved = Boolean(selected?.nickname || selected?.isFavorite);
+  await updateMySquigInteraction(interaction, state, `Selected ${squigDisplayName(selected)}. Add a name or favorite it, then press Save.`);
   return true;
 }
 
@@ -1416,7 +1482,7 @@ async function handleMySquigNameButton(interaction) {
     await interaction.reply({ content: 'Choose a Squig before naming it.', flags: 64 });
     return true;
   }
-  await interaction.showModal(mySquigNameModal(interaction.user.id, state.nickname));
+  await interaction.showModal(mySquigNameModal(interaction.user.id, selectedMySquig(state)?.nickname || ''));
   return true;
 }
 
@@ -1430,14 +1496,14 @@ async function handleMySquigNameModal(interaction) {
   }
   const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
   if (!state || !selectedMySquig(state)) {
-    await interaction.reply({ content: 'This editor expired. Click Set My Squig again.', flags: 64 });
+    await interaction.reply({ content: 'This editor expired. Click Manage Squigs again.', flags: 64 });
     return true;
   }
-  state.nickname = normalizeSquigNickname(interaction.fields.getTextInputValue('squig_name'));
   const selected = selectedMySquig(state);
-  if (selected) selected.nickname = state.nickname;
+  const nickname = normalizeSquigNickname(interaction.fields.getTextInputValue('squig_name'));
+  if (selected) selected.nickname = nickname;
   state.saved = false;
-  await updateMySquigInteraction(interaction, state, state.nickname ? `Name set to "${state.nickname}". Press Save to keep it.` : 'Name cleared. Press Save to keep it.');
+  await updateMySquigInteraction(interaction, state, nickname ? `Name set to "${nickname}". Press Save to keep it.` : 'Name cleared. Press Save to keep it.');
   return true;
 }
 
@@ -1454,11 +1520,20 @@ async function handleMySquigFavoriteButton(interaction) {
     await interaction.reply({ content: 'Choose a Squig before marking it as favorite.', flags: 64 });
     return true;
   }
-  state.isFavorite = !state.isFavorite;
   const selected = selectedMySquig(state);
-  if (selected) selected.isFavorite = state.isFavorite;
+  if (!selected.isFavorite) {
+    const otherFavorites = state.squigs.filter((s) => s.isFavorite && String(s.tokenId) !== String(selected.tokenId)).length;
+    if (otherFavorites >= MAX_FAVORITE_SQUIGS) {
+      await interaction.reply({
+        content: `You can save up to ${MAX_FAVORITE_SQUIGS} favorite Squigs. Unfavorite one before adding another.`,
+        flags: 64,
+      });
+      return true;
+    }
+  }
+  selected.isFavorite = !selected.isFavorite;
   state.saved = false;
-  await updateMySquigInteraction(interaction, state, state.isFavorite ? 'Marked as favorite. Press Save to keep it.' : 'Favorite removed. Press Save to keep it.');
+  await updateMySquigInteraction(interaction, state, selected.isFavorite ? 'Marked as favorite. Press Save to keep it.' : 'Favorite removed. Press Save to keep it.');
   return true;
 }
 
@@ -1478,18 +1553,25 @@ async function handleMySquigSaveButton(interaction) {
   }
   const saved = await saveMySquigProfile(interaction.guild.id, interaction.user.id, {
     tokenId: selected.tokenId,
-    nickname: state.nickname,
-    isFavorite: state.isFavorite,
+    nickname: selected.nickname,
+    isFavorite: selected.isFavorite,
   });
   if (!saved.ok) {
     await interaction.reply({ content: saved.reason || 'Could not save your Squig profile.', flags: 64 });
     return true;
   }
-  selected.nickname = state.nickname;
-  selected.isFavorite = state.isFavorite;
-  applySavedSquigNameToActiveDuels(interaction.guild.id, interaction.user.id, selected.tokenId, state.nickname);
-  state.saved = true;
-  await updateMySquigInteraction(interaction, state, `Saved ${squigDisplayName(selected)}. This profile will persist through bot updates.`);
+  applySavedSquigNameToActiveDuels(interaction.guild.id, interaction.user.id, selected.tokenId, selected.nickname);
+  sortSquigsForDisplay(state.squigs);
+  state.squigsById = new Map(state.squigs.map((s) => [String(s.tokenId), s]));
+  state.page = Math.floor(state.squigs.findIndex((s) => String(s.tokenId) === String(selected.tokenId)) / MAX_SELECT_OPTIONS);
+  state.saved = Boolean(selected.nickname || selected.isFavorite);
+  await updateMySquigInteraction(
+    interaction,
+    state,
+    saved.deleted
+      ? `Cleared saved profile for Squig #${selected.tokenId}.`
+      : `Saved ${squigDisplayName(selected)}. This profile will persist through bot updates.`
+  );
   return true;
 }
 
