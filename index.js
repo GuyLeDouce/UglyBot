@@ -1065,6 +1065,23 @@ async function postRoleSyncFailures(guild, actorDiscordId, syncResult, context) 
   });
 }
 
+function sanitizeRoleNameForUser(roleName) {
+  return String(roleName || 'Unknown role')
+    .replace(/@/g, '@\u200b')
+    .replace(/[`\r\n]/g, '');
+}
+
+function formatGrantedRolesForUser(grantedRoles = []) {
+  const names = [...new Set(
+    (Array.isArray(grantedRoles) ? grantedRoles : [])
+      .map((roleName) => sanitizeRoleNameForUser(roleName))
+      .filter(Boolean)
+  )];
+  return names.length
+    ? names.map((roleName) => `- ${roleName}`).join('\n')
+    : 'No new roles were added.';
+}
+
 async function postAdminVerificationFlag(guild, actorDiscordId, walletAddress, reason, grantedRoles = []) {
   if (!ADMIN_LOG_CHANNEL_ID) return;
   try {
@@ -2364,6 +2381,13 @@ async function syncHolderRoles(member, walletAddresses) {
   let changed = 0;
   const applied = [];
   const granted = [];
+  const roleDecisions = new Map();
+  const queueRoleDecision = (role, shouldHave, reason) => {
+    const existing = roleDecisions.get(role.id) || { role, entries: [] };
+    existing.entries.push({ shouldHave: Boolean(shouldHave), reason });
+    roleDecisions.set(role.id, existing);
+  };
+
   for (const r of rules) {
     const count = byContract.get(r.contract_address) || 0;
     const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
@@ -2377,24 +2401,11 @@ async function syncHolderRoles(member, walletAddresses) {
       continue;
     }
 
-    const hasRole = member.roles.cache.has(role.id);
-    try {
-      if (shouldHave && !hasRole) {
-        await member.roles.add(role, `Holder verification (${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
-        changed++;
-        granted.push(role.name);
-      }
-      if (!shouldHave && hasRole) {
-        await member.roles.remove(role, `Holder verification (${count} outside range ${r.min_tokens}-${r.max_tokens ?? '∞'})`);
-        changed++;
-      }
-    } catch (err) {
-      if (err?.code === 50001 || err?.code === 50013) {
-        applied.push(`${role.name}: skipped (missing access/permissions)`); 
-        continue;
-      }
-      throw err;
-    }
+    queueRoleDecision(
+      role,
+      shouldHave,
+      `holder rule ${r.contract_address}: ${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'}`
+    );
     applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
 
@@ -2412,15 +2423,27 @@ async function syncHolderRoles(member, walletAddresses) {
     }
 
     const shouldHave = Boolean(traitMatchesByRuleId.get(r.id));
+    queueRoleDecision(
+      role,
+      shouldHave,
+      `trait rule ${traitLabel} on ${r.contract_address}`
+    );
+    applied.push(`${role.name}: ${traitLabel} (${shouldHave ? 'eligible' : 'not eligible'})`);
+  }
+
+  for (const decision of roleDecisions.values()) {
+    const { role, entries } = decision;
+    const shouldHave = entries.some((entry) => entry.shouldHave);
+    const eligibleReason = entries.find((entry) => entry.shouldHave)?.reason || 'holder verification';
     const hasRole = member.roles.cache.has(role.id);
     try {
       if (shouldHave && !hasRole) {
-        await member.roles.add(role, `Trait role (${traitLabel} on ${r.contract_address})`);
+        await member.roles.add(role, `Holder verification (${eligibleReason})`);
         changed++;
         granted.push(role.name);
       }
       if (!shouldHave && hasRole) {
-        await member.roles.remove(role, `Trait role (${traitLabel} not found on ${r.contract_address})`);
+        await member.roles.remove(role, 'Holder verification (no matching holder or trait rules eligible)');
         changed++;
       }
     } catch (err) {
@@ -2430,7 +2453,6 @@ async function syncHolderRoles(member, walletAddresses) {
       }
       throw err;
     }
-    applied.push(`${role.name}: ${traitLabel} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
   return { changed, applied, granted };
 }
@@ -2948,7 +2970,8 @@ function verificationMenuEmbed(guildName) {
       `• **Connect Wallet**: link one or more wallets for holder verification.\n` +
       `• **Disconnect Wallet**: unlink one specific wallet or all wallets.\n` +
       `• **Check Wallets Connected**: view all wallets currently linked.\n` +
-      `• **Check DRIP Status**: confirm your Discord + wallet match in DRIP and get fix steps if not.`
+      `• **Check DRIP Status**: confirm your Discord + wallet match in DRIP and get fix steps if not.\n` +
+      `• **Refresh Verification**: recheck linked wallets and scan for newly available roles.`
     )
     .setImage('https://i.imgur.com/HxdVgDc.png')
     .setColor(0x7ADDC0);
@@ -2960,6 +2983,7 @@ function verificationButtons() {
     new ButtonBuilder().setCustomId('verify_disconnect').setLabel('Disconnect Wallet').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('verify_wallets').setLabel('Check Wallets Connected').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('verify_drip_status').setLabel('Check DRIP Status').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('verify_refresh').setLabel('Refresh Verification').setStyle(ButtonStyle.Primary),
   );
 }
 
@@ -3055,7 +3079,7 @@ function infoEmbeds(guildName, settings = null) {
         {
           name: 'Check Wallets / Holdings',
           value:
-            `Users can view linked wallets, see if each wallet is verified or pending, and view holdings / total ${pointsLabel}.`
+            `Users can view linked wallets, refresh verification for new roles, see if each wallet is verified or pending, and view holdings / total ${pointsLabel}.`
         }
       ),
     new EmbedBuilder()
@@ -3216,6 +3240,7 @@ function infoUserEmbeds(guildName, settings = null) {
           value:
             `• Connect Wallet\n` +
             `• Check DRIP Status\n` +
+            `• Refresh Verification\n` +
             `• Disconnect Wallet\n` +
             `• Check Wallets Connected\n` +
             `• Claim Rewards\n` +
@@ -3603,7 +3628,160 @@ async function handleDripStatusCheck(interaction) {
       `2. Sign in with the same Discord account: <@${interaction.user.id}>\n` +
       `3. Open your profile and connect the same wallet address${pending.length === 1 ? '' : 'es'} shown above\n` +
       `4. Make sure the wallet is connected in this server's DRIP realm (\`${settings.drip_realm_id}\`)\n` +
-      `5. Come back here and click **Check DRIP Status** again, or reconnect your wallet here to refresh verification`
+      `5. Come back here and click **Refresh Verification**`
+  });
+}
+
+async function refreshLinkedWalletVerification(guild, guildId, discordId, links, settings) {
+  if (!settings?.drip_api_key || !settings?.drip_realm_id) {
+    return {
+      checked: false,
+      checks: [],
+      refreshedLinks: links,
+      statusText: 'DRIP verification was not checked because DRIP is not configured for this server.',
+    };
+  }
+
+  const checks = await mapLimit(links, 3, async (link) => {
+    const walletAddress = normalizeEthAddress(link.wallet_address);
+    if (!walletAddress) {
+      return {
+        walletAddress: String(link.wallet_address || ''),
+        verified: false,
+        dripMemberId: link.drip_member_id || null,
+        reason: 'Wallet address is invalid or could not be normalized.',
+        existingVerified: Boolean(link.verified),
+        temporaryUnavailable: false,
+      };
+    }
+
+    const result = await verifyWalletViaDrip(
+      settings.drip_realm_id,
+      discordId,
+      walletAddress,
+      settings
+    );
+
+    return {
+      walletAddress,
+      verified: Boolean(result.verified),
+      dripMemberId: result.dripMemberId || link.drip_member_id || null,
+      reason: result.reason,
+      existingVerified: Boolean(link.verified),
+      temporaryUnavailable: /temporarily unavailable/i.test(String(result.reason || '')),
+    };
+  });
+
+  let primaryDripMemberId = null;
+  for (const check of checks) {
+    if (check.verified && check.dripMemberId && !primaryDripMemberId) {
+      primaryDripMemberId = check.dripMemberId;
+    }
+    if (!normalizeEthAddress(check.walletAddress)) continue;
+
+    if (check.temporaryUnavailable) {
+      await postAdminSystemLog({
+        guild,
+        category: 'DRIP Failure',
+        message:
+          `User: <@${discordId}>\n` +
+          `Context: wallet refresh\n` +
+          `Wallet: \`${check.walletAddress}\`\n` +
+          `Reason: ${String(check.reason || '').slice(0, 500)}`
+      });
+      continue;
+    }
+
+    await setWalletLink(
+      guildId,
+      discordId,
+      check.walletAddress,
+      check.verified,
+      check.dripMemberId
+    );
+  }
+
+  let refreshedLinks = await getWalletLinks(guildId, discordId);
+  if (primaryDripMemberId) {
+    for (const row of refreshedLinks) {
+      await setWalletLink(
+        guildId,
+        discordId,
+        row.wallet_address,
+        Boolean(row.verified),
+        row.drip_member_id || primaryDripMemberId
+      );
+    }
+    refreshedLinks = await getWalletLinks(guildId, discordId);
+  }
+
+  const verifiedCount = checks.filter((x) => x.verified).length;
+  const unavailableCount = checks.filter((x) => x.temporaryUnavailable).length;
+  const pending = checks.filter((x) => !x.verified && !x.temporaryUnavailable);
+  const pendingLine = pending.length
+    ? ` ${pending.length} wallet${pending.length === 1 ? '' : 's'} still need attention.`
+    : '';
+  const unavailableLine = unavailableCount
+    ? ` ${unavailableCount} wallet${unavailableCount === 1 ? '' : 's'} could not be rechecked because DRIP was temporarily unavailable; their previous verified status was preserved.`
+    : '';
+
+  return {
+    checked: true,
+    checks,
+    refreshedLinks,
+    statusText:
+      `DRIP rechecked ${checks.length} wallet${checks.length === 1 ? '' : 's'}; ${verifiedCount} verified.${pendingLine}${unavailableLine}`,
+  };
+}
+
+async function handleVerificationRefresh(interaction) {
+  const guildId = interaction.guild.id;
+  await interaction.deferReply({ flags: 64 });
+
+  const settings = await getGuildSettings(guildId);
+  const links = await getWalletLinks(guildId, interaction.user.id);
+  if (!links.length) {
+    await interaction.editReply({
+      content:
+        `No wallets connected yet.\n` +
+        `Click **Connect Wallet** first, then use **Refresh Verification** after your wallet is linked.`
+    });
+    return;
+  }
+
+  const verification = await refreshLinkedWalletVerification(
+    interaction.guild,
+    guildId,
+    interaction.user.id,
+    links,
+    settings || {}
+  );
+
+  const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  const sync = await syncHolderRoles(member, walletAddresses);
+  await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet refresh');
+
+  const unverifiedChecks = verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable);
+  if (unverifiedChecks.length && sync.granted?.length) {
+    for (const item of unverifiedChecks) {
+      await postAdminVerificationFlag(
+        interaction.guild,
+        interaction.user.id,
+        item.walletAddress,
+        item.reason,
+        sync.granted
+      );
+    }
+  }
+
+  await interaction.editReply({
+    content:
+      `Holder verification refreshed.\n` +
+      `Linked wallets: ${walletAddresses.length}\n` +
+      `${verification.statusText}\n` +
+      `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
+      `New roles added:\n${formatGrantedRolesForUser(sync.granted)}`
   });
 }
 
@@ -5546,6 +5724,11 @@ client.on('interactionCreate', async (interaction) => {
 
       if (interaction.customId === 'verify_drip_status') {
         await handleDripStatusCheck(interaction);
+        return;
+      }
+
+      if (interaction.customId === 'verify_refresh') {
+        await handleVerificationRefresh(interaction);
         return;
       }
 
