@@ -107,6 +107,35 @@ console.log('ENV CHECK:', {
 const UGLY_CONTRACT    = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
 const SQUIGS_CONTRACT  = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
+const DEFAULT_NFT_CHAIN = 'ethereum';
+const NFT_CHAIN_CONFIG = {
+  ethereum: {
+    label: 'Ethereum',
+    alchemyNetwork: 'eth-mainnet',
+    openseaChain: 'ethereum',
+    explorerBaseUrl: 'https://etherscan.io',
+  },
+  base: {
+    label: 'Base',
+    alchemyNetwork: 'base-mainnet',
+    openseaChain: 'base',
+    explorerBaseUrl: 'https://basescan.org',
+  },
+  abstract: {
+    label: 'Abstract',
+    alchemyNetwork: 'abstract-mainnet',
+    openseaChain: 'abstract',
+    explorerBaseUrl: 'https://abscan.org',
+  },
+};
+const NFT_CHAIN_ALIASES = {
+  eth: 'ethereum',
+  ethereum: 'ethereum',
+  mainnet: 'ethereum',
+  base: 'base',
+  abstract: 'abstract',
+  abs: 'abstract',
+};
 
 // ===== CHARM DROPS =====
 const CHARM_REWARD_CHANCE = 100; // 1 in 200
@@ -277,6 +306,7 @@ async function ensureTeamSchema() {
       guild_id TEXT NOT NULL,
       role_id TEXT NOT NULL,
       role_name TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
       contract_address TEXT NOT NULL,
       min_tokens INTEGER NOT NULL DEFAULT 1,
       max_tokens INTEGER,
@@ -290,6 +320,7 @@ async function ensureTeamSchema() {
       guild_id TEXT NOT NULL,
       role_id TEXT NOT NULL,
       role_name TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
       contract_address TEXT NOT NULL,
       trait_category TEXT,
       trait_value TEXT NOT NULL,
@@ -302,12 +333,20 @@ async function ensureTeamSchema() {
       id BIGSERIAL PRIMARY KEY,
       guild_id TEXT NOT NULL,
       name TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
       contract_address TEXT NOT NULL,
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  await teamPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS holder_collections_guild_contract_uidx ON holder_collections (guild_id, contract_address);`);
+  await teamPool.query(`ALTER TABLE holder_rules ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'ethereum';`);
+  await teamPool.query(`ALTER TABLE trait_role_rules ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'ethereum';`);
+  await teamPool.query(`ALTER TABLE holder_collections ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'ethereum';`);
+  await teamPool.query(`UPDATE holder_rules SET chain = 'ethereum' WHERE chain IS NULL OR chain = '';`);
+  await teamPool.query(`UPDATE trait_role_rules SET chain = 'ethereum' WHERE chain IS NULL OR chain = '';`);
+  await teamPool.query(`UPDATE holder_collections SET chain = 'ethereum' WHERE chain IS NULL OR chain = '';`);
+  await teamPool.query(`DROP INDEX IF EXISTS holder_collections_guild_contract_uidx;`);
+  await teamPool.query(`CREATE UNIQUE INDEX IF NOT EXISTS holder_collections_guild_chain_contract_uidx ON holder_collections (guild_id, chain, contract_address);`);
   console.log('✅ team schema ready');
 }
 
@@ -315,14 +354,38 @@ async function ensurePointsSchema() {
   await pointsPool.query(`
     CREATE TABLE IF NOT EXISTS holder_point_mappings (
       guild_id TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
       contract_address TEXT NOT NULL,
       mapping_json JSONB NOT NULL,
       created_by_discord_id TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, contract_address)
+      PRIMARY KEY (guild_id, chain, contract_address)
     );
   `);
+  await pointsPool.query(`ALTER TABLE holder_point_mappings ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'ethereum';`);
   await pointsPool.query(`ALTER TABLE holder_point_mappings ADD COLUMN IF NOT EXISTS created_by_discord_id TEXT;`);
+  await pointsPool.query(`UPDATE holder_point_mappings SET chain = 'ethereum' WHERE chain IS NULL OR chain = '';`);
+  await pointsPool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'holder_point_mappings'::regclass
+          AND conname = 'holder_point_mappings_pkey'
+          AND pg_get_constraintdef(oid) <> 'PRIMARY KEY (guild_id, chain, contract_address)'
+      ) THEN
+        ALTER TABLE holder_point_mappings DROP CONSTRAINT holder_point_mappings_pkey;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'holder_point_mappings'::regclass
+          AND contype = 'p'
+      ) THEN
+        ALTER TABLE holder_point_mappings ADD PRIMARY KEY (guild_id, chain, contract_address);
+      END IF;
+    END $$;
+  `);
   console.log(`✅ points schema ready (${DATABASE_URL_POINTS ? 'DATABASE_URL_POINTS' : 'team database fallback'})`);
 }
 
@@ -330,6 +393,7 @@ async function ensureClaimsSchema() {
   await claimsPool.query(`
     CREATE TABLE IF NOT EXISTS nft_claims (
       guild_id TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
       contract_address TEXT NOT NULL,
       token_id TEXT NOT NULL,
       last_claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -339,8 +403,31 @@ async function ensureClaimsSchema() {
       last_unit_value NUMERIC NOT NULL DEFAULT 0,
       last_payout_amount NUMERIC NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, contract_address, token_id)
+      PRIMARY KEY (guild_id, chain, contract_address, token_id)
     );
+  `);
+  await claimsPool.query(`ALTER TABLE nft_claims ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'ethereum';`);
+  await claimsPool.query(`UPDATE nft_claims SET chain = 'ethereum' WHERE chain IS NULL OR chain = '';`);
+  await claimsPool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'nft_claims'::regclass
+          AND conname = 'nft_claims_pkey'
+          AND pg_get_constraintdef(oid) <> 'PRIMARY KEY (guild_id, chain, contract_address, token_id)'
+      ) THEN
+        ALTER TABLE nft_claims DROP CONSTRAINT nft_claims_pkey;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'nft_claims'::regclass
+          AND contype = 'p'
+      ) THEN
+        ALTER TABLE nft_claims ADD PRIMARY KEY (guild_id, chain, contract_address, token_id);
+      END IF;
+    END $$;
   `);
   await claimsPool.query(`
     CREATE TABLE IF NOT EXISTS claim_events (
@@ -833,11 +920,95 @@ function normalizeEthAddress(input) {
   return addr.toLowerCase();
 }
 
-function labelForContract(contractAddress) {
+function normalizeNftChain(input = DEFAULT_NFT_CHAIN) {
+  const key = String(input || DEFAULT_NFT_CHAIN).trim().toLowerCase();
+  return NFT_CHAIN_ALIASES[key] || null;
+}
+
+function nftChainConfig(chain) {
+  const normalized = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  return NFT_CHAIN_CONFIG[normalized] || NFT_CHAIN_CONFIG[DEFAULT_NFT_CHAIN];
+}
+
+function nftChainLabel(chain) {
+  return nftChainConfig(chain).label;
+}
+
+function collectionKey(chain, contractAddress) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedAddress = normalizeEthAddress(contractAddress);
+  return normalizedAddress ? `${normalizedChain}:${normalizedAddress}` : null;
+}
+
+function collectionSelectValue(chain, contractAddress) {
+  return collectionKey(chain, contractAddress) || `${DEFAULT_NFT_CHAIN}:${String(contractAddress || '').toLowerCase()}`;
+}
+
+function parseChainAddressInput(input) {
+  const raw = String(input || '').trim();
+  const explicit = raw.match(/^([a-z0-9_-]+)\s*[:/|]\s*(0x[a-fA-F0-9]{40})$/i);
+  if (explicit) {
+    const chain = normalizeNftChain(explicit[1]);
+    const contractAddress = normalizeEthAddress(explicit[2]);
+    return chain && contractAddress ? { chain, contractAddress } : null;
+  }
+  const contractAddress = normalizeEthAddress(raw);
+  return contractAddress ? { chain: DEFAULT_NFT_CHAIN, contractAddress } : null;
+}
+
+function pointMappingKey(chain, contractAddress) {
+  return collectionKey(chain, contractAddress);
+}
+
+function getPointMappingForContract(guildPointMappings, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  if (!(guildPointMappings instanceof Map)) return null;
+  const key = pointMappingKey(chain, contractAddress);
+  const mapped = key ? guildPointMappings.get(key) : null;
+  if (mapped) return mapped;
+  if ((normalizeNftChain(chain) || DEFAULT_NFT_CHAIN) === DEFAULT_NFT_CHAIN) {
+    return guildPointMappings.get(String(contractAddress || '').toLowerCase()) || null;
+  }
+  return null;
+}
+
+function chainAddressLabel(chain, contractAddress) {
+  return `${nftChainLabel(chain)}:${String(contractAddress || '').toLowerCase()}`;
+}
+
+function findHolderCollectionByInput(collections, input) {
+  const raw = String(input || '').trim();
+  const parsed = parseChainAddressInput(raw);
+  const rawLower = raw.toLowerCase();
+  return (collections || []).find((c) => {
+    const chain = normalizeNftChain(c.chain) || DEFAULT_NFT_CHAIN;
+    const addr = String(c.contract_address || '').toLowerCase();
+    const byAddress = parsed && parsed.chain === chain && parsed.contractAddress === addr;
+    const byName = String(c.name || '').trim().toLowerCase() === rawLower;
+    return byAddress || byName;
+  }) || null;
+}
+
+function openseaAssetUrl(chain, contractAddress, tokenId) {
+  const cfg = nftChainConfig(chain);
+  return `https://opensea.io/assets/${cfg.openseaChain}/${contractAddress}/${tokenId}`;
+}
+
+function explorerAddressUrl(chain, walletAddress) {
+  const cfg = nftChainConfig(chain);
+  return `${cfg.explorerBaseUrl}/address/${walletAddress}`;
+}
+
+function alchemyNftUrl(chain, endpoint) {
+  const cfg = nftChainConfig(chain);
+  return `https://${cfg.alchemyNetwork}.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/${endpoint}`;
+}
+
+function labelForContract(contractAddress, chain = DEFAULT_NFT_CHAIN) {
   const c = String(contractAddress || '').toLowerCase();
-  if (c === UGLY_CONTRACT.toLowerCase()) return 'Charm of the Ugly';
-  if (c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
-  if (c === SQUIGS_CONTRACT.toLowerCase()) return 'Squigs';
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return 'Charm of the Ugly';
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === SQUIGS_CONTRACT.toLowerCase()) return 'Squigs';
   return String(contractAddress || 'Unknown Contract');
 }
 
@@ -890,9 +1061,10 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   }
 
   const pools = await Promise.all(
-    collections.map(async ({ contractAddress }) => {
-      const tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress);
-      return tokenIds.map((tokenId) => ({ tokenId: String(tokenId), contractAddress }));
+    collections.map(async ({ contractAddress, chain = DEFAULT_NFT_CHAIN }) => {
+      const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+      const tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, normalizedChain);
+      return tokenIds.map((tokenId) => ({ tokenId: String(tokenId), contractAddress, chain: normalizedChain }));
     })
   );
   const owned = pools.flat();
@@ -904,9 +1076,9 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   }
 
   const chosen = pickRandom(owned);
-  const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress).catch(() => null);
-  const collectionName = labelForContract(chosen.contractAddress);
-  const isSquig = String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
+  const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null);
+  const collectionName = labelForContract(chosen.contractAddress, chosen.chain);
+  const isSquig = chosen.chain === DEFAULT_NFT_CHAIN && String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
   const tokenName = String(meta?.name || `${collectionName} #${chosen.tokenId}`);
   const imageUrl =
     normalizeImageUrl(
@@ -926,8 +1098,9 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
     .setColor(0xB0DEEE)
     .setDescription(
       `Collection: **${collectionName}**\n` +
+      `Chain: **${nftChainLabel(chosen.chain)}**\n` +
       `Token ID: **${chosen.tokenId}**\n` +
-      `OpenSea: https://opensea.io/assets/ethereum/${chosen.contractAddress}/${chosen.tokenId}` +
+      `OpenSea: ${openseaAssetUrl(chosen.chain, chosen.contractAddress, chosen.tokenId)}` +
       (isSquig ? `\n[Mint A Squig](https://bueno.art/squigs/mint)` : '')
     )
     .setFooter({ text: `${commandLabel} pull for ${username}` });
@@ -2142,7 +2315,7 @@ async function clearDripSettings(guildId) {
 
 async function getHolderRules(guildId) {
   const { rows } = await teamPool.query(
-    `SELECT * FROM holder_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
+    `SELECT *, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain FROM holder_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
     [guildId]
   );
   return rows;
@@ -2150,7 +2323,7 @@ async function getHolderRules(guildId) {
 
 async function getTraitRoleRules(guildId) {
   const { rows } = await teamPool.query(
-    `SELECT * FROM trait_role_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
+    `SELECT *, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain FROM trait_role_rules WHERE guild_id = $1 AND enabled = TRUE ORDER BY id ASC`,
     [guildId]
   );
   return rows;
@@ -2158,74 +2331,83 @@ async function getTraitRoleRules(guildId) {
 
 function defaultHolderCollections() {
   return [
-    { name: 'Charm of the Ugly', contract_address: UGLY_CONTRACT.toLowerCase() },
-    { name: 'Ugly Monsters', contract_address: MONSTER_CONTRACT.toLowerCase() },
-    { name: 'Squigs', contract_address: SQUIGS_CONTRACT.toLowerCase() },
+    { name: 'Charm of the Ugly', chain: DEFAULT_NFT_CHAIN, contract_address: UGLY_CONTRACT.toLowerCase() },
+    { name: 'Ugly Monsters', chain: DEFAULT_NFT_CHAIN, contract_address: MONSTER_CONTRACT.toLowerCase() },
+    { name: 'Squigs', chain: DEFAULT_NFT_CHAIN, contract_address: SQUIGS_CONTRACT.toLowerCase() },
   ];
 }
 
 async function getHolderCollections(guildId) {
   const { rows } = await teamPool.query(
-    `SELECT name, contract_address FROM holder_collections WHERE guild_id = $1 AND enabled = TRUE ORDER BY created_at ASC`,
+    `SELECT name, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address FROM holder_collections WHERE guild_id = $1 AND enabled = TRUE ORDER BY created_at ASC`,
     [guildId]
   );
   const out = [];
   const seen = new Set();
   for (const c of [...defaultHolderCollections(), ...rows]) {
+    const chain = normalizeNftChain(c.chain) || DEFAULT_NFT_CHAIN;
     const addr = normalizeEthAddress(c.contract_address);
-    if (!addr || seen.has(addr)) continue;
-    seen.add(addr);
-    out.push({ name: String(c.name || addr), contract_address: addr });
+    const key = collectionKey(chain, addr);
+    if (!addr || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name: String(c.name || addr), chain, contract_address: addr });
   }
   return out;
 }
 
-async function upsertHolderCollection(guildId, name, contractAddress) {
+async function upsertHolderCollection(guildId, name, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   await teamPool.query(
-    `INSERT INTO holder_collections (guild_id, name, contract_address, enabled)
-     VALUES ($1, $2, $3, TRUE)
-     ON CONFLICT (guild_id, contract_address) DO UPDATE
+    `INSERT INTO holder_collections (guild_id, name, chain, contract_address, enabled)
+     VALUES ($1, $2, $3, $4, TRUE)
+     ON CONFLICT (guild_id, chain, contract_address) DO UPDATE
      SET name = EXCLUDED.name, enabled = TRUE`,
-    [guildId, String(name || '').trim(), String(contractAddress || '').toLowerCase()]
+    [guildId, String(name || '').trim(), normalizedChain, String(contractAddress || '').toLowerCase()]
   );
 }
 
-async function setGuildPointMapping(guildId, contractAddress, mappingTable, actorDiscordId = null) {
+async function setGuildPointMapping(guildId, contractAddress, mappingTable, actorDiscordId = null, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   await pointsPool.query(
-    `INSERT INTO holder_point_mappings (guild_id, contract_address, mapping_json, created_by_discord_id, updated_at)
-     VALUES ($1, $2, $3::jsonb, $4, NOW())
-     ON CONFLICT (guild_id, contract_address) DO UPDATE
+    `INSERT INTO holder_point_mappings (guild_id, chain, contract_address, mapping_json, created_by_discord_id, updated_at)
+     VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+     ON CONFLICT (guild_id, chain, contract_address) DO UPDATE
      SET mapping_json = EXCLUDED.mapping_json,
          created_by_discord_id = COALESCE(holder_point_mappings.created_by_discord_id, EXCLUDED.created_by_discord_id),
          updated_at = NOW()`,
-    [guildId, String(contractAddress || '').toLowerCase(), JSON.stringify(mappingTable || {}), actorDiscordId ? String(actorDiscordId) : null]
+    [guildId, normalizedChain, String(contractAddress || '').toLowerCase(), JSON.stringify(mappingTable || {}), actorDiscordId ? String(actorDiscordId) : null]
   );
 }
 
 async function getGuildPointMappings(guildId) {
   const { rows } = await pointsPool.query(
-    `SELECT contract_address, mapping_json FROM holder_point_mappings WHERE guild_id = $1`,
+    `SELECT COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, mapping_json FROM holder_point_mappings WHERE guild_id = $1`,
     [guildId]
   );
   const out = new Map();
   for (const r of rows) {
+    const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
     const c = normalizeEthAddress(r.contract_address);
     if (!c) continue;
-    out.set(c, (r.mapping_json && typeof r.mapping_json === 'object') ? r.mapping_json : {});
+    const table = (r.mapping_json && typeof r.mapping_json === 'object') ? r.mapping_json : {};
+    out.set(pointMappingKey(chain, c), table);
+    if (chain === DEFAULT_NFT_CHAIN) out.set(c, table);
   }
   return out;
 }
 
 async function getGuildPointMappingsWithOwners(guildId) {
   const { rows } = await pointsPool.query(
-    `SELECT contract_address, created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1`,
+    `SELECT COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1`,
     [guildId]
   );
   const out = [];
   for (const r of rows) {
+    const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
     const contractAddress = normalizeEthAddress(r.contract_address);
     if (!contractAddress) continue;
     out.push({
+      chain,
       contractAddress,
       createdByDiscordId: r.created_by_discord_id ? String(r.created_by_discord_id) : null,
     });
@@ -2233,10 +2415,11 @@ async function getGuildPointMappingsWithOwners(guildId) {
   return out;
 }
 
-async function removeGuildPointMapping(guildId, contractAddress, actorDiscordId) {
+async function removeGuildPointMapping(guildId, contractAddress, actorDiscordId, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const { rows } = await pointsPool.query(
-    `SELECT created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1 AND contract_address = $2`,
-    [guildId, String(contractAddress || '').toLowerCase()]
+    `SELECT created_by_discord_id FROM holder_point_mappings WHERE guild_id = $1 AND chain = $2 AND contract_address = $3`,
+    [guildId, normalizedChain, String(contractAddress || '').toLowerCase()]
   );
   const row = rows[0] || null;
   if (!row) return { ok: false, reason: 'not_found' };
@@ -2248,37 +2431,39 @@ async function removeGuildPointMapping(guildId, contractAddress, actorDiscordId)
   if (!canDelete) return { ok: false, reason: 'forbidden', ownerId };
 
   await pointsPool.query(
-    `DELETE FROM holder_point_mappings WHERE guild_id = $1 AND contract_address = $2`,
-    [guildId, String(contractAddress || '').toLowerCase()]
+    `DELETE FROM holder_point_mappings WHERE guild_id = $1 AND chain = $2 AND contract_address = $3`,
+    [guildId, normalizedChain, String(contractAddress || '').toLowerCase()]
   );
   return { ok: true, ownerId };
 }
 
-async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens }) {
+async function addHolderRule(guild, { roleId, contractAddress, minTokens, maxTokens, chain = DEFAULT_NFT_CHAIN }) {
   const role = guild.roles.cache.get(roleId);
   if (!role) throw new Error(`Role not found: ${roleId}`);
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   await teamPool.query(
-    `INSERT INTO holder_rules (guild_id, role_id, role_name, contract_address, min_tokens, max_tokens, enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
-    [guild.id, role.id, role.name, contractAddress.toLowerCase(), minTokens, maxTokens]
+    `INSERT INTO holder_rules (guild_id, role_id, role_name, chain, contract_address, min_tokens, max_tokens, enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)`,
+    [guild.id, role.id, role.name, normalizedChain, contractAddress.toLowerCase(), minTokens, maxTokens]
   );
   return role;
 }
 
-async function addTraitRoleRule(guild, { roleId, contractAddress, traitCategory, traitValue }) {
+async function addTraitRoleRule(guild, { roleId, contractAddress, traitCategory, traitValue, chain = DEFAULT_NFT_CHAIN }) {
   const role = guild.roles.cache.get(roleId);
   if (!role) throw new Error(`Role not found: ${roleId}`);
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   await teamPool.query(
-    `INSERT INTO trait_role_rules (guild_id, role_id, role_name, contract_address, trait_category, trait_value, enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, TRUE)`,
-    [guild.id, role.id, role.name, contractAddress.toLowerCase(), traitCategory || null, traitValue]
+    `INSERT INTO trait_role_rules (guild_id, role_id, role_name, chain, contract_address, trait_category, trait_value, enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)`,
+    [guild.id, role.id, role.name, normalizedChain, contractAddress.toLowerCase(), traitCategory || null, traitValue]
   );
   return role;
 }
 
 async function disableHolderRule(guildId, ruleId) {
   const { rows } = await teamPool.query(
-    `UPDATE holder_rules SET enabled = FALSE WHERE guild_id = $1 AND id = $2 AND enabled = TRUE RETURNING id, role_name, contract_address, min_tokens, max_tokens`,
+    `UPDATE holder_rules SET enabled = FALSE WHERE guild_id = $1 AND id = $2 AND enabled = TRUE RETURNING id, role_name, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, min_tokens, max_tokens`,
     [guildId, ruleId]
   );
   return rows[0] || null;
@@ -2289,18 +2474,18 @@ async function disableTraitRoleRule(guildId, ruleId) {
     `UPDATE trait_role_rules
      SET enabled = FALSE
      WHERE guild_id = $1 AND id = $2 AND enabled = TRUE
-     RETURNING id, role_name, contract_address, trait_category, trait_value`,
+     RETURNING id, role_name, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, trait_category, trait_value`,
     [guildId, ruleId]
   );
   return rows[0] || null;
 }
 
-async function getOwnedTokenIdsForContract(walletAddress, contractAddress) {
+async function getOwnedTokenIdsForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
   if (!ALCHEMY_API_KEY) return [];
   const out = [];
   let pageKey = null;
   do {
-    const u = new URL(`https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTsForOwner`);
+    const u = new URL(alchemyNftUrl(chain, 'getNFTsForOwner'));
     u.searchParams.set('owner', walletAddress);
     u.searchParams.append('contractAddresses[]', contractAddress);
     u.searchParams.set('withMetadata', 'false');
@@ -2322,17 +2507,17 @@ async function getOwnedTokenIdsForContract(walletAddress, contractAddress) {
   return out;
 }
 
-async function countOwnedForContract(walletAddress, contractAddress) {
-  const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress);
+async function countOwnedForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress, chain);
   return ids.length;
 }
 
-async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress) {
+async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, chain = DEFAULT_NFT_CHAIN) {
   const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
   const normalized = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   if (!normalized.length) return [];
   const tokenArrays = await mapLimit(normalized, 4, async (walletAddress) => {
-    try { return await getOwnedTokenIdsForContract(walletAddress, contractAddress); }
+    try { return await getOwnedTokenIdsForContract(walletAddress, contractAddress, chain); }
     catch { return []; }
   });
   const seen = new Set();
@@ -2361,36 +2546,40 @@ async function syncHolderRoles(member, walletAddresses) {
   const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   const byContract = new Map();
   for (const r of rules) {
-    if (byContract.has(r.contract_address)) continue;
+    const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
+    const key = collectionKey(chain, r.contract_address);
+    if (!key || byContract.has(key)) continue;
     let count = 0;
     for (const walletAddress of normalizedAddresses) {
-      count += await countOwnedForContract(walletAddress, r.contract_address);
+      count += await countOwnedForContract(walletAddress, r.contract_address, chain);
     }
-    byContract.set(r.contract_address, count);
+    byContract.set(key, count);
   }
 
   const guildPointMappings = traitRules.length ? await getGuildPointMappings(member.guild.id) : new Map();
   const traitMatchesByRuleId = new Map();
-  const traitContracts = [...new Set(traitRules.map((r) => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
-  for (const contractAddress of traitContracts) {
-    const contractRules = traitRules.filter((r) => String(r.contract_address || '').toLowerCase() === contractAddress);
+  const traitContracts = [...new Set(traitRules.map((r) => collectionKey(r.chain, r.contract_address)).filter(Boolean))];
+  for (const traitContractKey of traitContracts) {
+    const contractRules = traitRules.filter((r) => collectionKey(r.chain, r.contract_address) === traitContractKey);
     if (!contractRules.length) continue;
+    const chain = normalizeNftChain(contractRules[0].chain) || DEFAULT_NFT_CHAIN;
+    const contractAddress = String(contractRules[0].contract_address || '').toLowerCase();
 
-    const table = hpTableForContract(contractAddress, guildPointMappings);
+    const table = hpTableForContract(contractAddress, guildPointMappings, chain);
     const eligibleRules = contractRules.filter((r) => findMatchingTraitDefinition(table, r.trait_category, r.trait_value));
     for (const r of contractRules) {
       traitMatchesByRuleId.set(r.id, false);
     }
     if (!eligibleRules.length) continue;
 
-    const tokenIds = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress);
+    const tokenIds = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress, chain);
     if (!tokenIds.length) continue;
 
     for (const tokenId of tokenIds) {
       let grouped = null;
       try {
-        const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
-        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
+        const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
         grouped = normalizeTraits(attrs);
       } catch {
         grouped = null;
@@ -2419,7 +2608,8 @@ async function syncHolderRoles(member, walletAddresses) {
   };
 
   for (const r of rules) {
-    const count = byContract.get(r.contract_address) || 0;
+    const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
+    const count = byContract.get(collectionKey(chain, r.contract_address)) || 0;
     const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
     const role = member.guild.roles.cache.get(r.role_id);
     if (!role) {
@@ -2434,7 +2624,7 @@ async function syncHolderRoles(member, walletAddresses) {
     queueRoleDecision(
       role,
       shouldHave,
-      `holder rule ${r.contract_address}: ${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'}`
+      `holder rule ${chainAddressLabel(chain, r.contract_address)}: ${count} in range ${r.min_tokens}-${r.max_tokens ?? '∞'}`
     );
     applied.push(`${role.name}: ${count} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
@@ -2456,7 +2646,7 @@ async function syncHolderRoles(member, walletAddresses) {
     queueRoleDecision(
       role,
       shouldHave,
-      `trait rule ${traitLabel} on ${r.contract_address}`
+      `trait rule ${traitLabel} on ${chainAddressLabel(r.chain, r.contract_address)}`
     );
     applied.push(`${role.name}: ${traitLabel} (${shouldHave ? 'eligible' : 'not eligible'})`);
   }
@@ -2494,28 +2684,37 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
 
   const rules = await getHolderRules(guildId);
   const guildPointMappings = await getGuildPointMappings(guildId);
-  const contracts = [...new Set(rules.map(r => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
+  const contractMap = new Map();
+  for (const r of rules) {
+    const key = collectionKey(r.chain, r.contract_address);
+    if (!key || contractMap.has(key)) continue;
+    contractMap.set(key, {
+      chain: normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN,
+      contractAddress: String(r.contract_address || '').toLowerCase(),
+    });
+  }
+  const contracts = [...contractMap.values()];
   if (!contracts.length) return { unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] };
 
-  const byCollection = await mapLimit(contracts, 3, async (contractAddress) => {
-    const ids = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress);
-    return { contractAddress, ids };
+  const byCollection = await mapLimit(contracts, 3, async ({ chain, contractAddress }) => {
+    const ids = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress, chain);
+    return { chain, contractAddress, ids };
   });
   const totalNfts = byCollection.reduce((sum, x) => sum + x.ids.length, 0);
 
   let totalUp = 0;
   if (payoutType === 'per_up') {
-    const scorableContracts = byCollection.filter(({ contractAddress }) => {
-      const table = hpTableForContract(contractAddress, guildPointMappings);
+    const scorableContracts = byCollection.filter(({ chain, contractAddress }) => {
+      const table = hpTableForContract(contractAddress, guildPointMappings, chain);
       return table && Object.keys(table).length > 0;
     });
-    const perContractTotals = await mapLimit(scorableContracts, 2, async ({ contractAddress, ids }) => {
+    const perContractTotals = await mapLimit(scorableContracts, 2, async ({ chain, contractAddress, ids }) => {
       const ups = await mapLimit(ids, 5, async (tokenId) => {
         try {
-          const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
-          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
+          const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
           const grouped = normalizeTraits(attrs);
-          const table = hpTableForContract(contractAddress, guildPointMappings);
+          const table = hpTableForContract(contractAddress, guildPointMappings, chain);
           const { total } = computeHpFromTraits(grouped, table);
           return total || 0;
         } catch {
@@ -2531,7 +2730,7 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
     unitTotal: payoutType === 'per_nft' ? totalNfts : totalUp,
     totalNfts,
     totalUp,
-    byCollection: byCollection.map(({ contractAddress, ids }) => ({ contractAddress, count: ids.length })),
+    byCollection: byCollection.map(({ chain, contractAddress, ids }) => ({ chain, contractAddress, count: ids.length })),
   };
 }
 
@@ -2569,8 +2768,13 @@ async function computeDailyRewardQuote(guildId, links, settings) {
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
-function nftClaimKey(contractAddress, tokenId) {
-  return `${String(contractAddress || '').toLowerCase()}:${String(tokenId || '')}`;
+function nftClaimKey(chain, contractAddress, tokenId) {
+  if (tokenId == null) {
+    tokenId = contractAddress;
+    contractAddress = chain;
+    chain = DEFAULT_NFT_CHAIN;
+  }
+  return `${normalizeNftChain(chain) || DEFAULT_NFT_CHAIN}:${String(contractAddress || '').toLowerCase()}:${String(tokenId || '')}`;
 }
 
 function formatNumber(value, digits = 2) {
@@ -2605,25 +2809,27 @@ function formatElapsedTimeSimple(ms) {
 async function getStoredNftClaimStates(guildId, nftEntries) {
   const tokenIdsByContract = new Map();
   for (const entry of nftEntries) {
+    const chain = normalizeNftChain(entry.chain) || DEFAULT_NFT_CHAIN;
     const contractAddress = String(entry.contractAddress || '').toLowerCase();
     const tokenId = String(entry.tokenId || '');
     if (!contractAddress || !tokenId) continue;
-    const bucket = tokenIdsByContract.get(contractAddress) || [];
-    bucket.push(tokenId);
-    tokenIdsByContract.set(contractAddress, bucket);
+    const key = collectionKey(chain, contractAddress);
+    const bucket = tokenIdsByContract.get(key) || { chain, contractAddress, tokenIds: [] };
+    bucket.tokenIds.push(tokenId);
+    tokenIdsByContract.set(key, bucket);
   }
 
   const out = new Map();
   await Promise.all(
-    [...tokenIdsByContract.entries()].map(async ([contractAddress, tokenIds]) => {
+    [...tokenIdsByContract.values()].map(async ({ chain, contractAddress, tokenIds }) => {
       const { rows } = await claimsPool.query(
-        `SELECT contract_address, token_id, last_claimed_at
+        `SELECT COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, token_id, last_claimed_at
          FROM nft_claims
-         WHERE guild_id = $1 AND contract_address = $2 AND token_id = ANY($3::TEXT[])`,
-        [guildId, contractAddress, [...new Set(tokenIds)]]
+         WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = ANY($4::TEXT[])`,
+        [guildId, chain, contractAddress, [...new Set(tokenIds)]]
       );
       for (const row of rows) {
-        out.set(nftClaimKey(row.contract_address, row.token_id), row);
+        out.set(nftClaimKey(row.chain, row.contract_address, row.token_id), row);
       }
     })
   );
@@ -2645,7 +2851,16 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   }
   const normalizedLinks = [...linkMap.values()];
   const rules = await getHolderRules(guildId);
-  const contracts = [...new Set(rules.map((r) => String(r.contract_address || '').toLowerCase()).filter(Boolean))];
+  const contractMap = new Map();
+  for (const r of rules) {
+    const key = collectionKey(r.chain, r.contract_address);
+    if (!key || contractMap.has(key)) continue;
+    contractMap.set(key, {
+      chain: normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN,
+      contractAddress: String(r.contract_address || '').toLowerCase(),
+    });
+  }
+  const contracts = [...contractMap.values()];
   if (!normalizedLinks.length || !contracts.length || payoutAmount <= 0) {
     return {
       payoutType,
@@ -2662,13 +2877,14 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   const nftEntries = [];
   const seenNfts = new Set();
   await mapLimit(normalizedLinks, 3, async (link) => {
-    await mapLimit(contracts, 3, async (contractAddress) => {
-      const tokenIds = await getOwnedTokenIdsForContract(link.wallet_address, contractAddress);
+    await mapLimit(contracts, 3, async ({ chain, contractAddress }) => {
+      const tokenIds = await getOwnedTokenIdsForContract(link.wallet_address, contractAddress, chain);
       for (const tokenId of tokenIds) {
-        const key = nftClaimKey(contractAddress, tokenId);
+        const key = nftClaimKey(chain, contractAddress, tokenId);
         if (seenNfts.has(key)) continue;
         seenNfts.add(key);
         nftEntries.push({
+          chain,
           contractAddress,
           tokenId: String(tokenId),
           walletAddress: link.wallet_address,
@@ -2695,14 +2911,14 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   if (payoutType === 'per_up') {
     const guildPointMappings = await getGuildPointMappings(guildId);
     await mapLimit(nftEntries, 5, async (entry) => {
-      const table = hpTableForContract(entry.contractAddress, guildPointMappings);
+      const table = hpTableForContract(entry.contractAddress, guildPointMappings, entry.chain);
       if (!table || !Object.keys(table).length) {
         entry.unitValue = 0;
         return;
       }
       try {
-        const meta = await getNftMetadataAlchemy(entry.tokenId, entry.contractAddress);
-        const { attrs } = await getTraitsForToken(meta, entry.tokenId, entry.contractAddress);
+        const meta = await getNftMetadataAlchemy(entry.tokenId, entry.contractAddress, entry.chain);
+        const { attrs } = await getTraitsForToken(meta, entry.tokenId, entry.contractAddress, entry.chain);
         const grouped = normalizeTraits(attrs);
         const { total } = computeHpFromTraits(grouped, table);
         entry.unitValue = total || 0;
@@ -2734,7 +2950,7 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   let rawClaimableAmount = 0;
 
   for (const entry of eligibleNftEntries) {
-    const state = stateByNft.get(nftClaimKey(entry.contractAddress, entry.tokenId));
+    const state = stateByNft.get(nftClaimKey(entry.chain, entry.contractAddress, entry.tokenId));
     let lastClaimedAt = state?.last_claimed_at ? new Date(state.last_claimed_at) : null;
     if (!lastClaimedAt || !Number.isFinite(lastClaimedAt.getTime())) {
       lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
@@ -2770,10 +2986,10 @@ async function recordPassiveClaim(guildId, discordId, rewardQuote, receiptChanne
     rewardQuote.nftEntries.map((entry) =>
       claimsPool.query(
         `INSERT INTO nft_claims (
-           guild_id, contract_address, token_id, last_claimed_at, last_seen_owner_wallet, last_seen_discord_id, last_payout_type, last_unit_value, last_payout_amount, updated_at
+           guild_id, chain, contract_address, token_id, last_claimed_at, last_seen_owner_wallet, last_seen_discord_id, last_payout_type, last_unit_value, last_payout_amount, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-         ON CONFLICT (guild_id, contract_address, token_id) DO UPDATE
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+         ON CONFLICT (guild_id, chain, contract_address, token_id) DO UPDATE
          SET last_claimed_at = EXCLUDED.last_claimed_at,
              last_seen_owner_wallet = EXCLUDED.last_seen_owner_wallet,
              last_seen_discord_id = EXCLUDED.last_seen_discord_id,
@@ -2783,6 +2999,7 @@ async function recordPassiveClaim(guildId, discordId, rewardQuote, receiptChanne
              updated_at = NOW()`,
         [
           guildId,
+          normalizeNftChain(entry.chain) || DEFAULT_NFT_CHAIN,
           entry.contractAddress,
           entry.tokenId,
           claimTimestamp.toISOString(),
@@ -2812,7 +3029,7 @@ async function recordPassiveClaim(guildId, discordId, rewardQuote, receiptChanne
   );
 }
 
-async function getClaimableAmountForNft(guildId, contractAddress, tokenId, settings, unitValueOverride = null) {
+async function getClaimableAmountForNft(guildId, contractAddress, tokenId, settings, unitValueOverride = null, chain = DEFAULT_NFT_CHAIN) {
   const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
   const payoutAmount = Number(settings?.payout_amount || 0);
   const unitValue = payoutType === 'per_nft'
@@ -2825,12 +3042,13 @@ async function getClaimableAmountForNft(guildId, contractAddress, tokenId, setti
 
   const normalizedContract = String(contractAddress || '').toLowerCase();
   const normalizedTokenId = String(tokenId || '');
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const { rows } = await claimsPool.query(
     `SELECT last_claimed_at
      FROM nft_claims
-     WHERE guild_id = $1 AND contract_address = $2 AND token_id = $3
+     WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = $4
      LIMIT 1`,
-    [guildId, normalizedContract, normalizedTokenId]
+    [guildId, normalizedChain, normalizedContract, normalizedTokenId]
   );
 
   const now = new Date();
@@ -2848,9 +3066,10 @@ async function getConnectedCollectionCounts(guildId, walletAddresses) {
   const collections = await getHolderCollections(guildId);
   if (!collections.length) return [];
   const out = await mapLimit(collections, 3, async (collection) => {
-    const ids = await getOwnedTokenIdsForContractMany(walletAddresses, collection.contract_address);
+    const ids = await getOwnedTokenIdsForContractMany(walletAddresses, collection.contract_address, collection.chain);
     return {
       name: collection.name,
+      chain: collection.chain,
       contractAddress: collection.contract_address,
       count: ids.length,
     };
@@ -3044,7 +3263,7 @@ function setupMainEmbed() {
     .setTitle('Holder Verification Setup')
     .setDescription(
       `Choose a setup action.\n` +
-      `• Collections: add collection name + contract for setup options.\n` +
+      `• Collections: add collection name + chain + contract for setup options.\n` +
       `• Holder roles: add/remove collection-based role rules.\n` +
       `• Trait roles: add/remove trait-based role rules using built-in or custom mapped traits.\n` +
       `• Points Mapping: upload or remove category/trait/points CSV per collection.\n` +
@@ -4866,12 +5085,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const collections = await getHolderCollections(interaction.guild.id);
-        const normalizedInputAddr = normalizeEthAddress(collectionInput);
-        const selected = collections.find((c) => {
-          const byAddress = normalizedInputAddr && String(c.contract_address).toLowerCase() === normalizedInputAddr;
-          const byName = String(c.name || '').trim().toLowerCase() === collectionInput.toLowerCase();
-          return byAddress || byName;
-        });
+        const selected = findHolderCollectionByInput(collections, collectionInput);
         if (!selected) {
           await interaction.editReply({
             content:
@@ -4895,15 +5109,15 @@ client.on('interactionCreate', async (interaction) => {
         try {
           const parsed = parsePointsMappingCsv(csvInput);
           const existingMappings = await getGuildPointMappings(interaction.guild.id);
-          const existingTable = existingMappings.get(String(selected.contract_address).toLowerCase()) || {};
+          const existingTable = getPointMappingForContract(existingMappings, selected.contract_address, selected.chain) || {};
           const merged = replaceMode
             ? { table: parsed.table, addedTraits: parsed.rowCount, updatedTraits: 0, totalCategories: parsed.categoryCount }
             : mergePointsMappingTables(existingTable, parsed.table);
-          await setGuildPointMapping(interaction.guild.id, selected.contract_address, merged.table, interaction.user.id);
+          await setGuildPointMapping(interaction.guild.id, selected.contract_address, merged.table, interaction.user.id, selected.chain);
           const updatedLine = replaceMode ? '' : `Traits updated: ${merged.updatedTraits}\n`;
           await interaction.editReply({
             content:
-              `Points mapping ${replaceMode ? 'replaced' : 'merged'} for **${selected.name}** (\`${selected.contract_address}\`).\n` +
+              `Points mapping ${replaceMode ? 'replaced' : 'merged'} for **${selected.name}** on **${nftChainLabel(selected.chain)}** (\`${selected.contract_address}\`).\n` +
               `Rows imported: ${parsed.rowCount}\n` +
               `${replaceMode ? 'Categories' : 'Total categories'}: ${merged.totalCategories}\n` +
               `${replaceMode ? 'Traits set' : 'Traits added'}: ${merged.addedTraits}\n` +
@@ -4935,16 +5149,14 @@ client.on('interactionCreate', async (interaction) => {
         const collectionInput = String(interaction.options.getString('collection', true) || '').trim();
         const collections = await getHolderCollections(interaction.guild.id);
         const mappings = await getGuildPointMappingsWithOwners(interaction.guild.id);
-        const normalizedInputAddr = normalizeEthAddress(collectionInput);
-        const selectedByName = collections.find((c) => {
-          const byAddress = normalizedInputAddr && String(c.contract_address).toLowerCase() === normalizedInputAddr;
-          const byName = String(c.name || '').trim().toLowerCase() === collectionInput.toLowerCase();
-          return byAddress || byName;
-        });
-        const selectedContract = normalizedInputAddr && mappings.find((m) => String(m.contractAddress).toLowerCase() === normalizedInputAddr)
-          ? normalizedInputAddr
-          : (selectedByName ? String(selectedByName.contract_address).toLowerCase() : null);
-        if (!selectedContract) {
+        const selectedByName = findHolderCollectionByInput(collections, collectionInput);
+        const parsedCollectionInput = parseChainAddressInput(collectionInput);
+        const selectedMapping = parsedCollectionInput
+          ? mappings.find((m) => m.chain === parsedCollectionInput.chain && String(m.contractAddress).toLowerCase() === parsedCollectionInput.contractAddress)
+          : null;
+        const selectedChain = selectedMapping?.chain || selectedByName?.chain || null;
+        const selectedContract = selectedMapping?.contractAddress || (selectedByName ? String(selectedByName.contract_address).toLowerCase() : null);
+        if (!selectedContract || !selectedChain) {
           await interaction.editReply({
             content:
               `No points mapping found for: \`${collectionInput}\`.\n` +
@@ -4953,7 +5165,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        const removed = await removeGuildPointMapping(interaction.guild.id, selectedContract, interaction.user.id);
+        const removed = await removeGuildPointMapping(interaction.guild.id, selectedContract, interaction.user.id, selectedChain);
         if (!removed.ok) {
           if (removed.reason === 'not_found') {
             await interaction.editReply({ content: 'No points mapping exists for that collection.' });
@@ -4973,7 +5185,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.editReply({
-          content: `Points mapping removed for **${selectedByName?.name || labelForContract(selectedContract)}** (\`${selectedContract}\`).`
+          content: `Points mapping removed for **${selectedByName?.name || labelForContract(selectedContract, selectedChain)}** on **${nftChainLabel(selectedChain)}** (\`${selectedContract}\`).`
         });
         return;
       }
@@ -5890,8 +6102,8 @@ client.on('interactionCreate', async (interaction) => {
         }
         const options = collections.slice(0, 25).map((c) => ({
           label: String(c.name).slice(0, 100),
-          value: c.contract_address,
-          description: String(c.contract_address).slice(0, 100),
+          value: collectionSelectValue(c.chain, c.contract_address),
+          description: `${nftChainLabel(c.chain)} ${c.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -5990,7 +6202,7 @@ client.on('interactionCreate', async (interaction) => {
         } catch {}
 
         const collectionLines = collectionCounts.length
-          ? collectionCounts.map((x) => `• ${x.name}: **${x.count}** NFT${x.count === 1 ? '' : 's'}`).join('\n')
+          ? collectionCounts.map((x) => `• ${x.name} (${nftChainLabel(x.chain)}): **${x.count}** NFT${x.count === 1 ? '' : 's'}`).join('\n')
           : '• No connected collections found.';
         const penaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
           ? `\nUnverified wallet dock: **-${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM**`
@@ -6048,11 +6260,11 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         const key = `${interaction.guild.id}:${interaction.user.id}`;
-        globalThis.__PENDING_HOLDER_RULES.set(key, { contractAddress: null, collectionName: null, minTokens: null, maxTokens: null, createdAt: Date.now() });
+        globalThis.__PENDING_HOLDER_RULES.set(key, { chain: DEFAULT_NFT_CHAIN, contractAddress: null, collectionName: null, minTokens: null, maxTokens: null, createdAt: Date.now() });
         const options = collections.slice(0, 25).map((c) => ({
           label: String(c.name).slice(0, 100),
-          value: c.contract_address,
-          description: String(c.contract_address).slice(0, 100),
+          value: collectionSelectValue(c.chain, c.contract_address),
+          description: `${nftChainLabel(c.chain)} ${c.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -6086,6 +6298,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         const key = `${interaction.guild.id}:${interaction.user.id}`;
         globalThis.__PENDING_TRAIT_ROLE_RULES.set(key, {
+          chain: DEFAULT_NFT_CHAIN,
           contractAddress: null,
           collectionName: null,
           traitCategory: null,
@@ -6094,8 +6307,8 @@ client.on('interactionCreate', async (interaction) => {
         });
         const options = collections.slice(0, 25).map((c) => ({
           label: String(c.name).slice(0, 100),
-          value: c.contract_address,
-          description: String(c.contract_address).slice(0, 100),
+          value: collectionSelectValue(c.chain, c.contract_address),
+          description: `${nftChainLabel(c.chain)} ${c.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -6121,6 +6334,9 @@ client.on('interactionCreate', async (interaction) => {
             new TextInputBuilder().setCustomId('collection_name').setLabel('Collection name').setRequired(true).setStyle(TextInputStyle.Short)
           ),
           new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('chain').setLabel('Chain: ethereum, base, or abstract').setRequired(false).setPlaceholder('ethereum').setStyle(TextInputStyle.Short)
+          ),
+          new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)
           ),
         );
@@ -6143,8 +6359,8 @@ client.on('interactionCreate', async (interaction) => {
         }
         const options = collections.slice(0, 25).map((c) => ({
           label: String(c.name).slice(0, 100),
-          value: c.contract_address,
-          description: String(c.contract_address).slice(0, 100),
+          value: collectionSelectValue(c.chain, c.contract_address),
+          description: `${nftChainLabel(c.chain)} ${c.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -6179,7 +6395,7 @@ client.on('interactionCreate', async (interaction) => {
         const options = traitRules.slice(0, 25).map((r) => ({
           label: `${r.role_name} (${r.trait_category || 'any'}:${r.trait_value})`.slice(0, 100),
           value: String(r.id),
-          description: String(r.contract_address).slice(0, 100),
+          description: `${nftChainLabel(r.chain)} ${r.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -6196,6 +6412,9 @@ client.on('interactionCreate', async (interaction) => {
         modal.addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('collection_name').setLabel('Collection name').setRequired(true).setStyle(TextInputStyle.Short)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('chain').setLabel('Chain: ethereum, base, or abstract').setRequired(false).setPlaceholder('ethereum').setStyle(TextInputStyle.Short)
           ),
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('contract_address').setLabel('Contract address').setRequired(true).setStyle(TextInputStyle.Short)
@@ -6216,14 +6435,16 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         const collections = await getHolderCollections(interaction.guild.id);
-        const nameByContract = new Map(collections.map((c) => [String(c.contract_address).toLowerCase(), c.name]));
+        const nameByCollection = new Map(collections.map((c) => [collectionKey(c.chain, c.contract_address), c.name]));
         const options = mappings.slice(0, 25).map((m) => {
+          const chain = normalizeNftChain(m.chain) || DEFAULT_NFT_CHAIN;
           const addr = String(m.contractAddress).toLowerCase();
+          const key = collectionKey(chain, addr);
           const ownerLabel = m.createdByDiscordId ? `Owner: ${m.createdByDiscordId}` : 'Owner: legacy';
           return {
-            label: `${String(nameByContract.get(addr) || labelForContract(addr)).slice(0, 72)}`.slice(0, 100),
-            value: addr,
-            description: ownerLabel.slice(0, 100),
+            label: `${String(nameByCollection.get(key) || labelForContract(addr, chain)).slice(0, 72)}`.slice(0, 100),
+            value: collectionSelectValue(chain, addr),
+            description: `${nftChainLabel(chain)} - ${ownerLabel}`.slice(0, 100),
           };
         });
         const row = new ActionRowBuilder().addComponents(
@@ -6249,7 +6470,7 @@ client.on('interactionCreate', async (interaction) => {
         const options = rules.slice(0, 25).map((r) => ({
           label: `${r.role_name} (${r.min_tokens}-${r.max_tokens ?? '∞'})`.slice(0, 100),
           value: String(r.id),
-          description: String(r.contract_address).slice(0, 100),
+          description: `${nftChainLabel(r.chain)} ${r.contract_address}`.slice(0, 100),
         }));
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -6370,8 +6591,8 @@ client.on('interactionCreate', async (interaction) => {
         const rules = await getHolderRules(interaction.guild.id);
         const traitRules = await getTraitRoleRules(interaction.guild.id);
         const collections = await getHolderCollections(interaction.guild.id);
-        const mappings = await getGuildPointMappings(interaction.guild.id);
-        const mappingLines = [...mappings.keys()].map((c) => `- ${labelForContract(c)}: ${c}`);
+        const mappingOwners = await getGuildPointMappingsWithOwners(interaction.guild.id);
+        const mappingLines = mappingOwners.map((m) => `- ${labelForContract(m.contractAddress, m.chain)} (${nftChainLabel(m.chain)}): ${m.contractAddress}`);
         await interaction.reply({
           flags: 64,
           content:
@@ -6386,13 +6607,13 @@ client.on('interactionCreate', async (interaction) => {
             `- Payout Amount: ${settings?.payout_amount || 1}\n` +
             `- Claim Streak Bonus (legacy, unused): ${settings?.claim_streak_bonus || 0}\n\n` +
             `Collections (${collections.length}):\n` +
-            `${collections.map(c => `- ${c.name}: ${c.contract_address}`).join('\n') || '- none'}\n\n` +
-            `Points Mappings (${mappings.size}):\n` +
+            `${collections.map(c => `- ${c.name} (${nftChainLabel(c.chain)}): ${c.contract_address}`).join('\n') || '- none'}\n\n` +
+            `Points Mappings (${mappingOwners.length}):\n` +
             `${mappingLines.join('\n') || '- none'}\n\n` +
             `Rules (${rules.length}):\n` +
-            `${rules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}\n\n` +
+            `${rules.map(r => `- ${r.role_name}: ${nftChainLabel(r.chain)} ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}\n\n` +
             `Trait Rules (${traitRules.length}):\n` +
-            `${traitRules.map(r => `- ${r.role_name}: ${r.contract_address} (${r.trait_category || 'any'}:${r.trait_value})`).join('\n') || '- none'}`
+            `${traitRules.map(r => `- ${r.role_name}: ${nftChainLabel(r.chain)} ${r.contract_address} (${r.trait_category || 'any'}:${r.trait_value})`).join('\n') || '- none'}`
         });
         return;
       }
@@ -6417,13 +6638,14 @@ client.on('interactionCreate', async (interaction) => {
       }
       const role = await addHolderRule(interaction.guild, {
         roleId,
+        chain: pending.chain || DEFAULT_NFT_CHAIN,
         contractAddress: pending.contractAddress,
         minTokens: pending.minTokens,
         maxTokens: pending.maxTokens
       });
       globalThis.__PENDING_HOLDER_RULES.delete(key);
       await interaction.update({
-        content: `Rule added for role **${role.name}** on \`${pending.contractAddress}\` (${pending.minTokens}-${pending.maxTokens ?? '∞'}).`,
+        content: `Rule added for role **${role.name}** on **${nftChainLabel(pending.chain)}** \`${pending.contractAddress}\` (${pending.minTokens}-${pending.maxTokens ?? '∞'}).`,
         components: []
       });
       return;
@@ -6447,13 +6669,14 @@ client.on('interactionCreate', async (interaction) => {
       }
       const role = await addTraitRoleRule(interaction.guild, {
         roleId,
+        chain: pending.chain || DEFAULT_NFT_CHAIN,
         contractAddress: pending.contractAddress,
         traitCategory: pending.traitCategory,
         traitValue: pending.traitValue
       });
       globalThis.__PENDING_TRAIT_ROLE_RULES.delete(key);
       await interaction.update({
-        content: `Trait rule added for role **${role.name}** on \`${pending.contractAddress}\` (${pending.traitCategory || 'any'}:${pending.traitValue}).`,
+        content: `Trait rule added for role **${role.name}** on **${nftChainLabel(pending.chain)}** \`${pending.contractAddress}\` (${pending.traitCategory || 'any'}:${pending.traitValue}).`,
         components: []
       });
       return;
@@ -6531,7 +6754,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       const stats = await computeWalletStatsForPayout(interaction.guild.id, walletAddresses, 'per_up');
-      const byCollectionLines = (stats.byCollection || []).map((x) => `- ${labelForContract(x.contractAddress)}: ${x.count} NFT${x.count === 1 ? '' : 's'}`);
+      const byCollectionLines = (stats.byCollection || []).map((x) => `- ${labelForContract(x.contractAddress, x.chain)} (${nftChainLabel(x.chain)}): ${x.count} NFT${x.count === 1 ? '' : 's'}`);
       const mode = interaction.values?.[0] || 'all';
       let content = '';
       if (mode === 'by_collection') {
@@ -6550,17 +6773,19 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'verify_check_stats_collection_select') {
-      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
-      if (!contractAddress) {
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
         await interaction.update({ content: 'Invalid collection selection.', components: [] });
         return;
       }
+      const { chain, contractAddress } = selectedRef;
       const collections = await getHolderCollections(interaction.guild.id);
-      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      const selected = collections.find((c) => collectionKey(c.chain, c.contract_address) === collectionKey(chain, contractAddress));
       const key = `${interaction.guild.id}:${interaction.user.id}`;
       globalThis.__PENDING_CHECK_STATS.set(key, {
+        chain,
         contractAddress,
-        collectionName: selected?.name || labelForContract(contractAddress),
+        collectionName: selected?.name || labelForContract(contractAddress, chain),
         createdAt: Date.now(),
       });
       const modal = new ModalBuilder().setCustomId('verify_check_stats_modal').setTitle('Check NFT Stats');
@@ -6589,15 +6814,17 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({ content: 'No pending holder rule found. Click "Add Holder Role" again.', components: [] });
         return;
       }
-      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
-      if (!contractAddress) {
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
         await interaction.update({ content: 'Invalid collection selection.', components: [] });
         return;
       }
+      const { chain, contractAddress } = selectedRef;
       const collections = await getHolderCollections(interaction.guild.id);
-      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      const selected = collections.find((c) => collectionKey(c.chain, c.contract_address) === collectionKey(chain, contractAddress));
+      pending.chain = chain;
       pending.contractAddress = contractAddress;
-      pending.collectionName = selected?.name || labelForContract(contractAddress);
+      pending.collectionName = selected?.name || labelForContract(contractAddress, chain);
       globalThis.__PENDING_HOLDER_RULES.set(key, pending);
       const modal = new ModalBuilder().setCustomId('setup_add_rule_modal').setTitle('Set Token Range');
       modal.addComponents(
@@ -6619,15 +6846,17 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({ content: 'No pending trait role rule found. Click "Add Trait Role" again.', components: [] });
         return;
       }
-      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
-      if (!contractAddress) {
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
         await interaction.update({ content: 'Invalid collection selection.', components: [] });
         return;
       }
+      const { chain, contractAddress } = selectedRef;
       const collections = await getHolderCollections(interaction.guild.id);
-      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === contractAddress);
+      const selected = collections.find((c) => collectionKey(c.chain, c.contract_address) === collectionKey(chain, contractAddress));
+      pending.chain = chain;
       pending.contractAddress = contractAddress;
-      pending.collectionName = selected?.name || labelForContract(contractAddress);
+      pending.collectionName = selected?.name || labelForContract(contractAddress, chain);
       globalThis.__PENDING_TRAIT_ROLE_RULES.set(key, pending);
       const modal = new ModalBuilder().setCustomId('setup_add_trait_rule_modal').setTitle('Set Trait Role Rule');
       modal.addComponents(
@@ -6657,13 +6886,14 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
         return;
       }
-      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
-      if (!contractAddress) {
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
         await interaction.update({ content: 'Invalid collection selection.', components: [] });
         return;
       }
+      const { chain, contractAddress } = selectedRef;
       const key = `${interaction.guild.id}:${interaction.user.id}`;
-      globalThis.__PENDING_POINTS_MAPPING.set(key, { contractAddress, createdAt: Date.now() });
+      globalThis.__PENDING_POINTS_MAPPING.set(key, { chain, contractAddress, createdAt: Date.now() });
 
       const modal = new ModalBuilder().setCustomId('setup_points_mapping_modal').setTitle('Set Points Mapping CSV');
       modal.addComponents(
@@ -6695,7 +6925,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       await interaction.update({
-        content: `Removed holder rule: **${removed.role_name}** on \`${removed.contract_address}\` (${removed.min_tokens}-${removed.max_tokens ?? '∞'}).`,
+        content: `Removed holder rule: **${removed.role_name}** on **${nftChainLabel(removed.chain)}** \`${removed.contract_address}\` (${removed.min_tokens}-${removed.max_tokens ?? '∞'}).`,
         components: []
       });
       return;
@@ -6706,12 +6936,13 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
         return;
       }
-      const contractAddress = normalizeEthAddress(interaction.values?.[0] || '');
-      if (!contractAddress) {
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
         await interaction.update({ content: 'Invalid mapping selection.', components: [] });
         return;
       }
-      const removed = await removeGuildPointMapping(interaction.guild.id, contractAddress, interaction.user.id);
+      const { chain, contractAddress } = selectedRef;
+      const removed = await removeGuildPointMapping(interaction.guild.id, contractAddress, interaction.user.id, chain);
       if (!removed.ok) {
         if (removed.reason === 'not_found') {
           await interaction.update({ content: 'Mapping not found (it may already be removed).', components: [] });
@@ -6732,9 +6963,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const collections = await getHolderCollections(interaction.guild.id);
-      const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(contractAddress).toLowerCase());
+      const selected = collections.find((c) => collectionKey(c.chain, c.contract_address) === collectionKey(chain, contractAddress));
       await interaction.update({
-        content: `Removed points mapping for **${selected?.name || labelForContract(contractAddress)}** (\`${contractAddress}\`).`,
+        content: `Removed points mapping for **${selected?.name || labelForContract(contractAddress, chain)}** on **${nftChainLabel(chain)}** (\`${contractAddress}\`).`,
         components: []
       });
       return;
@@ -6756,7 +6987,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       await interaction.update({
-        content: `Removed trait rule: **${removed.role_name}** on \`${removed.contract_address}\` (${removed.trait_category || 'any'}:${removed.trait_value}).`,
+        content: `Removed trait rule: **${removed.role_name}** on **${nftChainLabel(removed.chain)}** \`${removed.contract_address}\` (${removed.trait_category || 'any'}:${removed.trait_value}).`,
         components: []
       });
       return;
@@ -7060,14 +7291,15 @@ client.on('interactionCreate', async (interaction) => {
         const key = `${interaction.guild.id}:${interaction.user.id}`;
         const pending = globalThis.__PENDING_CHECK_STATS.get(key) || null;
         globalThis.__PENDING_CHECK_STATS.delete(key);
+        const chain = normalizeNftChain(pending?.chain) || DEFAULT_NFT_CHAIN;
         const contractAddress = normalizeEthAddress(pending?.contractAddress || '') || SQUIGS_CONTRACT.toLowerCase();
         await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
         const pointsLabel = getPointsLabel(settings);
         const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
-        const table = hpTableForContract(contractAddress, guildPointMappings);
-        const meta = await getNftMetadataAlchemy(tokenId, contractAddress);
-        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress);
+        const table = hpTableForContract(contractAddress, guildPointMappings, chain);
+        const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
         const grouped = normalizeTraits(attrs);
         const hpAgg = computeHpFromTraits(grouped, table);
         const tier = hpToTierLabel(hpAgg.total || 0);
@@ -7076,9 +7308,10 @@ client.on('interactionCreate', async (interaction) => {
           contractAddress,
           tokenId,
           settings || {},
-          hpAgg.total || 0
+          hpAgg.total || 0,
+          chain
         );
-        const collectionName = String(pending?.collectionName || labelForContract(contractAddress));
+        const collectionName = String(pending?.collectionName || labelForContract(contractAddress, chain));
         const imageUrlRaw = String(
           meta?.image?.cachedUrl ||
           meta?.image?.pngUrl ||
@@ -7088,7 +7321,7 @@ client.on('interactionCreate', async (interaction) => {
         ).trim();
         const imageUrl = /^https?:\/\//i.test(imageUrlRaw)
           ? imageUrlRaw
-          : (contractAddress === SQUIGS_CONTRACT.toLowerCase()
+          : (chain === DEFAULT_NFT_CHAIN && contractAddress === SQUIGS_CONTRACT.toLowerCase()
             ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`
             : null);
 
@@ -7107,6 +7340,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         const desc =
           `Collection: **${collectionName}**\n` +
+          `Chain: **${nftChainLabel(chain)}**\n` +
           `Contract: \`${contractAddress}\`\n` +
           `Total ${pointsLabel}: **${hpAgg.total || 0}**\n` +
           `Claimable $CHARM: **${nftClaimState.claimableAmount}**\n` +
@@ -7153,7 +7387,7 @@ client.on('interactionCreate', async (interaction) => {
             .setMaxValues(1)
         );
         await interaction.reply({
-          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`) with range ${minTokens}-${maxTokens ?? '∞'}:`,
+          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress, pending.chain)}** on **${nftChainLabel(pending.chain)}** (\`${pending.contractAddress}\`) with range ${minTokens}-${maxTokens ?? '∞'}:`,
           components: [row],
           flags: 64
         });
@@ -7176,7 +7410,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
-        const table = hpTableForContract(pending.contractAddress, guildPointMappings);
+        const table = hpTableForContract(pending.contractAddress, guildPointMappings, pending.chain);
         const matched = findMatchingTraitDefinition(table, traitCategoryRaw, traitValueRaw);
         if (!matched) {
           await interaction.reply({
@@ -7199,7 +7433,7 @@ client.on('interactionCreate', async (interaction) => {
             .setMaxValues(1)
         );
         await interaction.reply({
-          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`) when a user owns trait ${matched.category}:${matched.trait}:`,
+          content: `Now select which role should be assigned for **${pending.collectionName || labelForContract(pending.contractAddress, pending.chain)}** on **${nftChainLabel(pending.chain)}** (\`${pending.contractAddress}\`) when a user owns trait ${matched.category}:${matched.trait}:`,
           components: [row],
           flags: 64
         });
@@ -7208,17 +7442,26 @@ client.on('interactionCreate', async (interaction) => {
 
       if (interaction.customId === 'setup_add_collection_modal') {
         const name = String(interaction.fields.getTextInputValue('collection_name') || '').trim();
+        let chainInput = DEFAULT_NFT_CHAIN;
+        try {
+          chainInput = String(interaction.fields.getTextInputValue('chain') || DEFAULT_NFT_CHAIN).trim();
+        } catch {}
+        const chain = normalizeNftChain(chainInput);
         const contractAddress = normalizeEthAddress(interaction.fields.getTextInputValue('contract_address'));
         if (!name) {
           await interaction.reply({ content: 'Collection name is required.', flags: 64 });
+          return;
+        }
+        if (!chain) {
+          await interaction.reply({ content: 'Invalid chain. Use ethereum, base, or abstract.', flags: 64 });
           return;
         }
         if (!contractAddress) {
           await interaction.reply({ content: 'Invalid contract address.', flags: 64 });
           return;
         }
-        await upsertHolderCollection(interaction.guild.id, name, contractAddress);
-        await interaction.reply({ content: `Collection saved: **${name}** (\`${contractAddress}\`)`, flags: 64 });
+        await upsertHolderCollection(interaction.guild.id, name, contractAddress, chain);
+        await interaction.reply({ content: `Collection saved: **${name}** on **${nftChainLabel(chain)}** (\`${contractAddress}\`)`, flags: 64 });
         return;
       }
 
@@ -7252,15 +7495,15 @@ client.on('interactionCreate', async (interaction) => {
         try {
           const parsed = parsePointsMappingCsv(csvInput);
           const existingMappings = await getGuildPointMappings(interaction.guild.id);
-          const existingTable = existingMappings.get(String(pending.contractAddress).toLowerCase()) || {};
+          const existingTable = getPointMappingForContract(existingMappings, pending.contractAddress, pending.chain) || {};
           const merged = mergePointsMappingTables(existingTable, parsed.table);
-          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, merged.table, interaction.user.id);
+          await setGuildPointMapping(interaction.guild.id, pending.contractAddress, merged.table, interaction.user.id, pending.chain);
           globalThis.__PENDING_POINTS_MAPPING.delete(key);
           const collections = await getHolderCollections(interaction.guild.id);
-          const selected = collections.find((c) => String(c.contract_address).toLowerCase() === String(pending.contractAddress).toLowerCase());
+          const selected = collections.find((c) => collectionKey(c.chain, c.contract_address) === collectionKey(pending.chain, pending.contractAddress));
           await interaction.editReply({
             content:
-              `Points mapping merged for **${selected?.name || labelForContract(pending.contractAddress)}** (\`${pending.contractAddress}\`).\n` +
+              `Points mapping merged for **${selected?.name || labelForContract(pending.contractAddress, pending.chain)}** on **${nftChainLabel(pending.chain)}** (\`${pending.contractAddress}\`).\n` +
               `Rows imported: ${parsed.rowCount}\n` +
               `Total categories: ${merged.totalCategories}\n` +
               `Traits added: ${merged.addedTraits}\n` +
@@ -7378,11 +7621,12 @@ client.on('messageCreate', async (message) => {
 // ===== LOGIN =====
 client.login(DISCORD_TOKEN);
 // ===== Helper funcs (metadata) =====
-async function getNftMetadataAlchemy(tokenId, contractAddress = SQUIGS_CONTRACT) {
-  const url =
-    `https://eth-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_API_KEY}/getNFTMetadata` +
-    `?contractAddress=${contractAddress}&tokenId=${tokenId}&refreshCache=false`;
-  const res = await fetchWithRetry(url, 3, 800, { timeout: 10000 });
+async function getNftMetadataAlchemy(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  const u = new URL(alchemyNftUrl(chain, 'getNFTMetadata'));
+  u.searchParams.set('contractAddress', contractAddress);
+  u.searchParams.set('tokenId', tokenId);
+  u.searchParams.set('refreshCache', 'false');
+  const res = await fetchWithRetry(u.toString(), 3, 800, { timeout: 10000 });
   return res.json();
 }
 
@@ -7467,7 +7711,7 @@ async function isSquigMintedStrict(tokenId) {
 }
 
 // -------- flexible trait extraction with OpenSea fallback --------
-async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_CONTRACT) {
+async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
   // 1) Try Alchemy
   const attrsA = extractAttributesFlexible(alchemyMeta);
   if (attrsA.length > 0) {
@@ -7477,7 +7721,7 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
   // 2) Fallback to OpenSea if we have an API key
   if (OPENSEA_API_KEY) {
     try {
-      const attrsB = await fetchOpenSeaTraits(tokenId, contractAddress);
+      const attrsB = await fetchOpenSeaTraits(tokenId, contractAddress, chain);
       if (attrsB.length > 0) {
         console.log(`ℹ️ Traits from OpenSea fallback for #${tokenId}: ${attrsB.length}`);
         return { attrs: attrsB, source: 'opensea' };
@@ -7545,8 +7789,9 @@ function validAttrFilter(t) {
 }
 
 // OpenSea v2: fallback trait fetch (with headers + small retry)
-async function fetchOpenSeaTraits(tokenId, contractAddress = SQUIGS_CONTRACT) {
-  const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}/nfts/${tokenId}`;
+async function fetchOpenSeaTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  const cfg = nftChainConfig(chain);
+  const url = `https://api.opensea.io/api/v2/chain/${cfg.openseaChain}/contract/${contractAddress}/nfts/${tokenId}`;
   const headers = { 'X-API-KEY': OPENSEA_API_KEY };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -7977,12 +8222,13 @@ const HP_TABLE = {
 const UGLY_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'ugly_up.csv'));
 const MONSTER_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'monster_up.csv'));
 
-function hpTableForContract(contractAddress, guildPointMappings = null) {
+function hpTableForContract(contractAddress, guildPointMappings = null, chain = DEFAULT_NFT_CHAIN) {
   const c = String(contractAddress || '').toLowerCase();
-  const guildMap = guildPointMappings instanceof Map ? guildPointMappings.get(c) : null;
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const guildMap = getPointMappingForContract(guildPointMappings, c, normalizedChain);
   if (guildMap && typeof guildMap === 'object' && Object.keys(guildMap).length > 0) return guildMap;
-  if (c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
-  if (c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
   return HP_TABLE;
 }
 
