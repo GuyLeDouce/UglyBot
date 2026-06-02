@@ -113,6 +113,15 @@ const CHARM_REWARD_CHANCE = 100; // 1 in 200
 const CHARM_REWARDS = [150, 200, 350, 200]; // Weighted pool
 const SUPPORT_TICKET_CHANNEL_ID = '1324090267699122258';
 const ADMIN_LOG_CHANNEL_ID = '1477463175665287410';
+const DAILY_HOLDER_REFRESH_ENABLED = String(process.env.DAILY_HOLDER_REFRESH_ENABLED || 'true').toLowerCase() !== 'false';
+const DAILY_HOLDER_REFRESH_INTERVAL_MS = Math.max(
+  60 * 60 * 1000,
+  Number(process.env.DAILY_HOLDER_REFRESH_INTERVAL_HOURS || 24) * 60 * 60 * 1000
+);
+const DAILY_HOLDER_REFRESH_START_DELAY_MS = Math.max(
+  0,
+  Number(process.env.DAILY_HOLDER_REFRESH_START_DELAY_MINUTES ?? 5) * 60 * 1000
+);
 
 // ===== CLIENT =====
 const client = new Client({
@@ -454,6 +463,22 @@ async function getWalletLinks(guildId, discordId) {
   return rows;
 }
 
+async function getWalletLinkOwners() {
+  const { rows } = await holdersPool.query(
+    `SELECT guild_id, discord_id, COUNT(*) AS wallet_count
+     FROM wallet_links
+     WHERE wallet_address IS NOT NULL
+       AND NULLIF(TRIM(wallet_address), '') IS NOT NULL
+     GROUP BY guild_id, discord_id
+     ORDER BY guild_id ASC, discord_id ASC`
+  );
+  return rows.map((row) => ({
+    guildId: String(row.guild_id || '').trim(),
+    discordId: String(row.discord_id || '').trim(),
+    walletCount: Number(row.wallet_count || 0),
+  })).filter((row) => row.guildId && row.discordId);
+}
+
 async function getWalletOwnerLink(guildId, walletAddress) {
   const { rows } = await holdersPool.query(
     `SELECT discord_id, verified, drip_member_id, created_at, updated_at
@@ -656,6 +681,10 @@ function buildSlashCommands() {
       .setDescription('Admin: check verification and reward system health for this server')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('refresh')
+      .setDescription('Admin: immediately refresh all connected wallet verification and holder roles')
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('paytest')
       .setDescription('Admin: send a DRIP payout test using the live reward transfer flow')
       .addStringOption((opt) =>
@@ -777,6 +806,7 @@ client.once(Events.ClientReady, async (c) => {
     console.error('Slash register error:', e.message);
   }
   startMarketplaceRaffleProcessor();
+  startDailyHolderVerificationRefresh();
   if (String(process.env.PORTAL_AUTO_START || '').toLowerCase() === 'true') {
     try {
       portalEvent.startPortalScheduler({
@@ -3632,7 +3662,10 @@ async function handleDripStatusCheck(interaction) {
   });
 }
 
-async function refreshLinkedWalletVerification(guild, guildId, discordId, links, settings) {
+async function refreshLinkedWalletVerification(guild, guildId, discordId, links, settings, options = {}) {
+  const context = options.context || 'wallet refresh';
+  const logDripFailures = options.logDripFailures !== false;
+
   if (!settings?.drip_api_key || !settings?.drip_realm_id) {
     return {
       checked: false,
@@ -3680,15 +3713,17 @@ async function refreshLinkedWalletVerification(guild, guildId, discordId, links,
     if (!normalizeEthAddress(check.walletAddress)) continue;
 
     if (check.temporaryUnavailable) {
-      await postAdminSystemLog({
-        guild,
-        category: 'DRIP Failure',
-        message:
-          `User: <@${discordId}>\n` +
-          `Context: wallet refresh\n` +
-          `Wallet: \`${check.walletAddress}\`\n` +
-          `Reason: ${String(check.reason || '').slice(0, 500)}`
-      });
+      if (logDripFailures) {
+        await postAdminSystemLog({
+          guild,
+          category: 'DRIP Failure',
+          message:
+            `User: <@${discordId}>\n` +
+            `Context: ${context}\n` +
+            `Wallet: \`${check.walletAddress}\`\n` +
+            `Reason: ${String(check.reason || '').slice(0, 500)}`
+        });
+      }
       continue;
     }
 
@@ -3783,6 +3818,171 @@ async function handleVerificationRefresh(interaction) {
       `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
       `New roles added:\n${formatGrantedRolesForUser(sync.granted)}`
   });
+}
+
+let dailyHolderRefreshInterval = null;
+let dailyHolderRefreshTimeout = null;
+let dailyHolderRefreshRunning = false;
+
+async function refreshLinkedHolderOwner(owner) {
+  const guildId = String(owner?.guildId || '').trim();
+  const discordId = String(owner?.discordId || '').trim();
+  if (!guildId || !discordId) {
+    return { ok: false, skipped: true, reason: 'invalid owner row' };
+  }
+
+  const guild = await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) {
+    return { ok: false, skipped: true, reason: 'guild unavailable' };
+  }
+
+  const member = await guild.members.fetch(discordId).catch(() => null);
+  if (!member) {
+    return { ok: false, skipped: true, guildId, discordId, reason: 'member unavailable' };
+  }
+
+  const [settings, links] = await Promise.all([
+    getGuildSettings(guildId),
+    getWalletLinks(guildId, discordId),
+  ]);
+  if (!links.length) {
+    return { ok: true, skipped: true, guildId, discordId, reason: 'no linked wallets' };
+  }
+
+  const verification = await refreshLinkedWalletVerification(
+    guild,
+    guildId,
+    discordId,
+    links,
+    settings || {},
+    {
+      context: 'daily holder refresh',
+      logDripFailures: false,
+    }
+  );
+  const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
+  const sync = await syncHolderRoles(member, walletAddresses);
+  await postRoleSyncFailures(guild, discordId, sync, 'daily holder refresh');
+
+  return {
+    ok: true,
+    skipped: false,
+    guildId,
+    discordId,
+    walletCount: walletAddresses.length,
+    checkedWalletCount: verification.checks.length,
+    unavailableWalletCount: verification.checks.filter((x) => x.temporaryUnavailable).length,
+    roleChanges: sync.changed || 0,
+    rolesGranted: Array.isArray(sync.granted) ? sync.granted.length : 0,
+  };
+}
+
+async function runDailyHolderVerificationRefresh() {
+  if (dailyHolderRefreshRunning) {
+    const message = 'Daily holder verification refresh skipped: previous run still active.';
+    console.log(message);
+    return { ok: false, skipped: true, message };
+  }
+
+  dailyHolderRefreshRunning = true;
+  const startedAt = Date.now();
+  const summary = {
+    owners: 0,
+    processed: 0,
+    skipped: 0,
+    failed: 0,
+    walletCount: 0,
+    checkedWalletCount: 0,
+    unavailableWalletCount: 0,
+    roleChanges: 0,
+    rolesGranted: 0,
+    failures: [],
+  };
+
+  try {
+    const owners = await getWalletLinkOwners();
+    summary.owners = owners.length;
+
+    await mapLimit(owners, 1, async (owner) => {
+      try {
+        const result = await refreshLinkedHolderOwner(owner);
+        if (result.skipped) {
+          summary.skipped++;
+          return;
+        }
+        summary.processed++;
+        summary.walletCount += Number(result.walletCount || 0);
+        summary.checkedWalletCount += Number(result.checkedWalletCount || 0);
+        summary.unavailableWalletCount += Number(result.unavailableWalletCount || 0);
+        summary.roleChanges += Number(result.roleChanges || 0);
+        summary.rolesGranted += Number(result.rolesGranted || 0);
+      } catch (err) {
+        summary.failed++;
+        if (summary.failures.length < 10) {
+          summary.failures.push(
+            `${owner.guildId}/${owner.discordId}: ${String(err?.message || err || '').slice(0, 180)}`
+          );
+        }
+      }
+    });
+
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    const message =
+      `Daily holder verification refresh complete.\n` +
+      `Owners found: ${summary.owners}\n` +
+      `Processed: ${summary.processed}\n` +
+      `Skipped: ${summary.skipped}\n` +
+      `Failed: ${summary.failed}\n` +
+      `Linked wallets scanned: ${summary.walletCount}\n` +
+      `DRIP checks attempted: ${summary.checkedWalletCount}\n` +
+      `DRIP temporarily unavailable: ${summary.unavailableWalletCount}\n` +
+      `Role changes: ${summary.roleChanges}\n` +
+      `Roles granted: ${summary.rolesGranted}\n` +
+      `Elapsed: ${elapsedSeconds}s` +
+      `${summary.failures.length ? `\nFailures:\n${summary.failures.map((line) => `- ${line}`).join('\n')}` : ''}`;
+
+    console.log(message);
+    await postAdminSystemLog({
+      category: 'Daily Holder Refresh',
+      message,
+    });
+    return { ok: true, skipped: false, message, summary };
+  } catch (err) {
+    const message = `Daily holder verification refresh failed: ${String(err?.message || err || '').slice(0, 500)}`;
+    console.warn(message);
+    await postAdminSystemLog({
+      category: 'Daily Holder Refresh',
+      message,
+    });
+    return { ok: false, skipped: false, message, summary, error: err };
+  } finally {
+    dailyHolderRefreshRunning = false;
+  }
+}
+
+function startDailyHolderVerificationRefresh() {
+  if (!DAILY_HOLDER_REFRESH_ENABLED) {
+    console.log('Daily holder verification refresh disabled.');
+    return;
+  }
+  if (dailyHolderRefreshInterval || dailyHolderRefreshTimeout) {
+    return;
+  }
+
+  const run = () => runDailyHolderVerificationRefresh().catch((err) => {
+    console.warn('Daily holder verification refresh error:', String(err?.message || err || ''));
+  });
+
+  dailyHolderRefreshTimeout = setTimeout(() => {
+    dailyHolderRefreshTimeout = null;
+    run();
+  }, DAILY_HOLDER_REFRESH_START_DELAY_MS);
+  dailyHolderRefreshInterval = setInterval(run, DAILY_HOLDER_REFRESH_INTERVAL_MS);
+
+  console.log(
+    `Daily holder verification refresh scheduled every ${Math.round(DAILY_HOLDER_REFRESH_INTERVAL_MS / (60 * 60 * 1000))} hour(s), ` +
+    `first run in ${Math.round(DAILY_HOLDER_REFRESH_START_DELAY_MS / 60000)} minute(s).`
+  );
 }
 
 async function awardDripPointsProjectFallback(realmId, memberIds, tokens, currencyId, settings) {
@@ -5060,6 +5260,21 @@ client.on('interactionCreate', async (interaction) => {
             `- Trait rules: ${traitRules.length}\n` +
             `- Missing roles: ${missingRoles.length ? missingRoles.join(', ') : 'none'}\n` +
             `- Unmanageable roles: ${blockedRoles.length ? blockedRoles.join(', ') : 'none'}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'refresh') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+        const result = await runDailyHolderVerificationRefresh();
+        await interaction.editReply({
+          content:
+            `${result?.ok ? 'Refresh complete.' : 'Refresh did not complete.'}\n` +
+            `${String(result?.message || 'No refresh summary was returned.').slice(0, 1800)}`
         });
         return;
       }
