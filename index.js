@@ -443,6 +443,28 @@ async function ensureClaimsSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await claimsPool.query(`
+    CREATE TABLE IF NOT EXISTS claim_attempt_nfts (
+      id BIGSERIAL PRIMARY KEY,
+      claim_attempt_id TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      discord_id TEXT NOT NULL,
+      chain TEXT NOT NULL DEFAULT 'ethereum',
+      contract_address TEXT NOT NULL,
+      token_id TEXT NOT NULL,
+      wallet_address TEXT,
+      payout_type TEXT NOT NULL,
+      unit_value NUMERIC NOT NULL DEFAULT 0,
+      payout_amount NUMERIC NOT NULL DEFAULT 0,
+      claimable_amount NUMERIC NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      transfer_succeeded_at TIMESTAMPTZ,
+      recorded_at TIMESTAMPTZ
+    );
+  `);
+  await claimsPool.query(`CREATE INDEX IF NOT EXISTS claim_attempt_nfts_lookup_idx ON claim_attempt_nfts (guild_id, chain, contract_address, token_id, status, created_at);`);
+  await claimsPool.query(`CREATE INDEX IF NOT EXISTS claim_attempt_nfts_attempt_idx ON claim_attempt_nfts (claim_attempt_id);`);
   console.log(`✅ claims schema ready (${DATABASE_URL_CLAIMS ? 'DATABASE_URL_CLAIMS' : 'holders database fallback'})`);
 }
 
@@ -2766,6 +2788,47 @@ async function computeDailyRewardQuote(guildId, links, settings) {
   };
 }
 
+async function getRewardHealthSummary(guildId, settings = null) {
+  const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
+  const payoutAmount = Number(settings?.payout_amount || 0);
+  const rules = await getHolderRules(guildId);
+  const guildPointMappings = await getGuildPointMappings(guildId);
+  const earningContracts = new Map();
+
+  for (const r of rules) {
+    const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
+    const contractAddress = normalizeEthAddress(r.contract_address);
+    const key = collectionKey(chain, contractAddress);
+    if (!key || earningContracts.has(key)) continue;
+    const table = hpTableForContract(contractAddress, guildPointMappings, chain);
+    const hasScoringTable = Boolean(table && Object.keys(table).length > 0);
+    const hasCustomMapping = Boolean(getPointMappingForContract(guildPointMappings, contractAddress, chain));
+    earningContracts.set(key, {
+      chain,
+      contractAddress,
+      label: labelForContract(contractAddress, chain),
+      hasScoringTable,
+      hasCustomMapping,
+      ruleCount: 0,
+    });
+  }
+
+  for (const r of rules) {
+    const key = collectionKey(r.chain, r.contract_address);
+    if (key && earningContracts.has(key)) earningContracts.get(key).ruleCount += 1;
+  }
+
+  const contracts = [...earningContracts.values()];
+  return {
+    payoutType,
+    payoutAmount,
+    holderRuleCount: rules.length,
+    earningContracts: contracts,
+    scorableContracts: contracts.filter((c) => c.hasScoringTable),
+    unscoredContracts: contracts.filter((c) => !c.hasScoringTable),
+  };
+}
+
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 function nftClaimKey(chain, contractAddress, tokenId) {
@@ -2806,6 +2869,33 @@ function formatElapsedTimeSimple(ms) {
   return `${totalYears} year${totalYears === 1 ? '' : 's'}`;
 }
 
+function calculatePassiveClaimTotals(nftEntries, payoutAmount) {
+  let totalUnits = 0;
+  let baseAmount = 0;
+  let unverifiedPenaltyAmount = 0;
+  let rawClaimableAmount = 0;
+
+  for (const entry of (Array.isArray(nftEntries) ? nftEntries : [])) {
+    const elapsedMs = Math.max(0, Number(entry.elapsedMs || 0));
+    const unitValue = Number(entry.unitValue || 0);
+    const fullAmount = (elapsedMs / DAY_IN_MS) * unitValue * Number(payoutAmount || 0);
+    const walletPenalty = entry.verified ? 0 : fullAmount * 0.5;
+    const claimableForNft = fullAmount - walletPenalty;
+    entry.claimableAmount = claimableForNft;
+    totalUnits += unitValue;
+    baseAmount += fullAmount;
+    unverifiedPenaltyAmount += walletPenalty;
+    rawClaimableAmount += claimableForNft;
+  }
+
+  return {
+    totalUnits,
+    baseAmount: Math.max(0, Math.floor(baseAmount)),
+    unverifiedPenaltyAmount: Math.max(0, Math.floor(unverifiedPenaltyAmount)),
+    claimableAmount: Math.max(0, Math.floor(rawClaimableAmount)),
+  };
+}
+
 async function getStoredNftClaimStates(guildId, nftEntries) {
   const tokenIdsByContract = new Map();
   for (const entry of nftEntries) {
@@ -2823,9 +2913,37 @@ async function getStoredNftClaimStates(guildId, nftEntries) {
   await Promise.all(
     [...tokenIdsByContract.values()].map(async ({ chain, contractAddress, tokenIds }) => {
       const { rows } = await claimsPool.query(
-        `SELECT COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, token_id, last_claimed_at
-         FROM nft_claims
-         WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = ANY($4::TEXT[])`,
+        `WITH normal_claims AS (
+           SELECT
+             COALESCE(NULLIF(chain, ''), 'ethereum') AS chain,
+             contract_address,
+             token_id,
+             last_claimed_at
+           FROM nft_claims
+           WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = ANY($4::TEXT[])
+         ),
+         completed_attempts AS (
+           SELECT
+             COALESCE(NULLIF(chain, ''), 'ethereum') AS chain,
+             contract_address,
+             token_id,
+             MAX(transfer_succeeded_at) AS last_claimed_at
+           FROM claim_attempt_nfts
+           WHERE guild_id = $1
+             AND chain = $2
+             AND contract_address = $3
+             AND token_id = ANY($4::TEXT[])
+             AND status IN ('transfer_succeeded', 'recorded')
+             AND transfer_succeeded_at IS NOT NULL
+           GROUP BY COALESCE(NULLIF(chain, ''), 'ethereum'), contract_address, token_id
+         )
+         SELECT chain, contract_address, token_id, MAX(last_claimed_at) AS last_claimed_at
+         FROM (
+           SELECT * FROM normal_claims
+           UNION ALL
+           SELECT * FROM completed_attempts
+         ) s
+         GROUP BY chain, contract_address, token_id`,
         [guildId, chain, contractAddress, [...new Set(tokenIds)]]
       );
       for (const row of rows) {
@@ -2834,6 +2952,70 @@ async function getStoredNftClaimStates(guildId, nftEntries) {
     })
   );
   return out;
+}
+
+function createClaimAttemptId() {
+  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+}
+
+async function createPassiveClaimAttempt(guildId, discordId, rewardQuote) {
+  const claimAttemptId = createClaimAttemptId();
+  const createdAt = new Date();
+  await Promise.all(
+    rewardQuote.nftEntries.map((entry) =>
+      claimsPool.query(
+        `INSERT INTO claim_attempt_nfts (
+           claim_attempt_id, guild_id, discord_id, chain, contract_address, token_id, wallet_address,
+           payout_type, unit_value, payout_amount, claimable_amount, status, created_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12)`,
+        [
+          claimAttemptId,
+          guildId,
+          discordId,
+          normalizeNftChain(entry.chain) || DEFAULT_NFT_CHAIN,
+          entry.contractAddress,
+          entry.tokenId,
+          entry.walletAddress || null,
+          rewardQuote.payoutType,
+          Number(entry.unitValue || 0),
+          Number(rewardQuote.payoutAmount || 0),
+          Number(entry.claimableAmount || 0),
+          createdAt.toISOString(),
+        ]
+      )
+    )
+  );
+  return claimAttemptId;
+}
+
+async function markPassiveClaimAttemptTransferSucceeded(claimAttemptId) {
+  await claimsPool.query(
+    `UPDATE claim_attempt_nfts
+     SET status = 'transfer_succeeded',
+         transfer_succeeded_at = NOW()
+     WHERE claim_attempt_id = $1 AND status = 'pending'`,
+    [claimAttemptId]
+  );
+}
+
+async function markPassiveClaimAttemptRecorded(claimAttemptId) {
+  await claimsPool.query(
+    `UPDATE claim_attempt_nfts
+     SET status = 'recorded',
+         recorded_at = NOW()
+     WHERE claim_attempt_id = $1 AND status IN ('pending', 'transfer_succeeded')`,
+    [claimAttemptId]
+  );
+}
+
+async function markPassiveClaimAttemptFailed(claimAttemptId, status = 'failed') {
+  await claimsPool.query(
+    `UPDATE claim_attempt_nfts
+     SET status = $2
+     WHERE claim_attempt_id = $1 AND status = 'pending'`,
+    [claimAttemptId, status]
+  );
 }
 
 async function getPassiveClaimQuote(guildId, links, settings) {
@@ -2944,10 +3126,6 @@ async function getPassiveClaimQuote(guildId, links, settings) {
 
   const stateByNft = await getStoredNftClaimStates(guildId, eligibleNftEntries);
   const now = new Date();
-  let totalUnits = 0;
-  let baseAmount = 0;
-  let unverifiedPenaltyAmount = 0;
-  let rawClaimableAmount = 0;
 
   for (const entry of eligibleNftEntries) {
     const state = stateByNft.get(nftClaimKey(entry.chain, entry.contractAddress, entry.tokenId));
@@ -2956,27 +3134,19 @@ async function getPassiveClaimQuote(guildId, links, settings) {
       lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
     }
     const elapsedMs = Math.max(0, now.getTime() - lastClaimedAt.getTime());
-    const unitValue = Number(entry.unitValue || 0);
-    const fullAmount = (elapsedMs / DAY_IN_MS) * unitValue * payoutAmount;
-    const walletPenalty = entry.verified ? 0 : fullAmount * 0.5;
-    const claimableForNft = fullAmount - walletPenalty;
     entry.elapsedMs = elapsedMs;
-    entry.claimableAmount = claimableForNft;
-    totalUnits += unitValue;
-    baseAmount += fullAmount;
-    unverifiedPenaltyAmount += walletPenalty;
-    rawClaimableAmount += claimableForNft;
   }
+  const totals = calculatePassiveClaimTotals(eligibleNftEntries, payoutAmount);
 
   return {
     payoutType,
     payoutAmount,
     nftEntries: eligibleNftEntries,
     totalNfts: eligibleNftEntries.length,
-    totalUnits,
-    baseAmount: Math.max(0, Math.floor(baseAmount)),
-    unverifiedPenaltyAmount: Math.max(0, Math.floor(unverifiedPenaltyAmount)),
-    claimableAmount: Math.max(0, Math.floor(rawClaimableAmount)),
+    totalUnits: totals.totalUnits,
+    baseAmount: totals.baseAmount,
+    unverifiedPenaltyAmount: totals.unverifiedPenaltyAmount,
+    claimableAmount: totals.claimableAmount,
   };
 }
 
@@ -4715,6 +4885,8 @@ async function handleClaim(interaction) {
     return;
   }
 
+  let claimAttemptId = null;
+  let claimTransferSucceeded = false;
   try {
     let resolved = null;
     let dripMemberId = links[0]?.drip_member_id || null;
@@ -4747,6 +4919,8 @@ async function handleClaim(interaction) {
       return;
     }
 
+    claimAttemptId = await createPassiveClaimAttempt(guildId, interaction.user.id, rewardQuote);
+
     const awardResult = await awardDripPoints(
       settings.drip_realm_id,
       dripMemberIdCandidates,
@@ -4761,6 +4935,8 @@ async function handleClaim(interaction) {
         recipientResolvedMember: resolved?.member || null,
       }
     );
+    await markPassiveClaimAttemptTransferSucceeded(claimAttemptId);
+    claimTransferSucceeded = true;
     dripMemberId = awardResult?.usedMemberId || dripMemberIdCandidates[0];
     for (const row of links) {
       await setWalletLink(guildId, interaction.user.id, row.wallet_address, Boolean(row.verified), dripMemberId);
@@ -4806,6 +4982,7 @@ async function handleClaim(interaction) {
       receiptChannel?.id || null,
       receiptMessage?.id || null
     );
+    await markPassiveClaimAttemptRecorded(claimAttemptId);
 
     const verificationLine = rewardQuote.unverifiedPenaltyAmount > 0
       ? `Unverified wallet dock: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM (50%)\nVerify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.\n`
@@ -4819,6 +4996,9 @@ async function handleClaim(interaction) {
       flags: 64
     });
   } catch (err) {
+    if (claimAttemptId) {
+      await markPassiveClaimAttemptFailed(claimAttemptId).catch(() => null);
+    }
     console.error('Claim processing error:', err);
     const msg = String(err?.message || err || '').trim();
     if (/DRIP member search failed|DRIP award failed|DRIP transfer failed|DRIP sender/i.test(msg)) {
@@ -4841,11 +5021,13 @@ async function handleClaim(interaction) {
       });
     }
     let reason = 'We could not process your claim right now.';
-    if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
+    if (claimTransferSucceeded && /nft_claims|claim_events|claims|wallet_links|database|relation|column/i.test(msg)) {
+      reason = 'Your DRIP reward was sent, but the claim receipt could not be fully recorded. The NFT timers were protected from a duplicate claim and staff have been notified.';
+    } else if (/DRIP member search failed/i.test(msg)) reason = 'We could not verify your DRIP profile right now.';
     else if (/DRIP award failed|DRIP transfer failed|DRIP sender/i.test(msg)) reason = 'The DRIP transfer did not complete. Please try again in a moment.';
     else if (/nft_claims|claim_events|claims|wallet_links|database|relation|column/i.test(msg)) reason = 'Your claim could not be recorded due to a storage issue.';
     await respondInteraction(interaction, {
-      content: `Claim failed: ${reason}`,
+      content: `${claimTransferSucceeded ? 'Claim partially completed' : 'Claim failed'}: ${reason}`,
       flags: 64
     });
   }
@@ -5445,6 +5627,7 @@ client.on('interactionCreate', async (interaction) => {
         const settings = await getGuildSettings(interaction.guild.id);
         const holderRules = await getHolderRules(interaction.guild.id);
         const traitRules = await getTraitRoleRules(interaction.guild.id);
+        const rewardHealth = await getRewardHealthSummary(interaction.guild.id, settings || {});
         const me = interaction.guild.members.me;
         const canManageRoles = Boolean(me?.permissions?.has(PermissionFlagsBits.ManageRoles));
         const receiptChannelId = settings?.receipt_channel_id || RECEIPT_CHANNEL_ID;
@@ -5461,17 +5644,28 @@ client.on('interactionCreate', async (interaction) => {
           if (!role.editable) blockedRoles.push(role.name);
         }
         const dripReady = Boolean(settings?.drip_api_key && settings?.drip_realm_id && settings?.currency_id);
+        const payoutReady = rewardHealth.payoutAmount > 0 && rewardHealth.earningContracts.length > 0;
+        const earningLines = rewardHealth.earningContracts.slice(0, 10).map((c) =>
+          `  - ${c.label} (${nftChainLabel(c.chain)}): ${c.hasScoringTable ? 'scoring ready' : 'no points mapping'}`
+        );
         await interaction.editReply({
           content:
             `Health Check\n` +
             `- DRIP configured: ${dripReady ? 'yes' : 'no'}\n` +
+            `- Payout type: ${rewardHealth.payoutType}\n` +
+            `- Payout amount: ${formatNumber(rewardHealth.payoutAmount)}\n` +
+            `- Rewards ready: ${payoutReady ? 'yes' : 'no'}\n` +
+            `- Earning contracts: ${rewardHealth.earningContracts.length}\n` +
+            `- Scorable earning contracts: ${rewardHealth.scorableContracts.length}\n` +
+            `- Unscored earning contracts: ${rewardHealth.unscoredContracts.length}\n` +
             `- Receipt channel reachable: ${receiptChannel?.isTextBased() ? 'yes' : 'no'} (\`${receiptChannelId}\`)\n` +
             `- Admin log channel reachable: ${adminLogChannel?.isTextBased() ? 'yes' : 'no'} (\`${ADMIN_LOG_CHANNEL_ID}\`)\n` +
             `- Bot can manage roles: ${canManageRoles ? 'yes' : 'no'}\n` +
             `- Holder rules: ${holderRules.length}\n` +
             `- Trait rules: ${traitRules.length}\n` +
             `- Missing roles: ${missingRoles.length ? missingRoles.join(', ') : 'none'}\n` +
-            `- Unmanageable roles: ${blockedRoles.length ? blockedRoles.join(', ') : 'none'}`
+            `- Unmanageable roles: ${blockedRoles.length ? blockedRoles.join(', ') : 'none'}\n` +
+            `- Earning detail:\n${earningLines.join('\n') || '  - none'}`
         });
         return;
       }
@@ -6592,7 +6786,11 @@ client.on('interactionCreate', async (interaction) => {
         const traitRules = await getTraitRoleRules(interaction.guild.id);
         const collections = await getHolderCollections(interaction.guild.id);
         const mappingOwners = await getGuildPointMappingsWithOwners(interaction.guild.id);
+        const rewardHealth = await getRewardHealthSummary(interaction.guild.id, settings || {});
         const mappingLines = mappingOwners.map((m) => `- ${labelForContract(m.contractAddress, m.chain)} (${nftChainLabel(m.chain)}): ${m.contractAddress}`);
+        const earningLines = rewardHealth.earningContracts.map((c) =>
+          `- ${c.label} (${nftChainLabel(c.chain)}): ${c.contractAddress} | ${c.hasScoringTable ? 'scoring ready' : 'no points mapping'}`
+        );
         await interaction.reply({
           flags: 64,
           content:
@@ -6607,7 +6805,10 @@ client.on('interactionCreate', async (interaction) => {
             `- Payout Amount: ${settings?.payout_amount || 1}\n` +
             `- Claim Streak Bonus (legacy, unused): ${settings?.claim_streak_bonus || 0}\n\n` +
             `Collections (${collections.length}):\n` +
-            `${collections.map(c => `- ${c.name} (${nftChainLabel(c.chain)}): ${c.contract_address}`).join('\n') || '- none'}\n\n` +
+            `${collections.map(c => `- ${c.name} (${nftChainLabel(c.chain)}): ${c.contract_address}`).join('\n') || '- none'}\n` +
+            `Note: a collection only earns rewards after it has an enabled holder rule.\n\n` +
+            `Earning Contracts (${rewardHealth.earningContracts.length}):\n` +
+            `${earningLines.join('\n') || '- none'}\n\n` +
             `Points Mappings (${mappingOwners.length}):\n` +
             `${mappingLines.join('\n') || '- none'}\n\n` +
             `Rules (${rules.length}):\n` +
@@ -7461,7 +7662,12 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await upsertHolderCollection(interaction.guild.id, name, contractAddress, chain);
-        await interaction.reply({ content: `Collection saved: **${name}** on **${nftChainLabel(chain)}** (\`${contractAddress}\`)`, flags: 64 });
+        await interaction.reply({
+          content:
+            `Collection saved: **${name}** on **${nftChainLabel(chain)}** (\`${contractAddress}\`).\n` +
+            `This collection will not earn rewards until it has an enabled holder rule. If payout type is per UglyPoints, it also needs a points mapping unless it is a built-in scored collection.`,
+          flags: 64
+        });
         return;
       }
 
@@ -8229,7 +8435,8 @@ function hpTableForContract(contractAddress, guildPointMappings = null, chain = 
   if (guildMap && typeof guildMap === 'object' && Object.keys(guildMap).length > 0) return guildMap;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
-  return HP_TABLE;
+  if (normalizedChain === DEFAULT_NFT_CHAIN && c === SQUIGS_CONTRACT.toLowerCase()) return HP_TABLE;
+  return {};
 }
 
 function hpFor(cat, val, table = HP_TABLE) {

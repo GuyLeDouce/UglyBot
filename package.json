@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "build:traits": "node scripts/buildTraitCounts.js"
+    "build:traits": "node scripts/buildTraitCounts.js",
+    "test:rewards": "node scripts/testRewardLogic.js"
   },
   "engines": {
     "node": "20.x"
