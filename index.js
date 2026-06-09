@@ -44,6 +44,7 @@ const DEFAULT_ADMIN_USER = process.env.DEFAULT_ADMIN_USER || '';
 const DRIP_INITIATOR_ID = String(process.env.DRIP_INITIATOR_ID || '').trim();
 const DRIP_SENDER_ID = String(process.env.DRIP_SENDER_ID || process.env.DRIP_TRANSFER_SENDER_ID || '').trim();
 const DEFAULT_DRIP_MEMBER_SENDER_ID = String(process.env.DRIP_DEFAULT_MEMBER_SENDER_ID || '').trim();
+const DRIP_AUTO_VERIFY_SEED_AMOUNT = Math.max(0, Math.floor(Number(process.env.DRIP_AUTO_VERIFY_SEED_AMOUNT || 0)));
 
 // Visual/render tunables
 const RENDER_SCALE = 3; // 1 = 750x1050. 2 = 1500x2100. 3 = 2250x3150
@@ -544,7 +545,9 @@ async function setWalletLink(guildId, discordId, walletAddress, verified = false
       `INSERT INTO wallet_links (guild_id, discord_id, wallet_address, verified, drip_member_id)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (guild_id, discord_id, wallet_address) DO UPDATE
-       SET verified = EXCLUDED.verified, drip_member_id = EXCLUDED.drip_member_id, updated_at = NOW()`,
+       SET verified = wallet_links.verified OR EXCLUDED.verified,
+           drip_member_id = COALESCE(NULLIF(TRIM(EXCLUDED.drip_member_id), ''), NULLIF(TRIM(wallet_links.drip_member_id), '')),
+           updated_at = NOW()`,
       [guildId, discordId, walletAddress, verified, dripMemberId]
     );
   } catch (err) {
@@ -3900,6 +3903,18 @@ async function findDripMemberByDiscordId(realmId, discordId, settings) {
   return resolved.member || null;
 }
 
+async function resolveDripMemberForDiscordOnly(realmId, discordId, settings) {
+  const byDiscord = await searchDripMembers(realmId, 'discord', discordId, settings);
+  if (byDiscord[0]?.id) return { member: byDiscord[0], source: 'discord-id' };
+
+  const accountId = await findDripAccountByDiscordId(discordId, settings);
+  if (!accountId) return { member: null, source: null };
+
+  const byDripId = await searchDripMembers(realmId, 'drip-id', accountId, settings);
+  if (byDripId[0]?.id) return { member: byDripId[0], source: 'drip-id(account)' };
+  return { member: null, source: null };
+}
+
 function collectDripMemberIdCandidates(memberLike, fallbackId = null) {
   return collectUniqueDripMemberIds([
     memberLike?.id,
@@ -3959,6 +3974,54 @@ async function verifyWalletViaDrip(realmId, discordId, walletAddress, settings) 
     out.reason = `DRIP verification is temporarily unavailable: ${String(err?.message || err || '').slice(0, 180)}`;
     return out;
   }
+}
+
+async function seedDripMemberForVerification(realmId, discordId, walletAddress, settings, options = {}) {
+  const amount = Number(options.amount ?? DRIP_AUTO_VERIFY_SEED_AMOUNT);
+  const currencyId = settings?.currency_id;
+  if (!amount || amount <= 0) return { attempted: false, reason: 'DRIP auto-verification seed is disabled.' };
+  if (!settings?.drip_api_key || !realmId || !currencyId) {
+    return { attempted: false, reason: 'DRIP seed skipped because API key, realm, or currency is not configured.' };
+  }
+
+  const resolved = await resolveDripMemberForDiscordOnly(realmId, discordId, settings);
+  const memberIds = collectDripMemberIdCandidates(resolved?.member || null);
+  if (!memberIds.length) {
+    return { attempted: false, reason: 'DRIP seed skipped because no realm member was found for this Discord account.' };
+  }
+
+  const balance = await getDripMemberCurrencyBalance(realmId, memberIds, currencyId, settings).catch(() => null);
+  if (balance != null && Number(balance) >= amount) {
+    return {
+      attempted: false,
+      memberId: memberIds[0],
+      reason: `DRIP seed skipped because the member already has ${Math.floor(Number(balance) || 0)} points.`,
+    };
+  }
+
+  const result = await awardDripPoints(
+    realmId,
+    memberIds,
+    amount,
+    currencyId,
+    settings,
+    {
+      context: 'wallet_verification_seed',
+      initiatorDiscordId: options.initiatorDiscordId || discordId,
+      recipientDiscordId: discordId,
+      recipientWalletAddress: walletAddress || null,
+      recipientResolvedMember: resolved?.member || null,
+      requireTransfer: true,
+    }
+  );
+
+  return {
+    attempted: true,
+    amount,
+    memberId: result?.usedMemberId || memberIds[0],
+    senderId: result?.usedSenderId || null,
+    result,
+  };
 }
 
 async function handleDripStatusCheck(interaction) {
@@ -7349,14 +7412,51 @@ client.on('interactionCreate', async (interaction) => {
             });
             continue;
           }
-          const verification = await verifyWalletViaDrip(
+          let verification = await verifyWalletViaDrip(
             settings?.drip_realm_id,
             interaction.user.id,
             addr,
             settings
           );
+          let seedResult = null;
+          if (
+            !verification.verified &&
+            DRIP_AUTO_VERIFY_SEED_AMOUNT > 0 &&
+            !/temporarily unavailable/i.test(String(verification.reason || ''))
+          ) {
+            try {
+              seedResult = await seedDripMemberForVerification(
+                settings?.drip_realm_id,
+                interaction.user.id,
+                addr,
+                settings,
+                { initiatorDiscordId: interaction.user.id }
+              );
+              if (seedResult?.attempted) {
+                verification = await verifyWalletViaDrip(
+                  settings?.drip_realm_id,
+                  interaction.user.id,
+                  addr,
+                  settings
+                );
+                if (!verification.verified) {
+                  verification.reason = `${verification.reason} Seeded ${seedResult.amount} $CHARM to your DRIP member; if your wallet is already linked in DRIP, click Refresh Verification in a moment.`;
+                }
+              }
+            } catch (seedErr) {
+              await postAdminSystemLog({
+                guild: interaction.guild,
+                category: 'DRIP Failure',
+                message:
+                  `User: <@${interaction.user.id}>\n` +
+                  `Context: wallet verification seed\n` +
+                  `Wallet: \`${addr}\`\n` +
+                  `Reason: ${String(seedErr?.message || seedErr || '').slice(0, 500)}`
+              });
+            }
+          }
           if (!primaryDripMemberId && verification.dripMemberId) primaryDripMemberId = verification.dripMemberId;
-          verificationResults.push({ walletAddress: addr, ...verification });
+          verificationResults.push({ walletAddress: addr, ...verification, seedResult });
           await setWalletLink(interaction.guild.id, interaction.user.id, addr, verification.verified, verification.dripMemberId);
           if (!existingSet.has(addr)) {
             added.push(addr);
