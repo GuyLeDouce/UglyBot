@@ -793,6 +793,16 @@ function buildSlashCommands() {
       )
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('verifyall')
+      .setDescription('Admin: recheck DRIP wallet verification for linked users in a role')
+      .addRoleOption((opt) =>
+        opt
+          .setName('role')
+          .setDescription('Only verify linked users who currently have this role')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('listuserwallets')
       .setDescription('Admin: view linked wallets and verification status for a user')
       .addStringOption((opt) =>
@@ -4442,6 +4452,145 @@ async function refreshLinkedHolderOwner(owner) {
   };
 }
 
+let roleVerifyAllRunning = false;
+
+async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
+  if (roleVerifyAllRunning) {
+    return {
+      ok: false,
+      skipped: true,
+      message: 'Role wallet verification skipped: another /verifyall run is still active.',
+    };
+  }
+
+  roleVerifyAllRunning = true;
+  const startedAt = Date.now();
+  const guildId = guild.id;
+  const summary = {
+    roleId: role.id,
+    roleName: role.name,
+    owners: 0,
+    matchedRole: 0,
+    processed: 0,
+    skipped: 0,
+    failed: 0,
+    walletCount: 0,
+    checkedWalletCount: 0,
+    verifiedWalletCount: 0,
+    pendingWalletCount: 0,
+    unavailableWalletCount: 0,
+    roleChanges: 0,
+    rolesGranted: 0,
+    failures: [],
+  };
+
+  try {
+    const settings = await getGuildSettings(guildId);
+    const missing = [];
+    if (!settings?.drip_api_key) missing.push('DRIP API Key');
+    if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
+    if (missing.length) {
+      const message = `Role wallet verification unavailable. Missing: ${missing.join(', ')}`;
+      return { ok: false, skipped: false, message, summary };
+    }
+
+    const owners = (await getWalletLinkOwners()).filter((owner) => owner.guildId === guildId);
+    summary.owners = owners.length;
+
+    await mapLimit(owners, 1, async (owner) => {
+      const discordId = String(owner.discordId || '').trim();
+      try {
+        const member = await guild.members.fetch(discordId).catch(() => null);
+        if (!member) {
+          summary.skipped++;
+          return;
+        }
+        if (!member.roles.cache.has(role.id)) {
+          summary.skipped++;
+          return;
+        }
+
+        summary.matchedRole++;
+        const links = await getWalletLinks(guildId, discordId);
+        if (!links.length) {
+          summary.skipped++;
+          return;
+        }
+
+        const verification = await refreshLinkedWalletVerification(
+          guild,
+          guildId,
+          discordId,
+          links,
+          settings || {},
+          {
+            context: `admin /verifyall role ${role.id}`,
+            logDripFailures: false,
+          }
+        );
+        const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
+        const sync = await syncHolderRoles(member, walletAddresses);
+        await postRoleSyncFailures(guild, discordId, sync, 'admin /verifyall');
+
+        summary.processed++;
+        summary.walletCount += walletAddresses.length;
+        summary.checkedWalletCount += verification.checks.length;
+        summary.verifiedWalletCount += verification.checks.filter((x) => x.verified).length;
+        summary.pendingWalletCount += verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable).length;
+        summary.unavailableWalletCount += verification.checks.filter((x) => x.temporaryUnavailable).length;
+        summary.roleChanges += Number(sync.changed || 0);
+        summary.rolesGranted += Array.isArray(sync.granted) ? sync.granted.length : 0;
+      } catch (err) {
+        summary.failed++;
+        if (summary.failures.length < 10) {
+          summary.failures.push(`<@${discordId}>: ${String(err?.message || err || '').slice(0, 180)}`);
+        }
+      }
+    });
+
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    const message =
+      `Role wallet verification complete.\n` +
+      `Role: <@&${role.id}>\n` +
+      `Linked wallet owners found: ${summary.owners}\n` +
+      `Owners with role: ${summary.matchedRole}\n` +
+      `Processed: ${summary.processed}\n` +
+      `Skipped: ${summary.skipped}\n` +
+      `Failed: ${summary.failed}\n` +
+      `Linked wallets scanned: ${summary.walletCount}\n` +
+      `DRIP checks attempted: ${summary.checkedWalletCount}\n` +
+      `DRIP verified wallets: ${summary.verifiedWalletCount}\n` +
+      `DRIP pending wallets: ${summary.pendingWalletCount}\n` +
+      `DRIP temporarily unavailable: ${summary.unavailableWalletCount}\n` +
+      `Role changes: ${summary.roleChanges}\n` +
+      `Roles granted: ${summary.rolesGranted}\n` +
+      `Elapsed: ${elapsedSeconds}s` +
+      `${summary.failures.length ? `\nFailures:\n${summary.failures.map((line) => `- ${line}`).join('\n')}` : ''}`;
+
+    await postAdminSystemLog({
+      guild,
+      category: 'Admin Verify All',
+      message:
+        `Actor: <@${actorDiscordId}>\n` +
+        message,
+    });
+    return { ok: true, skipped: false, message, summary };
+  } catch (err) {
+    const message = `Role wallet verification failed: ${String(err?.message || err || '').slice(0, 500)}`;
+    await postAdminSystemLog({
+      guild,
+      category: 'Admin Verify All',
+      message:
+        `Actor: <@${actorDiscordId}>\n` +
+        `Role: <@&${role.id}>\n` +
+        message,
+    });
+    return { ok: false, skipped: false, message, summary, error: err };
+  } finally {
+    roleVerifyAllRunning = false;
+  }
+}
+
 async function runDailyHolderVerificationRefresh() {
   if (dailyHolderRefreshRunning) {
     const message = 'Daily holder verification refresh skipped: previous run still active.';
@@ -5757,6 +5906,27 @@ client.on('interactionCreate', async (interaction) => {
             `Manual verification override saved for <@${discordId}>.\n` +
             `Wallet links marked DRIP verified: **${updated}**\n` +
             `DRIP User ID: \`${resolvedDripMemberId}\``
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'verifyall') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const selectedRole = interaction.options.getRole('role', true);
+        const role = selectedRole?.id ? interaction.guild.roles.cache.get(selectedRole.id) : null;
+        if (!role) {
+          await interaction.editReply({ content: 'Selected role was not found in this server.' });
+          return;
+        }
+
+        const result = await runRoleWalletVerificationRefresh(interaction.guild, role, interaction.user.id);
+        await interaction.editReply({
+          content: String(result?.message || 'No verification summary was returned.').slice(0, 1900)
         });
         return;
       }
