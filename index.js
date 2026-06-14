@@ -16,6 +16,7 @@ const {
   RoleSelectMenuBuilder,
   ChannelSelectMenuBuilder,
   SlashCommandBuilder,
+  AttachmentBuilder,
   REST,
   Routes,
   Events,
@@ -575,6 +576,19 @@ async function getWalletLinks(guildId, discordId) {
   return rows;
 }
 
+async function getWalletScanRows(guildId) {
+  const { rows } = await holdersPool.query(
+    `SELECT discord_id, wallet_address, verified, drip_member_id, created_at, updated_at
+     FROM wallet_links
+     WHERE guild_id = $1
+       AND wallet_address IS NOT NULL
+       AND NULLIF(TRIM(wallet_address), '') IS NOT NULL
+     ORDER BY discord_id ASC, updated_at DESC, wallet_address ASC`,
+    [guildId]
+  );
+  return rows;
+}
+
 async function getWalletLinkOwners() {
   const { rows } = await holdersPool.query(
     `SELECT guild_id, discord_id, COUNT(*) AS wallet_count
@@ -786,6 +800,16 @@ function buildSlashCommands() {
           .setName('discord_id')
           .setDescription('Discord user ID to inspect')
           .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('scanwallet')
+      .setDescription('Admin: export linked verification wallets to a private CSV')
+      .addRoleOption((opt) =>
+        opt
+          .setName('role')
+          .setDescription('Optional: only include members with this role')
+          .setRequired(false)
       )
       .toJSON(),
     new SlashCommandBuilder()
@@ -1174,6 +1198,95 @@ function parseWalletAddressesInput(raw) {
     out.push(normalized);
   }
   return out;
+}
+
+function csvEscape(value) {
+  let text = '';
+  if (value instanceof Date) {
+    text = Number.isNaN(value.getTime()) ? '' : value.toISOString();
+  } else if (value != null) {
+    text = String(value);
+  }
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function formatCsvTimestamp(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function sanitizeCsvFilenamePart(value, fallback = 'all') {
+  const cleaned = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return cleaned || fallback;
+}
+
+async function buildWalletScanCsv(guild, rows, role = null) {
+  const discordIds = [...new Set(rows.map((row) => String(row.discord_id || '').trim()).filter(Boolean))];
+  const memberEntries = await mapLimit(discordIds, 5, async (discordId) => {
+    const cached = guild.members.cache.get(discordId);
+    if (cached) return [discordId, cached];
+    const fetched = await guild.members.fetch(discordId).catch(() => null);
+    return [discordId, fetched];
+  });
+  const membersById = new Map(memberEntries);
+  const selectedRoleId = role?.id ? String(role.id) : null;
+  const selectedRoleName = role?.name ? String(role.name) : '';
+  const filteredRows = selectedRoleId
+    ? rows.filter((row) => {
+        const member = membersById.get(String(row.discord_id || '').trim());
+        return Boolean(member?.roles?.cache?.has(selectedRoleId));
+      })
+    : rows;
+
+  const headers = [
+    'discord_id',
+    'discord_username',
+    'server_display_name',
+    'wallet_address',
+    'verified',
+    'drip_member_id',
+    'selected_role_id',
+    'selected_role_name',
+    'created_at',
+    'updated_at',
+  ];
+  const lines = [headers.join(',')];
+  for (const row of filteredRows) {
+    const discordId = String(row.discord_id || '').trim();
+    const member = membersById.get(discordId);
+    const values = [
+      discordId,
+      member?.user?.tag || member?.user?.username || '',
+      member?.displayName || '',
+      row.wallet_address || '',
+      row.verified ? 'true' : 'false',
+      row.drip_member_id || '',
+      selectedRoleId || '',
+      selectedRoleName,
+      formatCsvTimestamp(row.created_at),
+      formatCsvTimestamp(row.updated_at),
+    ];
+    lines.push(values.map(csvEscape).join(','));
+  }
+
+  return {
+    csv: `${lines.join('\r\n')}\r\n`,
+    rowCount: filteredRows.length,
+    uniqueUserCount: new Set(filteredRows.map((row) => String(row.discord_id || '').trim()).filter(Boolean)).size,
+    missingMemberCount: selectedRoleId
+      ? 0
+      : discordIds.filter((discordId) => !membersById.get(discordId)).length,
+    roleFilterSkippedMemberCount: selectedRoleId
+      ? discordIds.filter((discordId) => !membersById.get(discordId)).length
+      : 0,
+  };
 }
 
 function parsePointsMappingCsv(input) {
@@ -5677,6 +5790,57 @@ client.on('interactionCreate', async (interaction) => {
             `Wallet status for <@${discordId}>:\n` +
             `Claim status is tracked per NFT in the claims database.\n` +
             `${lines.join('\n')}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'scanwallet') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const selectedRole = interaction.options.getRole('role', false);
+        const role = selectedRole?.id ? interaction.guild.roles.cache.get(selectedRole.id) : null;
+        if (selectedRole && !role) {
+          await interaction.editReply({ content: 'Selected role was not found in this server.' });
+          return;
+        }
+
+        const rows = await getWalletScanRows(interaction.guild.id);
+        const exportResult = await buildWalletScanCsv(interaction.guild, rows, role);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const rolePart = role ? sanitizeCsvFilenamePart(role.name, role.id) : 'all';
+        const filename = `wallet-scan-${sanitizeCsvFilenamePart(interaction.guild.name, interaction.guild.id)}-${rolePart}-${timestamp}.csv`;
+        const attachment = new AttachmentBuilder(Buffer.from(exportResult.csv, 'utf8'), { name: filename });
+
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Export',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Action: /scanwallet\n` +
+            `Role filter: ${role ? `<@&${role.id}>` : 'none'}\n` +
+            `Wallet rows exported: ${exportResult.rowCount}\n` +
+            `Unique Discord users exported: ${exportResult.uniqueUserCount}`
+        });
+
+        const missingMemberNote = exportResult.missingMemberCount
+          ? `\nMember names unavailable for ${exportResult.missingMemberCount} linked user${exportResult.missingMemberCount === 1 ? '' : 's'} the bot could not fetch.`
+          : '';
+        const roleSkippedNote = exportResult.roleFilterSkippedMemberCount
+          ? `\nRole-filtered export excluded ${exportResult.roleFilterSkippedMemberCount} linked user${exportResult.roleFilterSkippedMemberCount === 1 ? '' : 's'} whose current member record could not be fetched.`
+          : '';
+        await interaction.editReply({
+          content:
+            `Private wallet CSV ready.\n` +
+            `Rows: **${exportResult.rowCount}**\n` +
+            `Unique users: **${exportResult.uniqueUserCount}**\n` +
+            `Role filter: ${role ? `<@&${role.id}>` : 'none'}` +
+            missingMemberNote +
+            roleSkippedNote,
+          files: [attachment]
         });
         return;
       }
