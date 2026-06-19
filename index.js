@@ -1,5 +1,13 @@
-// Load local .env when running outside Railway (Railway injects envs)
-try { require('dotenv').config(); } catch (_) {}
+// Load local .env only outside Railway. Railway must use its injected variables;
+// silently falling back to a checked-out .env can hide a missing/rotated key.
+const IS_RAILWAY_RUNTIME = Boolean(
+  process.env.RAILWAY_ENVIRONMENT_ID ||
+  process.env.RAILWAY_PROJECT_ID ||
+  process.env.RAILWAY_SERVICE_ID
+);
+if (!IS_RAILWAY_RUNTIME) {
+  try { require('dotenv').config(); } catch (_) {}
+}
 
 
 const {
@@ -264,13 +272,28 @@ async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
   }
 }
 
+function redactProviderUrl(url) {
+  return String(url || '')
+    .replace(/(\.g\.alchemy\.com\/(?:nft\/v3|v2)\/)[^/?]+/gi, '$1[redacted]')
+    .replace(/([?&](?:api[_-]?key|apikey|key)=)[^&]+/gi, '$1[redacted]');
+}
+
+function sanitizeProviderErrorDetail(value) {
+  let detail = String(value || '');
+  if (ALCHEMY_API_KEY) detail = detail.replaceAll(String(ALCHEMY_API_KEY), '[redacted]');
+  if (OPENSEA_API_KEY) detail = detail.replaceAll(String(OPENSEA_API_KEY), '[redacted]');
+  return detail.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
 class HttpStatusError extends Error {
-  constructor(status, url, retryAfterMs = 0) {
-    super(`HTTP ${status}`);
+  constructor(status, url, retryAfterMs = 0, responseDetail = '') {
+    const detail = sanitizeProviderErrorDetail(responseDetail);
+    super(`HTTP ${status}${detail ? `: ${detail}` : ''}`);
     this.name = 'HttpStatusError';
     this.status = status;
-    this.url = url;
+    this.url = redactProviderUrl(url);
     this.retryAfterMs = retryAfterMs;
+    this.responseDetail = detail;
   }
 }
 
@@ -336,8 +359,9 @@ const fetchWithRetry = async (url, retries = 3, delay = 1000, opts = {}) => {
       const res = await fetchWithTimeout(url, { timeoutMs: requestTimeoutMs, ...fetchOpts });
       if (!res.ok) {
         const retryAfterMs = retryAfterToMs(res.headers?.get?.('retry-after'));
+        const responseDetail = await res.text().catch(() => '');
         if (alchemyRequest && res.status === 429) reserveAlchemyCooldown(retryAfterMs || delay);
-        throw new HttpStatusError(res.status, url, retryAfterMs);
+        throw new HttpStatusError(res.status, url, retryAfterMs, responseDetail);
       }
       return res;
     } catch (err) {
@@ -2807,35 +2831,8 @@ async function disableTraitRoleRule(guildId, ruleId) {
   return rows[0] || null;
 }
 
-async function getOwnedTokenIdsForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
-  if (!ALCHEMY_API_KEY) return [];
-  const out = [];
-  let pageKey = null;
-  do {
-    const u = new URL(alchemyNftUrl(chain, 'getNFTsForOwner'));
-    u.searchParams.set('owner', walletAddress);
-    u.searchParams.append('contractAddresses[]', contractAddress);
-    u.searchParams.set('withMetadata', 'false');
-    u.searchParams.set('pageSize', '100');
-    if (pageKey) u.searchParams.set('pageKey', pageKey);
-    const res = await fetchWithRetry(u.toString(), 3, 500);
-    const data = await res.json();
-    for (const nft of (data?.ownedNfts || [])) {
-      const tid = String(nft.tokenId || '').trim();
-      if (!tid) continue;
-      try {
-        out.push(tid.startsWith('0x') ? BigInt(tid).toString(10) : tid);
-      } catch {
-        out.push(tid);
-      }
-    }
-    pageKey = data?.pageKey || null;
-  } while (pageKey);
-  return out;
-}
-
-async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
-  if (!ALCHEMY_API_KEY) return new Map();
+async function getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
+  if (!ALCHEMY_API_KEY) throw new Error('Alchemy API key is not configured.');
   const normalizedWallet = normalizeEthAddress(walletAddress);
   const contracts = [...new Set(
     (Array.isArray(contractAddresses) ? contractAddresses : [contractAddresses])
@@ -2874,6 +2871,157 @@ async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, ch
   } while (pageKey);
 
   return out;
+}
+
+const OPENSEA_OWNERSHIP_CACHE_TTL_MS = Math.max(
+  0,
+  numberFromEnv('OPENSEA_OWNERSHIP_CACHE_TTL_MS', 30000)
+);
+const openSeaOwnershipCache = new Map();
+
+function publicRpcUrlForChain(chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  if (normalizedChain === 'ethereum') {
+    return process.env.ETHEREUM_PUBLIC_RPC_URL || 'https://ethereum-rpc.publicnode.com';
+  }
+  if (normalizedChain === 'base') return process.env.BASE_PUBLIC_RPC_URL || 'https://mainnet.base.org';
+  if (normalizedChain === 'abstract') return process.env.ABSTRACT_PUBLIC_RPC_URL || 'https://api.mainnet.abs.xyz';
+  return null;
+}
+
+async function getErc721BalanceOnChain(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const wallet = normalizeEthAddress(walletAddress);
+  const contract = normalizeEthAddress(contractAddress);
+  const rpcUrl = publicRpcUrlForChain(chain);
+  if (!wallet || !contract || !rpcUrl) throw new Error('No public RPC balance fallback is available.');
+
+  const data = `0x70a08231${wallet.slice(2).padStart(64, '0')}`;
+  const res = await fetchWithRetry(rpcUrl, 3, 750, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_call',
+      params: [{ to: contract, data }, 'latest'],
+    }),
+    timeoutMs: 10000,
+  });
+  const payload = await res.json();
+  if (payload?.error) {
+    throw new Error(`RPC balanceOf failed: ${sanitizeProviderErrorDetail(payload.error.message || JSON.stringify(payload.error))}`);
+  }
+  const raw = String(payload?.result || '');
+  if (!/^0x[0-9a-f]+$/i.test(raw)) throw new Error('RPC balanceOf returned an invalid result.');
+  const balance = BigInt(raw);
+  if (balance > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('RPC balanceOf result is too large.');
+  return Number(balance);
+}
+
+async function getOpenSeaAccountNfts(walletAddress, chain = DEFAULT_NFT_CHAIN) {
+  if (!OPENSEA_API_KEY) throw new Error('OpenSea API key is not configured.');
+  const normalizedWallet = normalizeEthAddress(walletAddress);
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  if (!normalizedWallet) return [];
+
+  const cacheKey = `${normalizedChain}:${normalizedWallet}`;
+  const cached = openSeaOwnershipCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    const cfg = nftChainConfig(normalizedChain);
+    const out = [];
+    let next = null;
+    do {
+      const u = new URL(`https://api.opensea.io/api/v2/chain/${cfg.openseaChain}/account/${normalizedWallet}/nfts`);
+      u.searchParams.set('limit', '200');
+      if (next) u.searchParams.set('next', next);
+      const res = await fetchWithRetry(u.toString(), 4, 1000, {
+        headers: { accept: 'application/json', 'x-api-key': OPENSEA_API_KEY },
+        timeoutMs: 15000,
+      });
+      const data = await res.json();
+      for (const nft of (Array.isArray(data?.nfts) ? data.nfts : [])) {
+        const contractAddress = String(nft?.contract?.address || nft?.contract || '').toLowerCase();
+        const tokenId = String(nft?.identifier ?? nft?.token_id ?? '').trim();
+        if (contractAddress && tokenId) out.push({ contractAddress, tokenId });
+      }
+      next = String(data?.next || '').trim() || null;
+    } while (next);
+    return out;
+  })();
+
+  openSeaOwnershipCache.set(cacheKey, {
+    expiresAt: Date.now() + OPENSEA_OWNERSHIP_CACHE_TTL_MS,
+    promise,
+  });
+  if (openSeaOwnershipCache.size > 500) {
+    const oldestKey = openSeaOwnershipCache.keys().next().value;
+    if (oldestKey && oldestKey !== cacheKey) openSeaOwnershipCache.delete(oldestKey);
+  }
+  promise.catch(() => openSeaOwnershipCache.delete(cacheKey));
+  return promise;
+}
+
+async function getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const contracts = [...new Set(
+    (Array.isArray(contractAddresses) ? contractAddresses : [contractAddresses])
+      .map((addr) => normalizeEthAddress(addr))
+      .filter(Boolean)
+  )];
+  const out = new Map(contracts.map((contractAddress) => [collectionKey(normalizedChain, contractAddress), []]));
+  if (!contracts.length) return out;
+
+  const wanted = new Set(contracts);
+  const nfts = await getOpenSeaAccountNfts(walletAddress, normalizedChain);
+  for (const nft of nfts) {
+    if (!wanted.has(nft.contractAddress)) continue;
+    const key = collectionKey(normalizedChain, nft.contractAddress);
+    if (!out.has(key)) continue;
+    try {
+      out.get(key).push(nft.tokenId.startsWith('0x') ? BigInt(nft.tokenId).toString(10) : nft.tokenId);
+    } catch {
+      out.get(key).push(nft.tokenId);
+    }
+  }
+  return out;
+}
+
+function providerFailureSummary(provider, err) {
+  const status = Number(err?.status || 0);
+  const message = sanitizeProviderErrorDetail(err?.responseDetail || err?.message || err || 'unknown error');
+  return `${provider}${status ? ` HTTP ${status}` : ''}: ${message}`.slice(0, 600);
+}
+
+async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
+  let alchemyError = null;
+  try {
+    return await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+  } catch (err) {
+    alchemyError = err;
+    console.warn(`⚠️ ${providerFailureSummary('Alchemy ownership lookup failed', err)}; trying OpenSea.`);
+  }
+
+  try {
+    return await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
+  } catch (openSeaError) {
+    const err = new Error(
+      `Ownership providers unavailable. ${providerFailureSummary('Alchemy', alchemyError)}; ` +
+      providerFailureSummary('OpenSea', openSeaError)
+    );
+    err.alchemyError = alchemyError;
+    err.openSeaError = openSeaError;
+    throw err;
+  }
+}
+
+async function getOwnedTokenIdsForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = normalizeEthAddress(contractAddress);
+  if (!normalizedContract) return [];
+  const ownedMap = await getOwnedTokenIdsForContracts(walletAddress, [normalizedContract], normalizedChain);
+  return ownedMap.get(collectionKey(normalizedChain, normalizedContract)) || [];
 }
 
 async function countOwnedForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
@@ -2922,7 +3070,9 @@ async function syncHolderRoles(member, walletAddresses) {
   const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   const byContract = new Map();
   const tokenIdsByContract = new Map();
+  const fallbackCountsByContract = new Map();
   const unavailableContracts = new Set();
+  const unavailableTraitContracts = new Set();
 
   const contractGroups = new Map();
   for (const r of [...rules, ...traitRules]) {
@@ -2947,13 +3097,33 @@ async function syncHolderRoles(member, walletAddresses) {
           }
         }
       } catch (err) {
-        for (const key of contractMap.keys()) unavailableContracts.add(key);
+        console.warn(
+          `⚠️ Holder ownership sync unavailable for ${chain}/${walletAddress}: ` +
+          sanitizeProviderErrorDetail(err?.message || err)
+        );
+        for (const [key, contractAddress] of contractMap.entries()) {
+          try {
+            const balance = await getErc721BalanceOnChain(walletAddress, contractAddress, chain);
+            fallbackCountsByContract.set(key, (fallbackCountsByContract.get(key) || 0) + balance);
+            if (traitRules.some((rule) => collectionKey(rule.chain, rule.contract_address) === key)) {
+              unavailableTraitContracts.add(key);
+            }
+            console.warn(`⚠️ Used on-chain balance fallback for ${key}: ${balance}.`);
+          } catch (rpcError) {
+            console.warn(
+              `⚠️ On-chain balance fallback failed for ${key}: ` +
+              sanitizeProviderErrorDetail(rpcError?.message || rpcError)
+            );
+            unavailableContracts.add(key);
+            unavailableTraitContracts.add(key);
+          }
+        }
       }
     });
   }
 
   for (const [key, tokenIds] of tokenIdsByContract.entries()) {
-    byContract.set(key, tokenIds.size);
+    byContract.set(key, tokenIds.size + (fallbackCountsByContract.get(key) || 0));
   }
 
   const guildPointMappings = traitRules.length ? await getGuildPointMappings(member.guild.id) : new Map();
@@ -3048,7 +3218,7 @@ async function syncHolderRoles(member, walletAddresses) {
       applied.push(`${role.name}: skipped (bot cannot manage this role/hierarchy)`);
       continue;
     }
-    if (unavailableContracts.has(key)) {
+    if (unavailableContracts.has(key) || unavailableTraitContracts.has(key)) {
       applied.push(`${role.name}: skipped (trait ownership check temporarily unavailable for ${chainAddressLabel(r.chain, r.contract_address)})`);
       continue;
     }
@@ -7043,12 +7213,13 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'rewards_view_holdings') {
+        await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
         const pointsLabel = getPointsLabel(settings);
         const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
         const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
         if (!walletAddresses.length) {
-          await interaction.reply({ content: 'No wallets connected yet.', flags: 64 });
+          await interaction.editReply({ content: 'No wallets connected yet.' });
           return;
         }
 
@@ -7101,10 +7272,7 @@ client.on('interactionCreate', async (interaction) => {
             `DRIP $CHARM held: **${dripBalanceText}**`
           );
 
-        await interaction.reply({
-          embeds: [embed],
-          flags: 64
-        });
+        await interaction.editReply({ embeds: [embed] });
         return;
       }
 
