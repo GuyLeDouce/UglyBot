@@ -1604,6 +1604,14 @@ function formatGrantedRolesForUser(grantedRoles = []) {
     : 'No new roles were added.';
 }
 
+function formatRoleSyncUserNote(syncResult) {
+  const skipped = Array.isArray(syncResult?.applied)
+    ? syncResult.applied.filter((line) => /temporarily unavailable|missing access|cannot manage|role not found/i.test(String(line || '')))
+    : [];
+  if (!skipped.length) return '';
+  return `\nSome role checks were skipped and will work on refresh:\n${skipped.slice(0, 3).map((line) => `- ${String(line).slice(0, 180)}`).join('\n')}`;
+}
+
 async function postAdminVerificationFlag(guild, actorDiscordId, walletAddress, reason, grantedRoles = []) {
   if (!ADMIN_LOG_CHANNEL_ID) return;
   try {
@@ -2826,6 +2834,48 @@ async function getOwnedTokenIdsForContract(walletAddress, contractAddress, chain
   return out;
 }
 
+async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
+  if (!ALCHEMY_API_KEY) return new Map();
+  const normalizedWallet = normalizeEthAddress(walletAddress);
+  const contracts = [...new Set(
+    (Array.isArray(contractAddresses) ? contractAddresses : [contractAddresses])
+      .map((addr) => String(addr || '').toLowerCase())
+      .filter(Boolean)
+  )];
+  const out = new Map(contracts.map((contractAddress) => [collectionKey(chain, contractAddress), []]));
+  if (!normalizedWallet || !contracts.length) return out;
+
+  let pageKey = null;
+  do {
+    const u = new URL(alchemyNftUrl(chain, 'getNFTsForOwner'));
+    u.searchParams.set('owner', normalizedWallet);
+    for (const contractAddress of contracts) {
+      u.searchParams.append('contractAddresses[]', contractAddress);
+    }
+    u.searchParams.set('withMetadata', 'false');
+    u.searchParams.set('pageSize', '100');
+    if (pageKey) u.searchParams.set('pageKey', pageKey);
+
+    const res = await fetchWithRetry(u.toString(), 3, 500);
+    const data = await res.json();
+    for (const nft of (data?.ownedNfts || [])) {
+      const nftContract = String(nft?.contract?.address || '').toLowerCase();
+      const key = collectionKey(chain, nftContract);
+      if (!out.has(key)) continue;
+      const tid = String(nft.tokenId || '').trim();
+      if (!tid) continue;
+      try {
+        out.get(key).push(tid.startsWith('0x') ? BigInt(tid).toString(10) : tid);
+      } catch {
+        out.get(key).push(tid);
+      }
+    }
+    pageKey = data?.pageKey || null;
+  } while (pageKey);
+
+  return out;
+}
+
 async function countOwnedForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
   const ids = await getOwnedTokenIdsForContract(walletAddress, contractAddress, chain);
   return ids.length;
@@ -2871,22 +2921,39 @@ async function syncHolderRoles(member, walletAddresses) {
   const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
   const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   const byContract = new Map();
+  const tokenIdsByContract = new Map();
   const unavailableContracts = new Set();
-  for (const r of rules) {
+
+  const contractGroups = new Map();
+  for (const r of [...rules, ...traitRules]) {
     const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
-    const key = collectionKey(chain, r.contract_address);
-    if (!key || byContract.has(key)) continue;
-    let count = 0;
-    try {
-      for (const walletAddress of normalizedAddresses) {
-        count += await countOwnedForContract(walletAddress, r.contract_address, chain);
+    const contractAddress = String(r.contract_address || '').toLowerCase();
+    const key = collectionKey(chain, contractAddress);
+    if (!key) continue;
+    if (!contractGroups.has(chain)) contractGroups.set(chain, new Map());
+    contractGroups.get(chain).set(key, contractAddress);
+    if (!tokenIdsByContract.has(key)) tokenIdsByContract.set(key, new Set());
+  }
+
+  for (const [chain, contractMap] of contractGroups.entries()) {
+    const contractAddresses = [...contractMap.values()];
+    await mapLimit(normalizedAddresses, 1, async (walletAddress) => {
+      try {
+        const ownedMap = await getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain);
+        for (const [key, tokenIds] of ownedMap.entries()) {
+          if (!tokenIdsByContract.has(key)) tokenIdsByContract.set(key, new Set());
+          for (const tokenId of tokenIds) {
+            tokenIdsByContract.get(key).add(String(tokenId));
+          }
+        }
+      } catch (err) {
+        for (const key of contractMap.keys()) unavailableContracts.add(key);
       }
-    } catch (err) {
-      unavailableContracts.add(key);
-      byContract.set(key, null);
-      continue;
-    }
-    byContract.set(key, count);
+    });
+  }
+
+  for (const [key, tokenIds] of tokenIdsByContract.entries()) {
+    byContract.set(key, tokenIds.size);
   }
 
   const guildPointMappings = traitRules.length ? await getGuildPointMappings(member.guild.id) : new Map();
@@ -2905,18 +2972,7 @@ async function syncHolderRoles(member, walletAddresses) {
     }
     if (!eligibleRules.length) continue;
 
-    let tokenIds = [];
-    try {
-      tokenIds = await getOwnedTokenIdsForContractMany(
-        normalizedAddresses,
-        contractAddress,
-        chain,
-        { suppressErrors: false, concurrency: 1 }
-      );
-    } catch (err) {
-      unavailableContracts.add(traitContractKey);
-      continue;
-    }
+    const tokenIds = [...(tokenIdsByContract.get(traitContractKey) || new Set())];
     if (!tokenIds.length) continue;
 
     for (const tokenId of tokenIds) {
@@ -4244,11 +4300,6 @@ async function resolveDripMemberForDiscordOnly(realmId, discordId, settings) {
   const byDiscord = await searchDripMembers(realmId, 'discord', discordId, settings);
   if (byDiscord[0]?.id) return { member: byDiscord[0], source: 'discord-id' };
 
-  const accountId = await findDripAccountByDiscordId(discordId, settings);
-  if (!accountId) return { member: null, source: null };
-
-  const byDripId = await searchDripMembers(realmId, 'drip-id', accountId, settings);
-  if (byDripId[0]?.id) return { member: byDripId[0], source: 'drip-id(account)' };
   return { member: null, source: null };
 }
 
@@ -4605,7 +4656,8 @@ async function handleVerificationRefresh(interaction) {
       `Linked wallets: ${walletAddresses.length}\n` +
       `${verification.statusText}\n` +
       `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
-      `New roles added:\n${formatGrantedRolesForUser(sync.granted)}`
+      `New roles added:\n${formatGrantedRolesForUser(sync.granted)}` +
+      formatRoleSyncUserNote(sync)
   });
 }
 
@@ -8099,7 +8151,8 @@ client.on('interactionCreate', async (interaction) => {
             `${dripStatus}\n` +
             `${blockedText}\n` +
             `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
-            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}`
+            `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}` +
+            formatRoleSyncUserNote(sync)
         });
         return;
       }
@@ -8132,6 +8185,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         let removedRoles = 0;
+        let roleSyncNote = '';
         try {
           const member = await interaction.guild.members.fetch(interaction.user.id);
           const remainingLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
@@ -8139,6 +8193,7 @@ client.on('interactionCreate', async (interaction) => {
           const sync = await syncHolderRoles(member, remainingAddresses);
           await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet disconnect');
           removedRoles = sync.changed;
+          roleSyncNote = formatRoleSyncUserNote(sync);
         } catch (err) {
           await postAdminSystemLog({
             guild: interaction.guild,
@@ -8152,7 +8207,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({
           content:
             `Disconnected wallet(s): ${removedWallets.length}\n` +
-            `Role sync changes: ${removedRoles}`
+            `Role sync changes: ${removedRoles}` +
+            roleSyncNote
         });
         return;
       }
