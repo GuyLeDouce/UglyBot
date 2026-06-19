@@ -264,15 +264,91 @@ async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
   }
 }
 
+class HttpStatusError extends Error {
+  constructor(status, url, retryAfterMs = 0) {
+    super(`HTTP ${status}`);
+    this.name = 'HttpStatusError';
+    this.status = status;
+    this.url = url;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function numberFromEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+const ALCHEMY_REQUEST_INTERVAL_MS = Math.max(
+  0,
+  numberFromEnv('ALCHEMY_REQUEST_INTERVAL_MS', 350)
+);
+const ALCHEMY_FETCH_RETRIES = Math.max(3, numberFromEnv('ALCHEMY_FETCH_RETRIES', 7));
+let nextAlchemyRequestAt = 0;
+
+function isAlchemyUrl(url) {
+  try {
+    return new URL(String(url)).hostname.endsWith('.g.alchemy.com');
+  } catch {
+    return false;
+  }
+}
+
+function retryAfterToMs(value) {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return 0;
+  return Math.max(0, at - Date.now());
+}
+
+async function waitForAlchemySlot() {
+  if (!ALCHEMY_REQUEST_INTERVAL_MS) return;
+  const now = Date.now();
+  const waitMs = Math.max(0, nextAlchemyRequestAt - now);
+  nextAlchemyRequestAt = Math.max(now, nextAlchemyRequestAt) + ALCHEMY_REQUEST_INTERVAL_MS;
+  if (waitMs) await sleep(waitMs);
+}
+
+function reserveAlchemyCooldown(ms) {
+  if (ms > 0) {
+    nextAlchemyRequestAt = Math.max(nextAlchemyRequestAt, Date.now() + ms);
+  }
+}
+
+function isRetriableHttpStatus(status) {
+  return status === 429 || status === 408 || status >= 500;
+}
+
 const fetchWithRetry = async (url, retries = 3, delay = 1000, opts = {}) => {
-  for (let attempt = 0; attempt < retries; attempt++) {
+  const alchemyRequest = isAlchemyUrl(url);
+  const maxAttempts = alchemyRequest ? Math.max(retries, ALCHEMY_FETCH_RETRIES) : retries;
+  const { timeout, timeoutMs, ...fetchOpts } = opts || {};
+  const parsedTimeoutMs = Number(timeoutMs || timeout || 10000);
+  const requestTimeoutMs = Number.isFinite(parsedTimeoutMs) ? parsedTimeoutMs : 10000;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const res = await fetchWithTimeout(url, { timeoutMs: 10000, ...opts });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (alchemyRequest) await waitForAlchemySlot();
+      const res = await fetchWithTimeout(url, { timeoutMs: requestTimeoutMs, ...fetchOpts });
+      if (!res.ok) {
+        const retryAfterMs = retryAfterToMs(res.headers?.get?.('retry-after'));
+        if (alchemyRequest && res.status === 429) reserveAlchemyCooldown(retryAfterMs || delay);
+        throw new HttpStatusError(res.status, url, retryAfterMs);
+      }
       return res;
     } catch (err) {
-      if (attempt === retries - 1) throw err;
-      await new Promise(resolve => setTimeout(resolve, delay));
+      const status = err?.status || null;
+      const retriable = !status || isRetriableHttpStatus(status);
+      if (!retriable || attempt === maxAttempts - 1) throw err;
+
+      const exponentialDelay = Math.min(30000, delay * Math.pow(2, attempt));
+      const retryAfterDelay = Number(err?.retryAfterMs || 0);
+      const jitter = Math.floor(Math.random() * 250);
+      await sleep(Math.max(exponentialDelay, retryAfterDelay) + jitter);
     }
   }
 };
@@ -2755,13 +2831,20 @@ async function countOwnedForContract(walletAddress, contractAddress, chain = DEF
   return ids.length;
 }
 
-async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+async function getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, chain = DEFAULT_NFT_CHAIN, options = {}) {
   const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
   const normalized = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   if (!normalized.length) return [];
-  const tokenArrays = await mapLimit(normalized, 4, async (walletAddress) => {
-    try { return await getOwnedTokenIdsForContract(walletAddress, contractAddress, chain); }
-    catch { return []; }
+  const suppressErrors = options.suppressErrors !== false;
+  const parsedConcurrency = Number(options.concurrency || 2);
+  const concurrency = Math.max(1, Number.isFinite(parsedConcurrency) ? parsedConcurrency : 2);
+  const tokenArrays = await mapLimit(normalized, concurrency, async (walletAddress) => {
+    try {
+      return await getOwnedTokenIdsForContract(walletAddress, contractAddress, chain);
+    } catch (err) {
+      if (!suppressErrors) throw err;
+      return [];
+    }
   });
   const seen = new Set();
   const out = [];
@@ -2788,13 +2871,20 @@ async function syncHolderRoles(member, walletAddresses) {
   const addresses = Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses];
   const normalizedAddresses = [...new Set(addresses.map(a => normalizeEthAddress(a)).filter(Boolean))];
   const byContract = new Map();
+  const unavailableContracts = new Set();
   for (const r of rules) {
     const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
     const key = collectionKey(chain, r.contract_address);
     if (!key || byContract.has(key)) continue;
     let count = 0;
-    for (const walletAddress of normalizedAddresses) {
-      count += await countOwnedForContract(walletAddress, r.contract_address, chain);
+    try {
+      for (const walletAddress of normalizedAddresses) {
+        count += await countOwnedForContract(walletAddress, r.contract_address, chain);
+      }
+    } catch (err) {
+      unavailableContracts.add(key);
+      byContract.set(key, null);
+      continue;
     }
     byContract.set(key, count);
   }
@@ -2815,7 +2905,18 @@ async function syncHolderRoles(member, walletAddresses) {
     }
     if (!eligibleRules.length) continue;
 
-    const tokenIds = await getOwnedTokenIdsForContractMany(normalizedAddresses, contractAddress, chain);
+    let tokenIds = [];
+    try {
+      tokenIds = await getOwnedTokenIdsForContractMany(
+        normalizedAddresses,
+        contractAddress,
+        chain,
+        { suppressErrors: false, concurrency: 1 }
+      );
+    } catch (err) {
+      unavailableContracts.add(traitContractKey);
+      continue;
+    }
     if (!tokenIds.length) continue;
 
     for (const tokenId of tokenIds) {
@@ -2852,8 +2953,7 @@ async function syncHolderRoles(member, walletAddresses) {
 
   for (const r of rules) {
     const chain = normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN;
-    const count = byContract.get(collectionKey(chain, r.contract_address)) || 0;
-    const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
+    const key = collectionKey(chain, r.contract_address);
     const role = member.guild.roles.cache.get(r.role_id);
     if (!role) {
       applied.push(`${r.role_name || r.role_id}: skipped (role not found)`);
@@ -2863,6 +2963,13 @@ async function syncHolderRoles(member, walletAddresses) {
       applied.push(`${role.name}: skipped (bot cannot manage this role/hierarchy)`);
       continue;
     }
+    if (unavailableContracts.has(key)) {
+      applied.push(`${role.name}: skipped (ownership check temporarily unavailable for ${chainAddressLabel(chain, r.contract_address)})`);
+      continue;
+    }
+
+    const count = byContract.get(key) || 0;
+    const shouldHave = count >= Number(r.min_tokens) && (r.max_tokens == null || count <= Number(r.max_tokens));
 
     queueRoleDecision(
       role,
@@ -2876,12 +2983,17 @@ async function syncHolderRoles(member, walletAddresses) {
     const role = member.guild.roles.cache.get(r.role_id);
     const categoryLabel = r.trait_category ? String(r.trait_category) : 'any';
     const traitLabel = `${categoryLabel}:${r.trait_value}`;
+    const key = collectionKey(r.chain, r.contract_address);
     if (!role) {
       applied.push(`${r.role_name || r.role_id}: skipped (role not found)`);
       continue;
     }
     if (!role.editable) {
       applied.push(`${role.name}: skipped (bot cannot manage this role/hierarchy)`);
+      continue;
+    }
+    if (unavailableContracts.has(key)) {
+      applied.push(`${role.name}: skipped (trait ownership check temporarily unavailable for ${chainAddressLabel(r.chain, r.contract_address)})`);
       continue;
     }
 
