@@ -93,6 +93,85 @@ ensureFonts().catch(e => {
   FONT_BOLD_FAMILY    = 'sans-serif';
 });
 
+const DOCTOR_NOTE_IMAGE_PATH = path.join(__dirname, 'ChatGPT Image Jun 19, 2026, 10_14_33 AM.png');
+const MINT_TODAY_IMAGE_PATH = path.join(__dirname, 'Mint today.jpg');
+const MINT_TODAY_ATTACHMENT_NAME = 'mint-today.jpg';
+const DOCTOR_NAME_BOX = {
+  referenceWidth: 1368,
+  referenceHeight: 1088,
+  centerX: 545,
+  baselineY: 354,
+  maxWidth: 345,
+  maxFontSize: 26,
+  minFontSize: 14,
+};
+
+function cleanDoctorDisplayName(value, fallback = 'Anonymous') {
+  const cleaned = String(value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || fallback;
+}
+
+function fitTextToWidth(ctx, text, maxWidth, {
+  maxFontSize = 26,
+  minFontSize = 14,
+  fontFamily = 'Arial, Helvetica, sans-serif',
+  weight = 500,
+} = {}) {
+  let fontSize = maxFontSize;
+  while (fontSize > minFontSize) {
+    ctx.font = `${weight} ${fontSize}px ${fontFamily}`;
+    if (ctx.measureText(text).width <= maxWidth) {
+      return { text, fontSize };
+    }
+    fontSize -= 1;
+  }
+
+  ctx.font = `${weight} ${minFontSize}px ${fontFamily}`;
+  if (ctx.measureText(text).width <= maxWidth) {
+    return { text, fontSize: minFontSize };
+  }
+
+  let trimmed = text;
+  while (trimmed.length > 1 && ctx.measureText(`${trimmed}...`).width > maxWidth) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return { text: `${trimmed}...`, fontSize: minFontSize };
+}
+
+async function renderDoctorNote(displayName) {
+  const bg = await loadImage(DOCTOR_NOTE_IMAGE_PATH);
+  const canvas = createCanvas(bg.width, bg.height);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bg, 0, 0);
+
+  const scaleX = bg.width / DOCTOR_NAME_BOX.referenceWidth;
+  const scaleY = bg.height / DOCTOR_NAME_BOX.referenceHeight;
+  const maxFontSize = Math.round(DOCTOR_NAME_BOX.maxFontSize * scaleY);
+  const minFontSize = Math.round(DOCTOR_NAME_BOX.minFontSize * scaleY);
+  const safeName = cleanDoctorDisplayName(displayName);
+  const fitted = fitTextToWidth(ctx, safeName, DOCTOR_NAME_BOX.maxWidth * scaleX, {
+    maxFontSize,
+    minFontSize,
+  });
+
+  ctx.font = `500 ${fitted.fontSize}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = '#171717';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(
+    fitted.text,
+    DOCTOR_NAME_BOX.centerX * scaleX,
+    DOCTOR_NAME_BOX.baselineY * scaleY
+  );
+
+  return canvas.toBuffer('image/png');
+}
+
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
   hasToken: !!DISCORD_TOKEN,
@@ -913,7 +992,11 @@ function buildSlashCommands() {
       .toJSON(),
     new SlashCommandBuilder()
       .setName('mint')
-      .setDescription('Show the Squigs mint embed')
+      .setDescription('Show the Squigs Reloaded mint embed')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('doctor')
+      .setDescription('Generate a doctor note with your Discord display name')
       .toJSON(),
     marketplaceCommand.buildMarketplaceSlashCommand().toJSON(),
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
@@ -1181,18 +1264,19 @@ async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
 
 function mintEmbed() {
   return new EmbedBuilder()
-    .setTitle('MINT IS LIVE')
+    .setTitle('Mint Squigs Reloaded')
     .setColor(0xB0DEEE)
     .setDescription(
-      `You can [Mint Here](https://bueno.art/squigs/mint)\n\n` +
-      `Each mint gets you a Squig **+ a Portal Prize** (NFTs or $CHARM)\n\n` +
-      `You'll also get:\n\n` +
-      `- access to more custom games\n` +
-      `- more gems in the Malformed Marketplace\n` +
-      `- passive $CHARM earning with each NFT\n\n` +
-      `Check the [UglyDex](https://uglydex.xyz) to reveal your Portal Prize, see your Squig Card, UglyPoints by trait, total score, Badges, and where you rank on the UglyBoard`
+      `Pick your ugly little space freak before they escape.\n\n` +
+      `**Mint Phases**\n` +
+      `**GTD:** <t:1781884800>\n` +
+      `**FCFS:** <t:1781892000>\n` +
+      `**Public:** <t:1781899200>\n\n` +
+      `**Mint here:**\n` +
+      `https://opensea.io/collection/squigs-reloaded/overview\n\n` +
+      `Only use the official link above. Stay ugly. Stay safe. Don't click sketchy DMs.`
     )
-    .setImage('https://i.imgur.com/puZCGxP.gif');
+    .setImage(`attachment://${MINT_TODAY_ATTACHMENT_NAME}`);
 }
 
 function parseWalletAddressesInput(raw) {
@@ -6231,7 +6315,26 @@ client.on('interactionCreate', async (interaction) => {
 
       if (interaction.commandName === 'mint') {
         await interaction.reply({
-          embeds: [mintEmbed()]
+          embeds: [mintEmbed()],
+          files: [
+            new AttachmentBuilder(MINT_TODAY_IMAGE_PATH, {
+              name: MINT_TODAY_ATTACHMENT_NAME,
+            }),
+          ],
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'doctor') {
+        await interaction.deferReply();
+        const displayName = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
+        const noteBuffer = await renderDoctorNote(displayName);
+        await interaction.editReply({
+          files: [
+            new AttachmentBuilder(noteBuffer, {
+              name: 'doctor-note.png',
+            }),
+          ],
         });
         return;
       }
