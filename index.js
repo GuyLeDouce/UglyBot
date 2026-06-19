@@ -4118,6 +4118,13 @@ function logDripPayout(stage, details = {}) {
   }
 }
 
+function isDripRecipientRealmMismatch(status, body) {
+  return (
+    status === 400 &&
+    /recipient\s+is\s+not\s+a\s+member\s+of\s+this\s+realm/i.test(String(body || ''))
+  );
+}
+
 async function searchDripMembers(realmId, type, value, settings) {
   const typeCandidates =
     type === 'discord' || type === 'discord-id'
@@ -5033,8 +5040,8 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
   }
 
   const routeVariants = [
-    { baseUrl: `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}`, quiet404: false },
-    { baseUrl: `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}`, quiet404: true },
+    { baseUrl: `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}`, quiet404: false },
+    { baseUrl: `https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}`, quiet404: true },
     { baseUrl: `https://api.drip.re/api/v4/realms/${encodeURIComponent(realmId)}`, quiet404: true },
   ];
   const payloadVariants = [];
@@ -5078,6 +5085,20 @@ async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings,
             };
           }
           const body = await res.text().catch(() => '');
+          if (isDripRecipientRealmMismatch(res.status, body)) {
+            const message =
+              `DRIP transfer failed: recipient ${recipientId} is not a member of realm ${realmId}. ` +
+              `Ask the user to join/connect to this DRIP realm before wallet verification seed can be sent.`;
+            logDripPayout('transfer recipient realm mismatch', {
+              context,
+              url,
+              senderId,
+              recipientId,
+              status: res.status,
+              body: String(body || '').slice(0, 500),
+            });
+            throw new Error(message);
+          }
           logDripPayout('transfer failure', {
             context,
             url,
