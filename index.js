@@ -172,6 +172,17 @@ async function renderDoctorNote(displayName) {
   return canvas.toBuffer('image/png');
 }
 
+async function buildDoctorNotePayload(displayName) {
+  const noteBuffer = await renderDoctorNote(displayName);
+  return {
+    files: [
+      new AttachmentBuilder(noteBuffer, {
+        name: 'doctor-note.png',
+      }),
+    ],
+  };
+}
+
 // Debug env (safe booleans/ids only)
 console.log('ENV CHECK:', {
   hasToken: !!DISCORD_TOKEN,
@@ -6328,14 +6339,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.commandName === 'doctor') {
         await interaction.deferReply();
         const displayName = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
-        const noteBuffer = await renderDoctorNote(displayName);
-        await interaction.editReply({
-          files: [
-            new AttachmentBuilder(noteBuffer, {
-              name: 'doctor-note.png',
-            }),
-          ],
-        });
+        await interaction.editReply(await buildDoctorNotePayload(displayName));
         return;
       }
 
@@ -8327,6 +8331,18 @@ client.on('messageCreate', async (message) => {
   if (!content.startsWith('!')) return;
 
   const command = content.split(/\s+/)[0].toLowerCase();
+  if (command === '!doctor') {
+    try {
+      await message.channel.sendTyping().catch(() => {});
+      const displayName = message.member?.displayName || message.author.globalName || message.author.username;
+      await message.reply(await buildDoctorNotePayload(displayName));
+    } catch (err) {
+      console.error('!doctor command error:', err);
+      await message.reply('Something went wrong handling that command.').catch(() => {});
+    }
+    return;
+  }
+
   const collectionCommands = {
     '!flex': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
