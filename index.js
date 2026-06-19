@@ -8019,10 +8019,9 @@ client.on('interactionCreate', async (interaction) => {
         const settings = await getGuildSettings(interaction.guild.id);
         const existing = await getWalletLinks(interaction.guild.id, interaction.user.id);
         const existingSet = new Set(existing.map((x) => String(x.wallet_address).toLowerCase()));
+        const existingByWallet = new Map(existing.map((x) => [String(x.wallet_address).toLowerCase(), x]));
         const added = [];
-        const verificationResults = [];
         const blockedByOtherUser = [];
-        let primaryDripMemberId = null;
         for (const addr of addresses) {
           const currentOwner = await getWalletOwnerLink(interaction.guild.id, addr);
           if (currentOwner && String(currentOwner.discord_id) !== String(interaction.user.id)) {
@@ -8038,52 +8037,14 @@ client.on('interactionCreate', async (interaction) => {
             });
             continue;
           }
-          let verification = await verifyWalletViaDrip(
-            settings?.drip_realm_id,
+          const existingLink = existingByWallet.get(String(addr).toLowerCase()) || null;
+          await setWalletLink(
+            interaction.guild.id,
             interaction.user.id,
             addr,
-            settings
+            Boolean(existingLink?.verified),
+            existingLink?.drip_member_id || null
           );
-          let seedResult = null;
-          if (
-            !verification.verified &&
-            DRIP_AUTO_VERIFY_SEED_AMOUNT > 0 &&
-            !/temporarily unavailable/i.test(String(verification.reason || ''))
-          ) {
-            try {
-              seedResult = await seedDripMemberForVerification(
-                settings?.drip_realm_id,
-                interaction.user.id,
-                addr,
-                settings,
-                { initiatorDiscordId: interaction.user.id }
-              );
-              if (seedResult?.attempted) {
-                verification = await verifyWalletViaDrip(
-                  settings?.drip_realm_id,
-                  interaction.user.id,
-                  addr,
-                  settings
-                );
-                if (!verification.verified) {
-                  verification.reason = `${verification.reason} Seeded ${seedResult.amount} $CHARM to your DRIP member; if your wallet is already linked in DRIP, click Refresh Verification in a moment.`;
-                }
-              }
-            } catch (seedErr) {
-              await postAdminSystemLog({
-                guild: interaction.guild,
-                category: 'DRIP Failure',
-                message:
-                  `User: <@${interaction.user.id}>\n` +
-                  `Context: wallet verification seed\n` +
-                  `Wallet: \`${addr}\`\n` +
-                  `Reason: ${String(seedErr?.message || seedErr || '').slice(0, 500)}`
-              });
-            }
-          }
-          if (!primaryDripMemberId && verification.dripMemberId) primaryDripMemberId = verification.dripMemberId;
-          verificationResults.push({ walletAddress: addr, ...verification, seedResult });
-          await setWalletLink(interaction.guild.id, interaction.user.id, addr, verification.verified, verification.dripMemberId);
           if (!existingSet.has(addr)) {
             added.push(addr);
             await postWalletReceipt(interaction.guild, settings, interaction.user.id, 'Connected', addr);
@@ -8094,52 +8055,9 @@ client.on('interactionCreate', async (interaction) => {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, allAddresses);
         await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet connect');
-        const verifiedCount = verificationResults.filter((x) => x.verified).length;
-        const unverifiedResults = verificationResults.filter((x) => !x.verified);
-        const dripFailures = unverifiedResults.filter((x) => /temporarily unavailable/i.test(String(x.reason || '')));
-        for (const item of dripFailures) {
-          await postAdminSystemLog({
-            guild: interaction.guild,
-            category: 'DRIP Failure',
-            message:
-              `User: <@${interaction.user.id}>\n` +
-              `Context: wallet connect\n` +
-              `Wallet: \`${item.walletAddress}\`\n` +
-              `Reason: ${String(item.reason || '').slice(0, 500)}`
-          });
-        }
-        if (primaryDripMemberId) {
-          for (const row of allLinks) {
-            await setWalletLink(
-              interaction.guild.id,
-              interaction.user.id,
-              row.wallet_address,
-              Boolean(row.verified),
-              row.drip_member_id || primaryDripMemberId
-            );
-          }
-        }
-        if (unverifiedResults.length && sync.granted?.length) {
-          for (const item of unverifiedResults) {
-            await postAdminVerificationFlag(
-              interaction.guild,
-              interaction.user.id,
-              item.walletAddress,
-              item.reason,
-              sync.granted
-            );
-          }
-        }
-        const dripStatus = unverifiedResults.length
-          ? (
-              `DRIP wallet verification pending for ${unverifiedResults.length} wallet${unverifiedResults.length === 1 ? '' : 's'}.\n` +
-              `To verify, connect the same wallet to your DRIP profile in this realm, then reconnect here.\n` +
-              `If you need help, open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}>.\n` +
-              `Reason: ${unverifiedResults[0].reason}`
-            )
-          : (verifiedCount
-              ? `DRIP verified ${verifiedCount} wallet${verifiedCount === 1 ? '' : 's'}.`
-              : 'DRIP profile check unavailable.');
+        const dripStatus =
+          `DRIP was not checked during wallet connect so holder verification can finish quickly.\n` +
+          `Use **Check DRIP Status** or **Refresh Verification** after connecting your wallet in DRIP.`;
         const blockedText = blockedByOtherUser.length
           ? `\nBlocked duplicate wallet(s): ${blockedByOtherUser.map((x) => `\`${x.walletAddress}\``).join(', ')}`
           : '';
