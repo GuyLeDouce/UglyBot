@@ -3404,7 +3404,7 @@ async function getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddres
 
 const OPENSEA_OWNERSHIP_CACHE_TTL_MS = Math.max(
   0,
-  numberFromEnv('OPENSEA_OWNERSHIP_CACHE_TTL_MS', 30000)
+  numberFromEnv('OPENSEA_OWNERSHIP_CACHE_TTL_MS', 5 * 60 * 1000)
 );
 const openSeaOwnershipCache = new Map();
 
@@ -3524,44 +3524,38 @@ function providerFailureSummary(provider, err) {
 }
 
 async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
-  let alchemyError = null;
-  let alchemyResult = null;
+  let openSeaError = null;
+  let openSeaResult = null;
   try {
-    alchemyResult = await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
-    const tokenCount = [...alchemyResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
-    if (tokenCount > 0) return alchemyResult;
+    openSeaResult = await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
+    const tokenCount = [...openSeaResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
+    if (tokenCount > 0) return openSeaResult;
   } catch (err) {
-    alchemyError = err;
-    console.warn(`⚠️ ${providerFailureSummary('Alchemy ownership lookup failed', err)}; trying OpenSea.`);
+    openSeaError = err;
+    console.warn(`${providerFailureSummary('OpenSea ownership lookup failed', err)}; trying Alchemy.`);
   }
 
   try {
-    const openSeaResult = await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
-    const tokenCount = [...openSeaResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
+    const alchemyResult = await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+    const tokenCount = [...alchemyResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
     if (tokenCount > 0) {
-      if (alchemyResult) {
+      if (openSeaResult) {
         console.warn(
-          `Alchemy returned no ownership records for ${normalizeEthAddress(walletAddress) || walletAddress}; ` +
-          `OpenSea returned ${tokenCount}.`
+          `OpenSea returned no ownership records for ${normalizeEthAddress(walletAddress) || walletAddress}; ` +
+          `Alchemy returned ${tokenCount}.`
         );
       }
-      return openSeaResult;
+      return alchemyResult;
     }
-    return alchemyResult || openSeaResult;
-  } catch (openSeaError) {
-    if (alchemyResult) {
-      const err = new Error(
-        `Alchemy returned no ownership records; ${providerFailureSummary('OpenSea', openSeaError)}`
-      );
-      err.openSeaError = openSeaError;
-      throw err;
-    }
+    return openSeaResult || alchemyResult;
+  } catch (alchemyError) {
+    if (openSeaResult) return openSeaResult;
     const err = new Error(
-      `Ownership providers unavailable. ${providerFailureSummary('Alchemy', alchemyError)}; ` +
-      providerFailureSummary('OpenSea', openSeaError)
+      `Ownership providers unavailable. ${providerFailureSummary('OpenSea', openSeaError)}; ` +
+      providerFailureSummary('Alchemy', alchemyError)
     );
-    err.alchemyError = alchemyError;
     err.openSeaError = openSeaError;
+    err.alchemyError = alchemyError;
     throw err;
   }
 }
@@ -3698,8 +3692,7 @@ async function syncHolderRoles(member, walletAddresses) {
     for (const tokenId of tokenIds) {
       let grouped = null;
       try {
-        const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
+        const { attrs } = await getTraitsForTokenResilient(tokenId, contractAddress, chain);
         grouped = normalizeTraits(attrs);
       } catch {
         grouped = null;
@@ -3842,8 +3835,7 @@ async function computeWalletStatsForPayout(guildId, walletAddresses, payoutType)
     const perContractTotals = await mapLimit(scorableContracts, 2, async ({ chain, contractAddress, ids }) => {
       const ups = await mapLimit(ids, 5, async (tokenId) => {
         try {
-          const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
+          const { attrs } = await getTraitsForTokenResilient(tokenId, contractAddress, chain);
           const grouped = normalizeTraits(attrs);
           const table = hpTableForContract(contractAddress, guildPointMappings, chain);
           const { total } = computeHpFromTraits(grouped, table);
@@ -9091,8 +9083,7 @@ client.on('interactionCreate', async (interaction) => {
         const pointsLabel = getPointsLabel(settings);
         const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
         const table = hpTableForContract(contractAddress, guildPointMappings, chain);
-        const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
+        const { attrs } = await getTraitsForTokenResilient(tokenId, contractAddress, chain);
         const grouped = normalizeTraits(attrs);
         const hpAgg = computeHpFromTraits(grouped, table);
         const tier = hpToTierLabel(hpAgg.total || 0);
@@ -9576,7 +9567,10 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
   return { attrs: [], source: 'none' };
 }
 
-async function getTraitsForTokenResilient(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+const NFT_TRAIT_CACHE_TTL_MS = Math.max(0, numberFromEnv('NFT_TRAIT_CACHE_TTL_MS', 15 * 60 * 1000));
+const nftTraitCache = new Map();
+
+async function fetchTraitsForTokenOpenSeaFirst(tokenId, contractAddress, chain) {
   const localAttrs = localSquigTraits(tokenId, contractAddress, chain);
   if (localAttrs.length > 0) {
     return {
@@ -9585,17 +9579,52 @@ async function getTraitsForTokenResilient(tokenId, contractAddress = SQUIGS_CONT
     };
   }
 
-  let alchemyMeta = null;
-  let alchemyError = null;
-  try {
-    alchemyMeta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-  } catch (err) {
-    alchemyError = err;
+  let openSeaError = null;
+  if (OPENSEA_API_KEY) {
+    try {
+      const attrs = await fetchOpenSeaTraits(tokenId, contractAddress, chain);
+      if (attrs.length > 0) {
+        return { attrs: normalizeSquigsReloadedAttrs(attrs, contractAddress), source: 'opensea' };
+      }
+    } catch (err) {
+      openSeaError = err;
+    }
   }
 
-  const result = await getTraitsForToken(alchemyMeta, tokenId, contractAddress, chain);
-  if (result.attrs.length || !alchemyError) return result;
-  throw alchemyError;
+  try {
+    const alchemyMeta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+    const attrs = extractAttributesFlexible(alchemyMeta);
+    if (attrs.length > 0) {
+      return { attrs: normalizeSquigsReloadedAttrs(attrs, contractAddress), source: 'alchemy' };
+    }
+  } catch (err) {
+    if (openSeaError) {
+      throw new Error(
+        `${providerFailureSummary('OpenSea traits', openSeaError)}; ${providerFailureSummary('Alchemy metadata', err)}`
+      );
+    }
+    if (!OPENSEA_API_KEY) throw err;
+  }
+
+  return { attrs: [], source: 'none' };
+}
+
+async function getTraitsForTokenResilient(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = normalizeEthAddress(contractAddress) || String(contractAddress || '').toLowerCase();
+  const cacheKey = `${normalizedChain}:${normalizedContract}:${String(tokenId)}`;
+  const cached = nftTraitCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = fetchTraitsForTokenOpenSeaFirst(tokenId, normalizedContract, normalizedChain);
+  nftTraitCache.set(cacheKey, { expiresAt: Date.now() + NFT_TRAIT_CACHE_TTL_MS, promise });
+  if (nftTraitCache.size > 10000) {
+    const oldestKey = nftTraitCache.keys().next().value;
+    if (oldestKey && oldestKey !== cacheKey) nftTraitCache.delete(oldestKey);
+  }
+  promise.catch(() => nftTraitCache.delete(cacheKey));
+
+  return promise;
 }
 
 function extractAttributesFlexible(alchemyMeta) {
