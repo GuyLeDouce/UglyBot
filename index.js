@@ -3490,14 +3490,8 @@ async function getOwnedTokenIdsForContract(walletAddress, contractAddress, chain
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const normalizedContract = normalizeEthAddress(contractAddress);
   if (!normalizedContract) return [];
-  try {
-    const ownedMap = await getOwnedTokenIdsForContracts(walletAddress, [normalizedContract], normalizedChain);
-    const ids = ownedMap.get(collectionKey(normalizedChain, normalizedContract)) || [];
-    if (ids.length || normalizedChain !== DEFAULT_NFT_CHAIN || !isSquigsContract(normalizedContract)) return ids;
-  } catch (err) {
-    if (normalizedChain !== DEFAULT_NFT_CHAIN || !isSquigsContract(normalizedContract)) throw err;
-  }
-  return getOwnedSquigsReloadedDirect(walletAddress);
+  const ownedMap = await getOwnedTokenIdsForContracts(walletAddress, [normalizedContract], normalizedChain);
+  return ownedMap.get(collectionKey(normalizedChain, normalizedContract)) || [];
 }
 
 async function countOwnedForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
@@ -3643,9 +3637,13 @@ async function syncHolderRoles(member, walletAddresses) {
       let grouped = null;
       try {
         const localAttrs = localSquigTraits(tokenId, contractAddress, chain);
-        const meta = localAttrs.length ? null : await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
-        grouped = normalizeTraits(attrs);
+        if (localAttrs.length) {
+          grouped = normalizeTraits(normalizeSquigsReloadedAttrs(localAttrs.map(massageTraitKeys).filter(validAttrFilter), contractAddress));
+        } else {
+          const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
+          grouped = normalizeTraits(attrs);
+        }
       } catch {
         grouped = null;
       }
