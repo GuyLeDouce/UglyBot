@@ -206,7 +206,8 @@ console.log('ENV CHECK:', {
 // ===== CONTRACTS =====
 const UGLY_CONTRACT    = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
-const SQUIGS_CONTRACT  = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
+const SQUIGS_CONTRACT  = String(process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a').toLowerCase();
+const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_NFT_CHAIN = 'ethereum';
 const NFT_CHAIN_CONFIG = {
   ethereum: {
@@ -1304,6 +1305,122 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+const LOCAL_SQUIG_METADATA_CANDIDATES = [
+  path.join(__dirname, 'metadata.csv'),
+  path.join(__dirname, '..', 'metadata.csv'),
+];
+const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
+  path.join(__dirname, 'images'),
+  path.join(__dirname, '..', 'images'),
+];
+let localSquigMetadataCache = null;
+
+function parseCsvRecords(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < String(text || '').length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch !== '\r') {
+      field += ch;
+    }
+  }
+
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function loadLocalSquigMetadata() {
+  if (localSquigMetadataCache) return localSquigMetadataCache;
+  const byTokenId = new Map();
+  const csvPath = LOCAL_SQUIG_METADATA_CANDIDATES.find((candidate) => fs.existsSync(candidate));
+  if (!csvPath) {
+    localSquigMetadataCache = byTokenId;
+    return byTokenId;
+  }
+
+  try {
+    const rows = parseCsvRecords(fs.readFileSync(csvPath, 'utf8'));
+    const rawHeader = (rows.shift() || []).map((h) => String(h || '').trim());
+    const normalizedHeader = rawHeader.map((h) => h.toLowerCase());
+    const tokenIdx = normalizedHeader.indexOf('tokenid');
+    const nameIdx = normalizedHeader.indexOf('name');
+    const fileIdx = normalizedHeader.indexOf('file_name');
+    if (tokenIdx < 0) throw new Error('missing tokenID column');
+
+    for (const row of rows) {
+      const tokenId = String(row[tokenIdx] || '').trim();
+      if (!/^\d+$/.test(tokenId)) continue;
+      const attrs = [];
+      for (let i = 0; i < rawHeader.length; i++) {
+        const match = String(rawHeader[i] || '').match(/^attributes\[(.+)\]$/i);
+        if (!match) continue;
+        const value = String(row[i] || '').trim();
+        if (!value) continue;
+        attrs.push({ trait_type: match[1], value });
+      }
+      byTokenId.set(tokenId, {
+        name: nameIdx >= 0 ? String(row[nameIdx] || '').trim() : '',
+        fileName: fileIdx >= 0 ? String(row[fileIdx] || '').trim() : '',
+        attrs,
+      });
+    }
+  } catch (err) {
+    console.warn('Could not load local Squig metadata:', String(err?.message || err || ''));
+  }
+
+  localSquigMetadataCache = byTokenId;
+  return byTokenId;
+}
+
+function localSquigImagePath(tokenId) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return null;
+  const localMeta = loadLocalSquigMetadata().get(tid);
+  const fileName = localMeta?.fileName || `${tid}.png`;
+  const safeFileName = path.basename(fileName);
+  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
+    const candidate = path.join(imageDir, safeFileName);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = String(contractAddress || '').toLowerCase();
+  if (normalizedChain !== DEFAULT_NFT_CHAIN || normalizedContract !== SQUIGS_CONTRACT.toLowerCase()) return [];
+  return loadLocalSquigMetadata().get(String(tokenId || '').trim())?.attrs || [];
+}
+
 async function buildRandomOwnedNftResponse(guildId, discordUserId, username, collections, commandLabel) {
   const links = await getWalletLinks(guildId, discordUserId);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
@@ -1332,7 +1449,8 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null);
   const collectionName = labelForContract(chosen.contractAddress, chosen.chain);
   const isSquig = chosen.chain === DEFAULT_NFT_CHAIN && String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
-  const tokenName = String(meta?.name || `${collectionName} #${chosen.tokenId}`);
+  const localSquigMeta = isSquig ? loadLocalSquigMetadata().get(String(chosen.tokenId)) : null;
+  const tokenName = String(meta?.name || localSquigMeta?.name || `${collectionName} #${chosen.tokenId}`);
   const imageUrl =
     normalizeImageUrl(
       meta?.image ||
@@ -1342,9 +1460,11 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
       meta?.metadata?.image ||
       meta?.raw?.metadata?.image
     ) ||
-    (isSquig
-      ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${chosen.tokenId}`
+    (isSquig && SQUIG_IMAGE_BASE_URL
+      ? `${SQUIG_IMAGE_BASE_URL}/${chosen.tokenId}`
       : null);
+  const localImagePath = isSquig ? localSquigImagePath(chosen.tokenId) : null;
+  const localImageName = localImagePath ? `squig-${chosen.tokenId}${path.extname(localImagePath) || '.png'}` : null;
 
   const embed = new EmbedBuilder()
     .setTitle(tokenName)
@@ -1357,9 +1477,13 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
       (isSquig ? `\n[Mint A Squig](https://bueno.art/squigs/mint)` : '')
     )
     .setFooter({ text: `${commandLabel} pull for ${username}` });
-  if (imageUrl) embed.setImage(imageUrl);
+  if (localImagePath) embed.setImage(`attachment://${localImageName}`);
+  else if (imageUrl) embed.setImage(imageUrl);
 
-  return { embeds: [embed] };
+  return {
+    embeds: [embed],
+    ...(localImagePath ? { files: [new AttachmentBuilder(localImagePath, { name: localImageName })] } : {}),
+  };
 }
 
 async function replyWithRandomOwnedNft(interaction, collections, commandLabel) {
@@ -4583,34 +4707,33 @@ async function seedDripMemberForVerification(realmId, discordId, walletAddress, 
 }
 
 async function handleDripStatusCheck(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
   const guildId = interaction.guild.id;
   const settings = await getGuildSettings(guildId);
   const links = await getWalletLinks(guildId, interaction.user.id);
   const walletAddresses = links.map((x) => normalizeEthAddress(x.wallet_address)).filter(Boolean);
 
   if (!walletAddresses.length) {
-    await interaction.reply({
+    await interaction.editReply({
       content:
         `No wallets connected yet.\n` +
         `1. Click **Connect Wallet** here first.\n` +
         `2. Then click **Check DRIP Status** again.\n` +
-        `3. If you also need DRIP setup, open https://app.drip.re/user and add the same wallet to your DRIP profile.`,
-      flags: 64
+        `3. If you also need DRIP setup, open https://app.drip.re/user and add the same wallet to your DRIP profile.`
     });
     return;
   }
 
   if (!settings?.drip_api_key || !settings?.drip_realm_id) {
-    await interaction.reply({
+    await interaction.editReply({
       content:
         `DRIP is not configured for this server yet.\n` +
-        `A server admin needs to set the DRIP API key and realm before wallet verification can be checked.`,
-      flags: 64
+        `A server admin needs to set the DRIP API key and realm before wallet verification can be checked.`
     });
     return;
   }
-
-  await interaction.deferReply({ flags: 64 });
 
   const checks = await mapLimit(links, 3, async (link) => {
     const walletAddress = normalizeEthAddress(link.wallet_address);
@@ -4644,10 +4767,11 @@ async function handleDripStatusCheck(interaction) {
       `${i + 1}. \`${x.walletAddress}\` | DRIP verified | member: \`${x.dripMemberId || 'found'}\``
     );
     await interaction.editReply({
-      content:
+      content: truncateDiscordContent(
         `DRIP status: verified.\n` +
         `Your linked wallet${verified.length === 1 ? ' is' : 's are'} connected to your DRIP profile in this realm.\n` +
         `${lines.join('\n')}`
+      )
     });
     return;
   }
@@ -4660,7 +4784,7 @@ async function handleDripStatusCheck(interaction) {
     : '\n';
 
   await interaction.editReply({
-    content:
+    content: truncateDiscordContent(
       `DRIP status needs attention.${verifiedSummary}` +
       `Wallets still not verified in DRIP:\n${pendingLines.join('\n')}\n\n` +
       `To fix this:\n` +
@@ -4669,6 +4793,7 @@ async function handleDripStatusCheck(interaction) {
       `3. Open your profile and connect the same wallet address${pending.length === 1 ? '' : 'es'} shown above\n` +
       `4. Make sure the wallet is connected in this server's DRIP realm (\`${settings.drip_realm_id}\`)\n` +
       `5. Come back here and click **Refresh Verification**`
+    )
   });
 }
 
@@ -4821,13 +4946,14 @@ async function handleVerificationRefresh(interaction) {
   }
 
   await interaction.editReply({
-    content:
+    content: truncateDiscordContent(
       `Holder verification refreshed.\n` +
       `Linked wallets: ${walletAddresses.length}\n` +
       `${verification.statusText}\n` +
       `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
       `New roles added:\n${formatGrantedRolesForUser(sync.granted)}` +
       formatRoleSyncUserNote(sync)
+    )
   });
 }
 
@@ -5471,14 +5597,30 @@ async function verifyDripConnection(settings, discordProbeId) {
   };
 }
 
+function truncateDiscordContent(content, maxLength = 1900) {
+  const text = String(content || '');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 24)).trimEnd()}\n... (truncated)`;
+}
+
+function normalizeInteractionPayload(payload, { removeFlags = false } = {}) {
+  const out = { ...(payload || {}) };
+  if (Object.prototype.hasOwnProperty.call(out, 'content')) {
+    out.content = truncateDiscordContent(out.content);
+  }
+  if (removeFlags && Object.prototype.hasOwnProperty.call(out, 'flags')) {
+    delete out.flags;
+  }
+  return out;
+}
+
 async function respondInteraction(interaction, payload) {
   if (interaction.deferred) {
-    const out = { ...(payload || {}) };
-    if (Object.prototype.hasOwnProperty.call(out, 'flags')) delete out.flags;
+    const out = normalizeInteractionPayload(payload, { removeFlags: true });
     return interaction.editReply(out);
   }
-  if (interaction.replied) return interaction.followUp(payload);
-  return interaction.reply(payload);
+  if (interaction.replied) return interaction.followUp(normalizeInteractionPayload(payload));
+  return interaction.reply(normalizeInteractionPayload(payload));
 }
 
 function claimConfirmButtons() {
@@ -5491,11 +5633,14 @@ function claimConfirmButtons() {
 }
 
 async function handleClaimPrompt(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
   const guildId = interaction.guild.id;
   const links = await getWalletLinks(guildId, interaction.user.id);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content:
         `Connect your wallet first.\n` +
         `Use **Connect Wallet** in Holder Verification before claiming rewards.`,
@@ -5510,7 +5655,7 @@ async function handleClaimPrompt(interaction) {
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
   if (!settings?.currency_id) missing.push('Currency ID');
   if (missing.length > 0) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
       flags: 64
     });
@@ -5520,7 +5665,7 @@ async function handleClaimPrompt(interaction) {
   const rewardQuote = await getPassiveClaimQuote(guildId, links, settings);
   const amount = rewardQuote.claimableAmount;
   if (amount <= 0) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
       flags: 64
     });
@@ -5544,7 +5689,7 @@ async function handleClaimPrompt(interaction) {
       `4. Click **Check DRIP Status** below to confirm the wallet is connected`
     : '';
 
-  await interaction.reply({
+  await respondInteraction(interaction, {
     content:
       `You are about to claim rewards. Are you sure?\n\n` +
       `${amountSummary}` +
@@ -5555,11 +5700,14 @@ async function handleClaimPrompt(interaction) {
 }
 
 async function handleClaimCalculation(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
   const guildId = interaction.guild.id;
   const links = await getWalletLinks(guildId, interaction.user.id);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: 'Connect your wallet first to calculate claimable rewards.',
       flags: 64
     });
@@ -5572,7 +5720,7 @@ async function handleClaimCalculation(interaction) {
   if (!settings?.drip_realm_id) missing.push('DRIP Realm ID');
   if (!settings?.currency_id) missing.push('Currency ID');
   if (missing.length > 0) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: `Claim is not configured yet. Missing: ${missing.join(', ')}.`,
       flags: 64
     });
@@ -5582,7 +5730,7 @@ async function handleClaimCalculation(interaction) {
   const rewardQuote = await getPassiveClaimQuote(guildId, links, settings);
   const pointsLabel = getPointsLabel(settings);
   if (rewardQuote.claimableAmount <= 0) {
-    await interaction.reply({
+    await respondInteraction(interaction, {
       content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
       flags: 64
     });
@@ -5612,7 +5760,7 @@ async function handleClaimCalculation(interaction) {
     ? `Simple formula: each eligible NFT earns over time until that NFT is claimed.`
     : `Simple formula: each NFT earns based on its ${pointsLabel}, over time, until that NFT is claimed.`;
 
-  await interaction.reply({
+  await respondInteraction(interaction, {
     content:
       `Claim calculation\n` +
       `${timingLine}\n` +
@@ -7148,9 +7296,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_check_stats') {
+        await interaction.deferReply({ flags: 64 });
         const collections = await getHolderCollections(interaction.guild.id);
         if (!collections.length) {
-          await interaction.reply({ content: 'No collections configured yet.', flags: 64 });
+          await interaction.editReply({ content: 'No collections configured yet.' });
           return;
         }
         const options = collections.slice(0, 25).map((c) => ({
@@ -7164,10 +7313,9 @@ client.on('interactionCreate', async (interaction) => {
             .setPlaceholder('Select collection to check')
             .addOptions(options)
         );
-        await interaction.reply({
+        await interaction.editReply({
           content: 'Select a collection, then you will enter token ID.',
           components: [row],
-          flags: 64
         });
         return;
       }
@@ -7189,15 +7337,15 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.customId === 'verify_wallets') {
+        await interaction.deferReply({ flags: 64 });
         const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
         if (!links.length) {
-          await interaction.reply({ content: 'No wallets connected yet.', flags: 64 });
+          await interaction.editReply({ content: 'No wallets connected yet.' });
           return;
         }
         const lines = links.map((w, i) => `${i + 1}. \`${w.wallet_address}\` - ${w.verified ? 'DRIP verified' : 'DRIP verification pending'} - https://etherscan.io/address/${w.wallet_address}`);
-        await interaction.reply({
-          content: `Connected wallet(s):\n${lines.join('\n')}`,
-          flags: 64
+        await interaction.editReply({
+          content: truncateDiscordContent(`Connected wallet(s):\n${lines.join('\n')}`),
         });
         return;
       }
@@ -8338,8 +8486,8 @@ client.on('interactionCreate', async (interaction) => {
         ).trim();
         const imageUrl = /^https?:\/\//i.test(imageUrlRaw)
           ? imageUrlRaw
-          : (chain === DEFAULT_NFT_CHAIN && contractAddress === SQUIGS_CONTRACT.toLowerCase()
-            ? `https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default/${tokenId}`
+          : (chain === DEFAULT_NFT_CHAIN && contractAddress === SQUIGS_CONTRACT.toLowerCase() && SQUIG_IMAGE_BASE_URL
+            ? `${SQUIG_IMAGE_BASE_URL}/${tokenId}`
             : null);
 
         const traitLines = [];
@@ -8624,6 +8772,11 @@ client.on('messageCreate', async (message) => {
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
       { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
     ],
+    '!grid': [
+      { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
+      { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
+      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+    ],
     '!ugly': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
     ],
@@ -8767,6 +8920,11 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
         console.warn('⚠️ OpenSea trait fallback failed:', msg);
       }
     }
+  }
+
+  const attrsC = localSquigTraits(tokenId, contractAddress, chain);
+  if (attrsC.length > 0) {
+    return { attrs: attrsC.map(massageTraitKeys).filter(validAttrFilter), source: 'local_csv' };
   }
 
   return { attrs: [], source: 'none' };

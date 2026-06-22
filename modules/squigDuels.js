@@ -20,9 +20,13 @@ const {
 } = require('discord.js');
 
 const SQUIGS_CONTRACT = String(
-  process.env.SQUIG_COLLECTION_CONTRACT || '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42'
+  process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a'
 ).toLowerCase();
-const SQUIG_IMAGE_BASE = 'https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default';
+const SQUIG_IMAGE_BASE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
+const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
+  path.join(__dirname, '..', 'images'),
+  path.join(__dirname, '..', '..', 'images'),
+];
 const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
@@ -179,7 +183,17 @@ function formatCharm(amount) {
 function squigImageUrl(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return null;
-  return `${SQUIG_IMAGE_BASE}/${tid}`;
+  if (SQUIG_IMAGE_BASE) return `${SQUIG_IMAGE_BASE}/${tid}`;
+  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
+    const candidate = path.join(imageDir, `${tid}.png`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function discordImageUrl(source) {
+  const value = String(source || '').trim();
+  return /^https?:\/\//i.test(value) ? value : null;
 }
 
 function loserSide(duel, winnerId) {
@@ -225,6 +239,9 @@ function squigCanvasNameForSide(duel, side) {
 }
 
 async function fetchImageBuffer(source) {
+  if (!/^https?:\/\//i.test(String(source || ''))) {
+    return fs.promises.readFile(source);
+  }
   const response = await fetch(source);
   if (!response.ok) throw new Error(`Image HTTP ${response.status}`);
   const arrayBuffer = await response.arrayBuffer();
@@ -1301,8 +1318,8 @@ function buildSquigSelectionEmbed(squigs, page = 0) {
     .setColor(0xB0DEEE)
     .setDescription(lines.join('\n') || 'Select one of your owned Squigs below.')
     .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}` });
-  if (shown[0]?.imageUrl) {
-    embed.setImage(shown[0].imageUrl);
+  if (discordImageUrl(shown[0]?.imageUrl)) {
+    embed.setImage(discordImageUrl(shown[0].imageUrl));
     embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL} | Preview: ${squigDisplayName(shown[0])}` });
   }
   return embed;
@@ -1324,8 +1341,8 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
         ? `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}`
         : `${squigs.length} Squig${squigs.length === 1 ? '' : 's'} found`,
     });
-  if (selected?.imageUrl) {
-    embed.setImage(selected.imageUrl);
+  if (discordImageUrl(selected?.imageUrl)) {
+    embed.setImage(discordImageUrl(selected.imageUrl));
     embed.addFields({
       name: `Selected ${squigDisplayName(selected)}`,
       value:
@@ -1488,7 +1505,7 @@ function buildMySquigEmbed(user, state) {
       `${squigPageLabel(squigs, page)} sorted by ${SQUIG_SORT_LABEL}.\n\n` +
       (lines.join('\n') || 'Choose one of your owned Squigs below.')
     );
-  if (selected?.imageUrl) embed.setImage(selected.imageUrl);
+  if (discordImageUrl(selected?.imageUrl)) embed.setImage(discordImageUrl(selected.imageUrl));
   if (selected) {
     embed.addFields({
       name: squigDisplayName(selected),
@@ -2022,7 +2039,7 @@ function buildChallengeEmbed(duel) {
         inline: true,
       }
     );
-  if (imageUrl) embed.setImage(imageUrl);
+  if (discordImageUrl(imageUrl)) embed.setImage(discordImageUrl(imageUrl));
   return embed;
 }
 
@@ -2572,8 +2589,8 @@ function buildStatusEmbed(duel, title, description, options = {}) {
         inline: true,
       }
     );
-  if (thumbnailUrl) embed.setThumbnail(thumbnailUrl);
-  if (imageUrl) embed.setImage(imageUrl);
+  if (discordImageUrl(thumbnailUrl)) embed.setThumbnail(discordImageUrl(thumbnailUrl));
+  if (discordImageUrl(imageUrl)) embed.setImage(discordImageUrl(imageUrl));
   return embed;
 }
 
@@ -2752,8 +2769,8 @@ function actionRows(duel) {
 }
 
 function roundImageUrl(duel) {
-  const challengerImage = squigImageUrl(duel.challengerSquigTokenId);
-  const opponentImage = squigImageUrl(duel.opponentSquigTokenId);
+  const challengerImage = discordImageUrl(squigImageUrl(duel.challengerSquigTokenId));
+  const opponentImage = discordImageUrl(squigImageUrl(duel.opponentSquigTokenId));
   return duel.currentRound % 2 === 1
     ? (challengerImage || opponentImage)
     : (opponentImage || challengerImage);

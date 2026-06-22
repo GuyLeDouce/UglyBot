@@ -11,11 +11,11 @@ const MIN_DELAY_MS = 4 * 60 * 60 * 1000;
 const MAX_DELAY_MS = 12 * 60 * 60 * 1000;
 const SINGLE_TRAIT_CHANCE = 0.85;
 const MAX_SELECT_OPTIONS = 25;
-const SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
+const SQUIGS_CONTRACT = String(process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a').toLowerCase();
 const DEFAULT_MAX_TOKEN_ID = Number(process.env.PORTAL_MAX_SQUIG_TOKEN_ID || 10000);
 const SQUIGS_MINT_URL = 'https://squigs.io/';
 const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
-const SQUIGS_IMAGE_TEMPLATE = 'https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default';
+const SQUIGS_IMAGE_TEMPLATE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const PORTAL_RECEIPT_CHANNEL_ID = '1477463175665287410';
 
 let deps = null;
@@ -86,6 +86,7 @@ function normalizeImageUrl(input) {
 function squigImageUrl(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return null;
+  if (!SQUIGS_IMAGE_TEMPLATE) return null;
   return `${SQUIGS_IMAGE_TEMPLATE}/${tid}`;
 }
 
