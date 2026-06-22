@@ -3466,16 +3466,37 @@ function providerFailureSummary(provider, err) {
 
 async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
   let alchemyError = null;
+  let alchemyResult = null;
   try {
-    return await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+    alchemyResult = await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+    const tokenCount = [...alchemyResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
+    if (tokenCount > 0) return alchemyResult;
   } catch (err) {
     alchemyError = err;
     console.warn(`⚠️ ${providerFailureSummary('Alchemy ownership lookup failed', err)}; trying OpenSea.`);
   }
 
   try {
-    return await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
+    const openSeaResult = await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
+    const tokenCount = [...openSeaResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
+    if (tokenCount > 0) {
+      if (alchemyResult) {
+        console.warn(
+          `Alchemy returned no ownership records for ${normalizeEthAddress(walletAddress) || walletAddress}; ` +
+          `OpenSea returned ${tokenCount}.`
+        );
+      }
+      return openSeaResult;
+    }
+    return alchemyResult || openSeaResult;
   } catch (openSeaError) {
+    if (alchemyResult) {
+      const err = new Error(
+        `Alchemy returned no ownership records; ${providerFailureSummary('OpenSea', openSeaError)}`
+      );
+      err.openSeaError = openSeaError;
+      throw err;
+    }
     const err = new Error(
       `Ownership providers unavailable. ${providerFailureSummary('Alchemy', alchemyError)}; ` +
       providerFailureSummary('OpenSea', openSeaError)
