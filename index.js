@@ -5949,6 +5949,22 @@ function truncateDiscordContent(content, maxLength = 1900) {
   return `${text.slice(0, Math.max(0, maxLength - 24)).trimEnd()}\n... (truncated)`;
 }
 
+function splitDiscordContent(content, maxLength = 1900) {
+  const chunks = [];
+  let remaining = String(content || '');
+
+  while (remaining.length > maxLength) {
+    let splitAt = remaining.lastIndexOf('\n', maxLength);
+    if (splitAt <= 0) splitAt = maxLength;
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt + (remaining[splitAt] === '\n' ? 1 : 0));
+  }
+
+  if (remaining || !chunks.length) chunks.push(remaining);
+  return chunks;
+}
+
 function normalizeInteractionPayload(payload, { removeFlags = false } = {}) {
   const out = { ...(payload || {}) };
   if (Object.prototype.hasOwnProperty.call(out, 'content')) {
@@ -8193,9 +8209,7 @@ client.on('interactionCreate', async (interaction) => {
         const earningLines = rewardHealth.earningContracts.map((c) =>
           `- ${c.label} (${nftChainLabel(c.chain)}): ${c.contractAddress} | ${c.hasScoringTable ? 'scoring ready' : 'no points mapping'}`
         );
-        await interaction.reply({
-          flags: 64,
-          content:
+        const configContent =
             `Settings:\n` +
             `- DRIP API Key: ${settings?.drip_api_key ? 'set' : 'not set'}\n` +
             `- DRIP Client ID: ${settings?.drip_client_id ? 'set' : 'not set'}\n` +
@@ -8216,8 +8230,13 @@ client.on('interactionCreate', async (interaction) => {
             `Rules (${rules.length}):\n` +
             `${rules.map(r => `- ${r.role_name}: ${nftChainLabel(r.chain)} ${r.contract_address} (${r.min_tokens}-${r.max_tokens ?? '∞'})`).join('\n') || '- none'}\n\n` +
             `Trait Rules (${traitRules.length}):\n` +
-            `${traitRules.map(r => `- ${r.role_name}: ${nftChainLabel(r.chain)} ${r.contract_address} (${r.trait_category || 'any'}:${r.trait_value})`).join('\n') || '- none'}`
-        });
+            `${traitRules.map(r => `- ${r.role_name}: ${nftChainLabel(r.chain)} ${r.contract_address} (${r.trait_category || 'any'}:${r.trait_value})`).join('\n') || '- none'}`;
+        const configChunks = splitDiscordContent(configContent);
+
+        await interaction.reply({ flags: 64, content: configChunks[0] });
+        for (const chunk of configChunks.slice(1)) {
+          await interaction.followUp({ flags: 64, content: chunk });
+        }
         return;
       }
       return;
