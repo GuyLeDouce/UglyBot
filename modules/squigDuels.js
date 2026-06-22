@@ -1261,6 +1261,13 @@ async function fetchOwnedSquigs(guildId, userId) {
       break;
     }
   }
+  if (!tokenIds.length && typeof deps.getOwnedSquigsReloadedTokenIds === 'function') {
+    const ids = await deps.getOwnedSquigsReloadedTokenIds(walletAddresses);
+    if (ids.length) {
+      tokenIds = ids;
+      selectedCollection = { chain: 'ethereum', contractAddress: SQUIGS_CONTRACT };
+    }
+  }
   if (!tokenIds.length) {
     const checked = candidates.map((c) => `${c.chain}:${c.contractAddress}`).join(', ');
     return { ok: false, reason: `No Squigs found in your connected wallet. Checked: ${checked}` };

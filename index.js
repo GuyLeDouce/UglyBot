@@ -1439,19 +1439,22 @@ function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DE
 const directSquigsOwnerCache = new Map();
 const DIRECT_SQUIG_OWNER_CACHE_TTL_MS = Math.max(0, Number(process.env.DIRECT_SQUIG_OWNER_CACHE_TTL_MS || 5 * 60 * 1000));
 const DIRECT_SQUIG_MAX_TOKEN_ID = Math.max(1, Number(process.env.SQUIG_MAX_TOKEN_ID || 4444));
+const DIRECT_OG_SQUIG_MAX_TOKEN_ID = Math.max(1, Number(process.env.OG_SQUIG_MAX_TOKEN_ID || 10000));
 
-async function getOwnedSquigsReloadedDirect(walletAddress) {
+async function getOwnedErc721ByOwnerScan(walletAddress, contractAddress, maxTokenId, cacheLabel) {
   const wallet = normalizeEthAddress(walletAddress);
+  const contractAddr = normalizeEthAddress(contractAddress);
   if (!wallet) return [];
-  const cacheKey = `ethereum:${SQUIGS_CONTRACT}:${wallet}`;
+  if (!contractAddr) return [];
+  const cacheKey = `ethereum:${contractAddr}:${wallet}:${cacheLabel}`;
   const cached = directSquigsOwnerCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
 
   const promise = (async () => {
     const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
-    const contract = new ethers.Contract(SQUIGS_CONTRACT, abi, globalThis.__SQUIGS_PROVIDER);
+    const contract = new ethers.Contract(contractAddr, abi, globalThis.__SQUIGS_PROVIDER);
     const ids = [];
-    await mapLimit(Array.from({ length: DIRECT_SQUIG_MAX_TOKEN_ID }, (_, i) => i + 1), 12, async (tokenId) => {
+    await mapLimit(Array.from({ length: maxTokenId }, (_, i) => i + 1), 12, async (tokenId) => {
       try {
         const owner = normalizeEthAddress(await contract.ownerOf(tokenId));
         if (owner === wallet) ids.push(String(tokenId));
@@ -1471,6 +1474,14 @@ async function getOwnedSquigsReloadedDirect(walletAddress) {
   }
   promise.catch(() => directSquigsOwnerCache.delete(cacheKey));
   return promise;
+}
+
+async function getOwnedSquigsReloadedDirect(walletAddress) {
+  return getOwnedErc721ByOwnerScan(walletAddress, SQUIGS_CONTRACT, DIRECT_SQUIG_MAX_TOKEN_ID, 'reloaded');
+}
+
+async function getOwnedOgSquigsDirect(walletAddress) {
+  return getOwnedErc721ByOwnerScan(walletAddress, OG_SQUIGS_CONTRACT, DIRECT_OG_SQUIG_MAX_TOKEN_ID, 'og');
 }
 
 async function getOwnedSquigsReloadedTokenIds(walletAddresses) {
@@ -1493,6 +1504,35 @@ async function getOwnedSquigsReloadedTokenIds(walletAddresses) {
 
   if (!tokenIds.length) {
     const directResults = await Promise.all(normalizedWallets.map((wallet) => getOwnedSquigsReloadedDirect(wallet).catch(() => [])));
+    for (const ids of directResults) {
+      for (const tokenId of ids) {
+        const key = String(tokenId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        tokenIds.push(key);
+      }
+    }
+  }
+
+  tokenIds.sort((a, b) => Number(a) - Number(b));
+  return tokenIds;
+}
+
+async function getOwnedOgSquigsTokenIds(walletAddresses) {
+  const normalizedWallets = [...new Set((Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses]).map((w) => normalizeEthAddress(w)).filter(Boolean))];
+  const seen = new Set();
+  const tokenIds = [];
+
+  const providerIds = await getOwnedTokenIdsForContractMany(normalizedWallets, OG_SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN);
+  for (const tokenId of providerIds) {
+    const key = String(tokenId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tokenIds.push(key);
+  }
+
+  if (!tokenIds.length) {
+    const directResults = await Promise.all(normalizedWallets.map((wallet) => getOwnedOgSquigsDirect(wallet).catch(() => [])));
     for (const ids of directResults) {
       for (const tokenId of ids) {
         const key = String(tokenId);
@@ -1574,7 +1614,10 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   const pools = await Promise.all(
     ownershipCollections.map(async ({ contractAddress, chain = DEFAULT_NFT_CHAIN }) => {
       const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
-      const tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, normalizedChain);
+      let tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, normalizedChain);
+      if (!tokenIds.length && normalizedChain === DEFAULT_NFT_CHAIN && isOgSquigsContract(contractAddress)) {
+        tokenIds = await getOwnedOgSquigsTokenIds(walletAddresses);
+      }
       return tokenIds.map((tokenId) => ({ tokenId: String(tokenId), contractAddress, chain: normalizedChain }));
     })
   );
@@ -1698,14 +1741,23 @@ function drawGridText(ctx, text, x, y, maxWidth) {
   ctx.fillText(value, x, y);
 }
 
+function shuffledCopy(items) {
+  const out = Array.isArray(items) ? items.slice() : [];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 async function buildSquigGridAttachment(details, username) {
-  const maxShown = Math.min(details.length, 120);
-  const shown = details.slice(0, maxShown);
-  const cols = Math.min(5, Math.max(1, shown.length));
+  const maxShown = Math.min(details.length, 100);
+  const shown = details.length > maxShown ? shuffledCopy(details).slice(0, maxShown) : details.slice(0, maxShown);
+  const cols = Math.min(10, Math.max(1, Math.ceil(Math.sqrt(shown.length || 1))));
   const cell = 170;
   const pad = 24;
   const titleH = 76;
-  const rows = Math.max(1, Math.ceil(shown.length / cols));
+  const rows = Math.min(10, Math.max(1, Math.ceil(shown.length / cols)));
   const width = pad * 2 + cols * cell;
   const height = titleH + pad + rows * cell;
   const canvas = createCanvas(width, height);
@@ -1717,7 +1769,7 @@ async function buildSquigGridAttachment(details, username) {
   ctx.fillText(`${username}'s Squigs Reloaded`, pad, 34);
   ctx.fillStyle = '#d4a43b';
   ctx.font = '600 16px Arial, sans-serif';
-  ctx.fillText(`${details.length} owned${details.length > maxShown ? ` - showing first ${maxShown}` : ''}`, pad, 58);
+  ctx.fillText(`${details.length} owned${details.length > maxShown ? ` - showing ${maxShown} random` : ''}`, pad, 58);
 
   for (let i = 0; i < shown.length; i++) {
     const item = shown[i];
@@ -6288,6 +6340,7 @@ squigDuels.initSquigDuels({
   getHolderCollections,
   getGuildPointMappings,
   getOwnedTokenIdsForContractMany,
+  getOwnedSquigsReloadedTokenIds,
   getNftMetadataAlchemy,
   getTraitsForToken,
   normalizeTraits,
