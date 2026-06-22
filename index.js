@@ -1007,6 +1007,16 @@ function buildSlashCommands() {
       )
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('walletcheck')
+      .setDescription('Admin: check which Discord user a wallet is linked to')
+      .addStringOption((opt) =>
+        opt
+          .setName('wallet')
+          .setDescription('Ethereum wallet address to check')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('scanwallet')
       .setDescription('Admin: export linked verification wallets to a private CSV')
       .addRoleOption((opt) =>
@@ -6921,6 +6931,55 @@ client.on('interactionCreate', async (interaction) => {
             `Wallet status for <@${discordId}>:\n` +
             `Claim status is tracked per NFT in the claims database.\n` +
             `${lines.join('\n')}`
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'walletcheck') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const walletAddress = normalizeEthAddress(interaction.options.getString('wallet', true));
+        if (!walletAddress) {
+          await interaction.editReply({ content: 'Invalid wallet address.' });
+          return;
+        }
+
+        const owner = await getWalletOwnerLink(interaction.guild.id, walletAddress);
+        if (!owner) {
+          await interaction.editReply({
+            content:
+              `Wallet is not linked to anyone in this server.\n` +
+              `Wallet: \`${walletAddress}\``
+          });
+          return;
+        }
+
+        const discordId = String(owner.discord_id || '').trim();
+        const member = discordId ? await interaction.guild.members.fetch(discordId).catch(() => null) : null;
+        const user = member?.user || (discordId ? await client.users.fetch(discordId).catch(() => null) : null);
+        const username = user
+          ? `${user.username}${user.discriminator && user.discriminator !== '0' ? `#${user.discriminator}` : ''}`
+          : 'Unavailable';
+        const displayName = member?.displayName || user?.globalName || username;
+        const createdAt = owner.created_at ? `<t:${Math.floor(new Date(owner.created_at).getTime() / 1000)}:F>` : 'unknown';
+        const updatedAt = owner.updated_at ? `<t:${Math.floor(new Date(owner.updated_at).getTime() / 1000)}:F>` : 'unknown';
+
+        await interaction.editReply({
+          content:
+            `Wallet is linked in this server.\n` +
+            `Wallet: \`${walletAddress}\`\n` +
+            `Discord: ${discordId ? `<@${discordId}>` : 'unknown'}\n` +
+            `Discord ID: \`${discordId || 'unknown'}\`\n` +
+            `Username: **${username}**\n` +
+            `Display name: **${displayName}**\n` +
+            `Verification: **${owner.verified ? 'DRIP verified' : 'unverified/pending'}**\n` +
+            `DRIP Member ID: \`${owner.drip_member_id || 'none'}\`\n` +
+            `Created: ${createdAt}\n` +
+            `Updated: ${updatedAt}`
         });
         return;
       }
