@@ -19,11 +19,12 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 
-const SQUIGS_CONTRACT = String(
-  process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a'
-).toLowerCase();
-const SQUIGS_CHAIN = String(process.env.SQUIG_COLLECTION_CHAIN || process.env.SQUIG_CHAIN || 'ethereum').trim().toLowerCase();
+const SQUIGS_CONTRACT = '0x8c9a02c0585200c4c65608df6b8def543d33792a';
+const SQUIGS_CHAIN = 'ethereum';
 const SQUIG_IMAGE_BASE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
+const SQUIG_UGLY_POINTS_CSV_PATH = String(
+  process.env.SQUIG_DUEL_UGLY_POINTS_CSV || path.join(__dirname, '..', 'Squigs_Reloaded_Token_UglyPoints.csv')
+).trim();
 const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
   path.join(__dirname, '..', 'images'),
   path.join(__dirname, '..', '..', 'images'),
@@ -64,9 +65,76 @@ const activeUserToDuel = new Map();
 const pendingSquigSelections = new Map();
 const pendingSquigViews = new Map();
 const pendingMySquigProfiles = new Map();
+let squigUglyPointsByToken = null;
+
+function parseCsvRecords(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  const input = String(text || '').replace(/^\uFEFF/, '');
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inQuotes) {
+      if (ch === '"' && input[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch !== '\r') {
+      field += ch;
+    }
+  }
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function loadSquigUglyPoints() {
+  if (squigUglyPointsByToken) return squigUglyPointsByToken;
+  const rows = parseCsvRecords(fs.readFileSync(SQUIG_UGLY_POINTS_CSV_PATH, 'utf8'));
+  const header = rows.shift() || [];
+  const normalizedHeader = header.map((value) => String(value || '').trim().toLowerCase());
+  const tokenIdIndex = normalizedHeader.indexOf('token id');
+  const uglyPointsIndex = 23; // Excel column X
+  if (tokenIdIndex < 0 || normalizedHeader[uglyPointsIndex] !== 'total uglypoints') {
+    throw new Error('Squigs Reloaded HP CSV must contain Token ID and Total UglyPoints in column X.');
+  }
+
+  const pointsByToken = new Map();
+  for (const row of rows) {
+    const tokenId = String(row[tokenIdIndex] || '').trim();
+    const uglyPoints = Number(row[uglyPointsIndex]);
+    if (!/^\d+$/.test(tokenId) || !Number.isFinite(uglyPoints) || uglyPoints < 0) continue;
+    pointsByToken.set(tokenId, Math.floor(uglyPoints));
+  }
+  if (!pointsByToken.size) throw new Error('Squigs Reloaded HP CSV did not contain any valid token scores.');
+  squigUglyPointsByToken = pointsByToken;
+  console.log(`[SquigDuels] Loaded ${pointsByToken.size} Squigs Reloaded HP values from column X.`);
+  return squigUglyPointsByToken;
+}
 
 function initSquigDuels(injectedDeps) {
   deps = injectedDeps;
+  loadSquigUglyPoints();
 }
 
 function assertReady() {
@@ -307,10 +375,6 @@ function walletConnectMessageForUser(userId) {
 async function hasConnectedWallet(guildId, userId) {
   const links = await deps.getWalletLinks(guildId, userId).catch(() => []);
   return links.some((x) => String(x?.wallet_address || '').trim());
-}
-
-function balancedHp(uglyPoints) {
-  return Math.round(50 + Math.sqrt(Math.max(0, Number(uglyPoints) || 0) * 10));
 }
 
 function baseAttack(uglyPoints) {
@@ -1179,57 +1243,10 @@ async function cancelDuel(guild, duel, reason) {
   scheduleDuelThreadDeletion(guild, duel);
 }
 
-async function tryDirectUglyPointLookup(tokenId, chain = SQUIGS_CHAIN) {
-  const pool = deps?.pointsPool;
-  if (!pool?.query) return null;
-  for (const tableName of ['holder_points_mapping', 'holder_point_mapping', 'holder_point_mappings']) {
-    try {
-      const reg = await pool.query(`SELECT to_regclass($1) AS table_name`, [tableName]);
-      if (!reg.rows[0]?.table_name) continue;
-      const colsRes = await pool.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
-        [tableName]
-      );
-      const cols = new Set(colsRes.rows.map((r) => String(r.column_name || '').toLowerCase()));
-      if (!cols.has('token_id')) continue;
-      const pointCol = ['ugly_points', 'uglypoints', 'points', 'total_points', 'total_ugly_points'].find((c) => cols.has(c));
-      if (!pointCol) continue;
-      const hasContract = cols.has('contract_address');
-      const hasChain = cols.has('chain');
-      let query = `SELECT ${pointCol} AS ugly_points FROM ${tableName} WHERE token_id::text = $1`;
-      const params = [String(tokenId)];
-      if (hasContract) {
-        params.push(SQUIGS_CONTRACT);
-        query += ` AND LOWER(contract_address) = $${params.length}`;
-      }
-      if (hasChain) {
-        params.push(normalizeSquigChain(chain));
-        query += ` AND COALESCE(NULLIF(LOWER(chain), ''), 'ethereum') = $${params.length}`;
-      }
-      query += ' LIMIT 1';
-      const { rows } = await pool.query(query, params);
-      const n = Number(rows[0]?.ugly_points);
-      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
-    } catch (err) {
-      console.warn('[SquigDuels] direct UglyPoints lookup skipped:', String(err?.message || err || ''));
-    }
-  }
-  return null;
-}
-
 async function calculateUglyPoints(guildId, tokenId, chain = SQUIGS_CHAIN) {
-  const normalizedChain = normalizeSquigChain(chain);
-  const direct = await tryDirectUglyPointLookup(tokenId, normalizedChain);
-  if (direct != null) return direct;
-  const mappings = await deps.getGuildPointMappings(guildId);
-  const table = deps.hpTableForContract(SQUIGS_CONTRACT, mappings, normalizedChain);
-  if (!table || !Object.keys(table).length) return null;
-  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, normalizedChain);
-  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, normalizedChain);
-  const grouped = deps.normalizeTraits(attrs);
-  const { total } = deps.computeHpFromTraits(grouped, table);
-  const n = Number(total);
-  return Number.isFinite(n) ? Math.floor(n) : null;
+  void guildId;
+  void chain;
+  return loadSquigUglyPoints().get(String(tokenId || '').trim()) ?? null;
 }
 
 function sortSquigsForDisplay(squigs) {
@@ -1275,11 +1292,11 @@ async function fetchOwnedSquigs(guildId, userId) {
 
   const savedProfiles = await getSavedSquigProfiles(guildId, userId);
   const squigs = [];
-  for (const tokenId of tokenIds.slice(0, 200)) {
+  for (const tokenId of tokenIds) {
     try {
       const uglyPoints = await calculateUglyPoints(guildId, tokenId, selectedCollection.chain);
       if (!Number.isFinite(Number(uglyPoints))) continue;
-      const hp = balancedHp(uglyPoints);
+      const hp = Math.floor(Number(uglyPoints));
       const savedProfile = savedProfiles.get(String(tokenId));
       squigs.push({
         tokenId: String(tokenId),
@@ -1420,7 +1437,7 @@ function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
       name: `Selected ${squigDisplayName(selected)}`,
       value:
         `UglyPoints: **${selected.uglyPoints}**\n` +
-        `Balanced HP: **${selected.maxHp}**\n` +
+        `HP: **${selected.maxHp}**\n` +
         `Attack Power: **${selected.attackPower}**`,
       inline: false,
     });
@@ -1586,7 +1603,7 @@ function buildMySquigEmbed(user, state) {
         `Token: **#${selected.tokenId}**\n` +
         `Favorite: **${selected.isFavorite ? 'Yes' : 'No'}**\n` +
         `UglyPoints: **${selected.uglyPoints}**\n` +
-        `Balanced HP: **${selected.maxHp}**\n` +
+        `HP: **${selected.maxHp}**\n` +
         `Attack Power: **${selected.attackPower}**`,
       inline: false,
     });
@@ -1835,7 +1852,7 @@ async function promptSquigSelection(interaction, duel, side) {
   await interaction.editReply({
     content:
       `Choose your Squig.${extra}\n` +
-      `Each option shows Squig ID, UglyPoints, Balanced HP, and attack power.`,
+      `Each option shows Squig ID, UglyPoints, HP, and attack power.`,
     embeds: [buildSquigSelectionEmbed(result.squigs, 0)],
     components: buildSquigSelectRows(duel.id, side, result.squigs, 0),
   });
@@ -1867,7 +1884,7 @@ async function handleSquigSelectionPageButton(interaction) {
   await interaction.update({
     content:
       `Choose your Squig.\n` +
-      `${squigPageLabel(pending.squigs, page)}. Each option shows Squig ID, UglyPoints, Balanced HP, and attack power.`,
+      `${squigPageLabel(pending.squigs, page)}. Each option shows Squig ID, UglyPoints, HP, and attack power.`,
     embeds: [buildSquigSelectionEmbed(pending.squigs, page)],
     components: buildSquigSelectRows(duel.id, side, pending.squigs, page),
   });
