@@ -8978,7 +8978,7 @@ client.on('interactionCreate', async (interaction) => {
             interaction.guild.id,
             interaction.user.id,
             addr,
-            Boolean(existingLink?.verified),
+            true,
             existingLink?.drip_member_id || null
           );
           if (!existingSet.has(addr)) {
@@ -8992,8 +8992,8 @@ client.on('interactionCreate', async (interaction) => {
         const sync = await syncHolderRoles(member, allAddresses);
         await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet connect');
         const dripStatus =
-          `DRIP was not checked during wallet connect so holder verification can finish quickly.\n` +
-          `Use **Check DRIP Status** or **Refresh Verification** after connecting your wallet in DRIP.`;
+          `Connected wallets were automatically marked as verified.\n` +
+          `DRIP member resolution will still run when needed for claims and payouts.`;
         const blockedText = blockedByOtherUser.length
           ? `\nBlocked duplicate wallet(s): ${blockedByOtherUser.map((x) => `\`${x.walletAddress}\``).join(', ')}`
           : '';
