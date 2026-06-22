@@ -209,6 +209,7 @@ const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
 const SQUIGS_CONTRACT  = String(process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a').toLowerCase();
 const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_NFT_CHAIN = 'ethereum';
+const SQUIGS_CHAIN = String(process.env.SQUIG_COLLECTION_CHAIN || process.env.SQUIG_CHAIN || DEFAULT_NFT_CHAIN).trim().toLowerCase();
 const NFT_CHAIN_CONFIG = {
   ethereum: {
     label: 'Ethereum',
@@ -1188,6 +1189,14 @@ function nftChainLabel(chain) {
   return nftChainConfig(chain).label;
 }
 
+function squigsChain() {
+  return normalizeNftChain(SQUIGS_CHAIN) || DEFAULT_NFT_CHAIN;
+}
+
+function isSquigsContract(contractAddress) {
+  return String(contractAddress || '').toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
+}
+
 function collectionKey(chain, contractAddress) {
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const normalizedAddress = normalizeEthAddress(contractAddress);
@@ -1262,7 +1271,7 @@ function labelForContract(contractAddress, chain = DEFAULT_NFT_CHAIN) {
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return 'Charm of the Ugly';
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
-  if (normalizedChain === DEFAULT_NFT_CHAIN && c === SQUIGS_CONTRACT.toLowerCase()) return 'Squigs';
+  if (isSquigsContract(c)) return 'Squigs Reloaded';
   return String(contractAddress || 'Unknown Contract');
 }
 
@@ -1415,9 +1424,8 @@ function localSquigImagePath(tokenId) {
 }
 
 function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
-  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const normalizedContract = String(contractAddress || '').toLowerCase();
-  if (normalizedChain !== DEFAULT_NFT_CHAIN || normalizedContract !== SQUIGS_CONTRACT.toLowerCase()) return [];
+  if (!isSquigsContract(normalizedContract)) return [];
   return loadLocalSquigMetadata().get(String(tokenId || '').trim())?.attrs || [];
 }
 
@@ -1448,7 +1456,7 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   const chosen = pickRandom(owned);
   const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null);
   const collectionName = labelForContract(chosen.contractAddress, chosen.chain);
-  const isSquig = chosen.chain === DEFAULT_NFT_CHAIN && String(chosen.contractAddress).toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
+  const isSquig = isSquigsContract(chosen.contractAddress);
   const localSquigMeta = isSquig ? loadLocalSquigMetadata().get(String(chosen.tokenId)) : null;
   const tokenName = String(meta?.name || localSquigMeta?.name || `${collectionName} #${chosen.tokenId}`);
   const imageUrl =
@@ -1632,8 +1640,8 @@ function parsePointsMappingCsv(input) {
   };
   const header = split(lines[0]).map((h) => String(h || '').toLowerCase());
   const catIdx = header.indexOf('category');
-  const traitIdx = header.indexOf('trait');
-  const ptsIdxCandidates = ['ugly_points', 'points', 'up', 'value'].map((k) => header.indexOf(k)).filter((i) => i >= 0);
+  const traitIdx = ['trait', 'traits'].map((k) => header.indexOf(k)).find((i) => i >= 0) ?? -1;
+  const ptsIdxCandidates = ['ugly_points', 'uglypoints', 'points', 'up', 'value'].map((k) => header.indexOf(k)).filter((i) => i >= 0);
   const ptsIdx = ptsIdxCandidates[0] ?? -1;
   if (catIdx < 0 || traitIdx < 0 || ptsIdx < 0) {
     throw new Error('CSV header must include: category, trait, and ugly_points (or points).');
@@ -2808,7 +2816,7 @@ function defaultHolderCollections() {
   return [
     { name: 'Charm of the Ugly', chain: DEFAULT_NFT_CHAIN, contract_address: UGLY_CONTRACT.toLowerCase() },
     { name: 'Ugly Monsters', chain: DEFAULT_NFT_CHAIN, contract_address: MONSTER_CONTRACT.toLowerCase() },
-    { name: 'Squigs', chain: DEFAULT_NFT_CHAIN, contract_address: SQUIGS_CONTRACT.toLowerCase() },
+    { name: 'Squigs Reloaded', chain: squigsChain(), contract_address: SQUIGS_CONTRACT.toLowerCase() },
   ];
 }
 
@@ -6001,6 +6009,7 @@ squigDuels.initSquigDuels({
   pointsPool,
   historyPool: teamPool,
   getWalletLinks,
+  getHolderCollections,
   getGuildPointMappings,
   getOwnedTokenIdsForContractMany,
   getNftMetadataAlchemy,
@@ -6798,7 +6807,7 @@ client.on('interactionCreate', async (interaction) => {
         await replyWithRandomOwnedNft(interaction, [
           { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
           { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
-          { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+          { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
         ], '/flex');
         return;
       }
@@ -6822,7 +6831,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.commandName === 'squig') {
         await interaction.deferReply();
         await replyWithRandomOwnedNft(interaction, [
-          { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+          { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
         ], '/squig');
         return;
       }
@@ -8486,7 +8495,7 @@ client.on('interactionCreate', async (interaction) => {
         ).trim();
         const imageUrl = /^https?:\/\//i.test(imageUrlRaw)
           ? imageUrlRaw
-          : (chain === DEFAULT_NFT_CHAIN && contractAddress === SQUIGS_CONTRACT.toLowerCase() && SQUIG_IMAGE_BASE_URL
+          : (isSquigsContract(contractAddress) && SQUIG_IMAGE_BASE_URL
             ? `${SQUIG_IMAGE_BASE_URL}/${tokenId}`
             : null);
 
@@ -8770,12 +8779,12 @@ client.on('messageCreate', async (message) => {
     '!flex': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
-      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+      { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
     ],
     '!grid': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
-      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+      { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
     ],
     '!ugly': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
@@ -8784,7 +8793,7 @@ client.on('messageCreate', async (message) => {
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
     ],
     '!squig': [
-      { name: 'Squigs', contractAddress: SQUIGS_CONTRACT },
+      { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
     ],
   };
 
@@ -8902,7 +8911,7 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
   // 1) Try Alchemy
   const attrsA = extractAttributesFlexible(alchemyMeta);
   if (attrsA.length > 0) {
-    return { attrs: attrsA, source: 'alchemy' };
+    return { attrs: normalizeSquigsReloadedAttrs(attrsA, contractAddress), source: 'alchemy' };
   }
 
   // 2) Fallback to OpenSea if we have an API key
@@ -8911,7 +8920,7 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
       const attrsB = await fetchOpenSeaTraits(tokenId, contractAddress, chain);
       if (attrsB.length > 0) {
         console.log(`ℹ️ Traits from OpenSea fallback for #${tokenId}: ${attrsB.length}`);
-        return { attrs: attrsB, source: 'opensea' };
+        return { attrs: normalizeSquigsReloadedAttrs(attrsB, contractAddress), source: 'opensea' };
       }
     } catch (e) {
       const msg = String(e?.message || e || '');
@@ -8924,7 +8933,7 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
 
   const attrsC = localSquigTraits(tokenId, contractAddress, chain);
   if (attrsC.length > 0) {
-    return { attrs: attrsC.map(massageTraitKeys).filter(validAttrFilter), source: 'local_csv' };
+    return { attrs: normalizeSquigsReloadedAttrs(attrsC.map(massageTraitKeys).filter(validAttrFilter), contractAddress), source: 'local_csv' };
   }
 
   return { attrs: [], source: 'none' };
@@ -8971,6 +8980,18 @@ function looksLikeAttributeArray(arr) {
 function massageTraitKeys(t) {
   const trait_type = String(t.trait_type ?? t.traitType ?? t.type ?? t.key ?? '').trim();
   return { trait_type, value: t.value };
+}
+
+function normalizeSquigsReloadedAttrs(attrs, contractAddress = SQUIGS_CONTRACT) {
+  const normalized = Array.isArray(attrs) ? attrs : [];
+  if (!isSquigsContract(contractAddress)) return normalized;
+  return normalized.map((attr) => {
+    const traitType = String(attr?.trait_type ?? '').trim();
+    return {
+      ...attr,
+      trait_type: traitType.toLowerCase() === 'legend' ? 'Legendary' : traitType,
+    };
+  });
 }
 
 function validAttrFilter(t) {
@@ -9413,6 +9434,7 @@ const HP_TABLE = {
 
 const UGLY_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'ugly_up.csv'));
 const MONSTER_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'monster_up.csv'));
+const SQUIGS_RELOADED_HP_TABLE = loadHpTableFromCsv(path.join(__dirname, 'Squigs_Reloaded_Traits_Only_UglyPoints.csv'));
 
 function hpTableForContract(contractAddress, guildPointMappings = null, chain = DEFAULT_NFT_CHAIN) {
   const c = String(contractAddress || '').toLowerCase();
@@ -9421,7 +9443,7 @@ function hpTableForContract(contractAddress, guildPointMappings = null, chain = 
   if (guildMap && typeof guildMap === 'object' && Object.keys(guildMap).length > 0) return guildMap;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return UGLY_HP_TABLE;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return MONSTER_HP_TABLE;
-  if (normalizedChain === DEFAULT_NFT_CHAIN && c === SQUIGS_CONTRACT.toLowerCase()) return HP_TABLE;
+  if (isSquigsContract(c)) return Object.keys(SQUIGS_RELOADED_HP_TABLE).length ? SQUIGS_RELOADED_HP_TABLE : HP_TABLE;
   return {};
 }
 

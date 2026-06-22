@@ -1,0 +1,379 @@
+category,traits,uglypoints
+Background,Portal,95
+Background,Light Blue Portal,85
+Background,Yellow Portal,85
+Background,Green Portal,80
+Background,Grey Portal,80
+Background,Orange Portal,80
+Background,Pink Portal,80
+Background,Purple Portal,80
+Background,Sky,80
+Background,Green Boom,70
+Background,Green Splash,70
+Background,Grey Boom,70
+Background,Grey Splash,70
+Background,Light Blue Boom,70
+Background,Light Blue Splash,70
+Background,Orange Boom,70
+Background,Orange Splash,70
+Background,Pink Boom,70
+Background,Pink Splash,70
+Background,Purple Boom,70
+Background,Purple Splash,70
+Background,Yellow Boom,70
+Background,Yellow Splash,70
+Background,Green,60
+Background,Grey,60
+Background,Light Blue,60
+Background,Orange,60
+Background,Pink,60
+Background,Purple,60
+Background,Yellow,60
+Skin,Crystal Elf,115
+Skin,Amphibian Green,110
+Skin,Crystal,110
+Skin,Dark Robot,110
+Skin,Amphibian Purple,105
+Skin,Amphibian Red,105
+Skin,Gold,105
+Skin,Robot,105
+Skin,Zombie,100
+Skin,Dark Zombie,95
+Skin,Green Elf,85
+Skin,Purple Elf,85
+Skin,Beige Elf,80
+Skin,Brown Elf,80
+Skin,Dark Brown Elf,80
+Skin,Green,80
+Skin,Purple,80
+Skin,Beige,70
+Skin,Brown,70
+Skin,Dark Brown,70
+Type,Robot,120
+Type,Amphibian,110
+Type,Zombie,110
+Type,Squig Elf,80
+Type,Squig,75
+Body,Gold Cape,150
+Body,Gold Tank,150
+Body,Super Gold,130
+Body,Gold Boxing Gloves,125
+Body,Inflatable Musclor,125
+Body,Fur and Gold,120
+Body,Futuristic Gold Armor,120
+Body,Gold Bralette,120
+Body,Butthead Tee,115
+Body,Futuristic Armor,115
+Body,Neanderthal Suit,115
+Body,Black Astronaut,110
+Body,Iridescent Puffy,110
+Body,Iridescent Shirt,110
+Body,Pet Lover Bag,110
+Body,Super Naked,110
+Body,Super Ugly,110
+Body,Ugly Scene,110
+Body,White Astronaut,110
+Body,'67 Jersey,105
+Body,'67 Tracksuit,105
+Body,Airplane Emergency Vest,105
+Body,Basketball Red,105
+Body,Beavis Tee,105
+Body,Better Ugly Than Late Tee,105
+Body,Borat,105
+Body,Diving Suit,105
+Body,Fast Food Hoodie,105
+Body,Iridescent Bralette,105
+Body,Ninja,105
+Body,Tattoo,105
+Body,Ugly Fighting Club Belt,105
+Body,Ugly Lifeguard,105
+Body,Ugly Side of the Moon,105
+Body,420 Shirt,100
+Body,Anti GM GM Club Tee,100
+Body,Basketball Yellow,100
+Body,Brown Suit,100
+Body,Cowboy Green,100
+Body,Fastfood Shirt,100
+Body,Fishnet,100
+Body,Jedi,100
+Body,Purple Transparent Shirt,100
+Body,Ugly Hockey Jersey,100
+Body,Ugly Tracksuit,100
+Body,XRay Tee,100
+Body,Army Tee,95
+Body,Black Suit,95
+Body,Bowling Shirt,95
+Body,Boxing Gloves,95
+Body,Chain,95
+Body,Fisherman Black,95
+Body,Fisherman Multi,95
+Body,Flame Sweat,95
+Body,Flowers Overalls,95
+Body,Flowers Shirt,95
+Body,Native Shirt,95
+Body,Red Bathrobe,95
+Body,Ugly Football Club,95
+Body,Ugly Football Club Black,95
+Body,Ugly Long Tee,95
+Body,Ugly Varsity Purple,95
+Body,Varsity Green,95
+Body,White Army Tee,95
+Body,White Suit,95
+Body,Baseball Jersey Blue,90
+Body,Baseball Jersey Red,90
+Body,Beige Jacket,90
+Body,Black Jacket,90
+Body,Black Tee Yellow Bandana,90
+Body,Blue Overalls,90
+Body,Blue Puffy,90
+Body,Blue Surf Lycra,90
+Body,Blue Tracksuit,90
+Body,Born Ugly Tank,90
+Body,Born Ugly Tank Yellow,90
+Body,Cowboy Red,90
+Body,Green Polo,90
+Body,Green White Polo,90
+Body,Multi Overalls,90
+Body,Naked,90
+Body,PAAF Tee,90
+Body,Pink Jacket,90
+Body,Pink Surf Lycra,90
+Body,Prison,90
+Body,Red Bralette,90
+Body,Red Tracksuit,90
+Body,Varisty Blue,90
+Body,White Bralette,90
+Body,White Sweat,90
+Body,White Tee Red Bandana,90
+Body,Yellow Puffy,90
+Body,Black Hoodie,85
+Body,Black Tee,85
+Body,Born Ugly Tee,85
+Body,Dog Tank,85
+Body,Green Tee,85
+Body,Pink Hoodie,85
+Body,Purple Hoodie,85
+Body,Triangle Longue Tee,85
+Body,White Tee,85
+Body,Yellow Pink Polo,85
+Body,Black Sweat,80
+Body,Black Tank,80
+Body,Purple Tee,80
+Body,White Tank,80
+Mouth,Gold Duck,110
+Mouth,Ugly Candy,105
+Mouth,Ball Gag,100
+Mouth,Futuristic Mask,100
+Mouth,Giant Iridescent Tongue,100
+Mouth,Gold Digger,100
+Mouth,Gold Giant Tongue,100
+Mouth,Duck,95
+Mouth,Revive Pill,95
+Mouth,Giant Tongue,90
+Mouth,Sewn,90
+Mouth,Tape,90
+Mouth,Blue Tongue,85
+Mouth,Mustache,85
+Mouth,Tongue,80
+Mouth,Toothless,75
+Mouth,Afraid,70
+Mouth,Oh,70
+Mouth,Open,70
+Mouth,Sad,70
+Mouth,Smile,70
+Mouth,Neutral,65
+Eyes,Gold Terminator,120
+Eyes,Terminator,115
+Eyes,Fire in the hole,105
+Eyes,Eye Patch,90
+Eyes,Surgery,85
+Eyes,Surgery Lashes,85
+Eyes,Bionic,80
+Eyes,Bionic Lashes,80
+Eyes,Suspect Cyclops,80
+Eyes,Anger Cyclops,75
+Eyes,Angry Cyclops Lashes,75
+Eyes,Angry Triple,75
+Eyes,Angry Triple Lashes,75
+Eyes,Sleepy Triple,75
+Eyes,Angry Cyclops,70
+Eyes,Cyclops,65
+Eyes,Cyclops Lashes,65
+Eyes,Triple,65
+Eyes,Triple Lashes,65
+Head,Atomic,170
+Head,Cop Helmet,160
+Head,Scream,160
+Head,Skate Gold,160
+Head,Gold Visor,150
+Head,All Season Tire,145
+Head,Angel,140
+Head,Bag,140
+Head,Gold Construction Cone,140
+Head,Gold Hoops,140
+Head,Robber Mask,140
+Head,Sheriff,140
+Head,Butthead Hair,135
+Head,Skull,135
+Head,White Donuts,135
+Head,'67 Hockey Helmet,130
+Head,Batmask,130
+Head,Boxing,130
+Head,Dragon Ball Hair,130
+Head,Giant Gold Mountie,130
+Head,Imposter,130
+Head,Jason,130
+Head,Rainbow,130
+Head,Bunny Mask,125
+Head,Buoy,125
+Head,Cactus,125
+Head,Donuts,125
+Head,Giant Mountie,125
+Head,Giant Purple Mountie,125
+Head,Human Air,125
+Head,J Brim,125
+Head,The Dog Is In Charge,125
+Head,Zeus Hand,125
+Head,Beavis Hair,120
+Head,Blindfoil,120
+Head,Brown Mullet,120
+Head,Construction Cone,120
+Head,Goggles,120
+Head,Gold Bow,120
+Head,Hoops,120
+Head,Night Vision,120
+Head,Space Brain,120
+Head,Umbrella Hat,120
+Head,Visor,120
+Head,VR Goggles,120
+Head,Basketball,115
+Head,Beer Bucket,115
+Head,Blonde Mullet,115
+Head,Boom Bucket,115
+Head,Bunny,115
+Head,Dread Cap,115
+Head,Fast Food Visor,115
+Head,Golf,115
+Head,Hockey Helmet,115
+Head,Iridescent Sunhat,115
+Head,Knife,115
+Head,Pirate,115
+Head,Plunger,115
+Head,Proud To Be Ugly,115
+Head,Rice Dome,115
+Head,Skate Black,115
+Head,3D,110
+Head,Brain Bucket,110
+Head,Crown,110
+Head,Dennis Blonde,110
+Head,Dread,110
+Head,Fire,110
+Head,Flower Hat,110
+Head,Green Visor,110
+Head,I Need TP,110
+Head,Ice Cream,110
+Head,Lobby,110
+Head,Pomade,110
+Head,Pot Head,110
+Head,Purr Paw,110
+Head,Skate Pink,110
+Head,Ski Goggles,110
+Head,Sombrero,110
+Head,Watermelon Bucket,110
+Head,Bear Fur Hat,105
+Head,Captain,105
+Head,Dennis Pink,105
+Head,Flowers,105
+Head,Green Mountie,105
+Head,Grey Boom Bucket,105
+Head,Headphones,105
+Head,Lemon Sunhat,105
+Head,Mono Pigtail,105
+Head,Multi Cap,105
+Head,Ugly Pale Ale,105
+Head,Visor With Hair,105
+Head,White Cowboy,105
+Head,Afro Brown,100
+Head,Bandana,100
+Head,Fresh Cut,100
+Head,Paper Boat,100
+Head,Pink Cowboy,100
+Head,Afro Blonde,95
+Head,Bald,95
+Head,Black Backwards Cap,95
+Head,Blonde Pigtails,95
+Head,Blue Ugly Cap,95
+Head,Brown Hair Bandana,95
+Head,Brown Pigtails,95
+Head,Cowboy,95
+Head,Mountie,95
+Head,Nurse,95
+Head,Parted,95
+Head,Pink Beanie,95
+Head,Pink Ugly Cap,95
+Head,Ugly Black Cap,95
+Head,White Backwards Cap,95
+Head,White Bowl,95
+Head,Yellow Sunhat,95
+Head,Black Cap,90
+Head,Blonde Hair Bandana,90
+Head,Bow,90
+Head,Green Beanie,90
+Head,Green Cap,90
+Head,Pink Sunhat,90
+Head,Purple Punk,90
+Head,Green Ugly Cap,85
+Head,Pink Bowl,85
+Head,Yellow Bowl,85
+Head,Yellow Punk,85
+Special,Multi Laser,70
+Special,Laser Tits,65
+Special,E cigarette,55
+Special,Yellow Laser,55
+Special,Green Laser,50
+Special,Piranha,50
+Special,Dino,45
+Special,Nouns Glasses,45
+Special,Parakeet,45
+Special,Blunt,40
+Special,Monocle,40
+Special,Ugly Necklace,40
+Special,Weed Necklace,40
+Special,Sad Necklace,35
+Special,Smile Necklace,30
+Special,Multi Earring,25
+Special,Gold Earring,20
+Special,None,0
+Status,OG,200
+Status,Reloaded,0
+Legendary,Astonaut,1000
+Legendary,Beige Half Cut,1000
+Legendary,Beige Zombie,1000
+Legendary,Black Latex,1000
+Legendary,Bodybuilder,1000
+Legendary,Borat Bodybuilder,1000
+Legendary,Brit,1000
+Legendary,Brown Zombie,1000
+Legendary,Cornhuglyio,1000
+Legendary,Cow,1000
+Legendary,Crystal Power,1000
+Legendary,Dark Brown Half Cut,1000
+Legendary,Dino,1000
+Legendary,Dismembered,1000
+Legendary,Gold Power,1000
+Legendary,Green Slime,1000
+Legendary,Horse,1000
+Legendary,Insquignito,1000
+Legendary,Monochrome Elf,1000
+Legendary,Monochrome Squig,1000
+Legendary,Night,1000
+Legendary,Pikachugly,1000
+Legendary,Purple Latex,1000
+Legendary,Purple Yeti,1000
+Legendary,Purple Zombie,1000
+Legendary,Red Yeti,1000
+Legendary,Robot,1000
+Legendary,Shark,1000
+Legendary,Silver Power,1000
+Legendary,Sulks Elf,1000
+Legendary,Yellow Slime,1000

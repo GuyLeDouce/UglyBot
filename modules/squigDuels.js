@@ -22,6 +22,7 @@ const {
 const SQUIGS_CONTRACT = String(
   process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a'
 ).toLowerCase();
+const SQUIGS_CHAIN = String(process.env.SQUIG_COLLECTION_CHAIN || process.env.SQUIG_CHAIN || 'ethereum').trim().toLowerCase();
 const SQUIG_IMAGE_BASE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
   path.join(__dirname, '..', 'images'),
@@ -194,6 +195,51 @@ function squigImageUrl(tokenId) {
 function discordImageUrl(source) {
   const value = String(source || '').trim();
   return /^https?:\/\//i.test(value) ? value : null;
+}
+
+function normalizeSquigChain(chain) {
+  const value = String(chain || SQUIGS_CHAIN || 'ethereum').trim().toLowerCase();
+  if (value === 'eth' || value === 'mainnet') return 'ethereum';
+  if (value === 'abs') return 'abstract';
+  return value || 'ethereum';
+}
+
+async function squigCollectionCandidates(guildId) {
+  const fallback = {
+    name: 'Squigs Reloaded',
+    chain: normalizeSquigChain(SQUIGS_CHAIN),
+    contractAddress: SQUIGS_CONTRACT,
+  };
+  const out = [];
+  const seen = new Set();
+  const add = (entry) => {
+    const chain = normalizeSquigChain(entry?.chain);
+    const contractAddress = String(entry?.contractAddress || entry?.contract_address || '').toLowerCase();
+    if (contractAddress !== SQUIGS_CONTRACT) return;
+    const key = `${chain}:${contractAddress}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      name: String(entry?.name || 'Squigs Reloaded'),
+      chain,
+      contractAddress,
+    });
+  };
+
+  if (typeof deps?.getHolderCollections === 'function') {
+    const collections = await deps.getHolderCollections(guildId).catch((err) => {
+      console.warn('[SquigDuels] holder collections lookup failed:', String(err?.message || err || ''));
+      return [];
+    });
+    const matches = (Array.isArray(collections) ? collections : [])
+      .filter((c) => String(c?.contract_address || c?.contractAddress || '').toLowerCase() === SQUIGS_CONTRACT);
+    for (const entry of matches.filter((c) => normalizeSquigChain(c.chain) !== 'ethereum')) add(entry);
+    for (const entry of matches.filter((c) => normalizeSquigChain(c.chain) === normalizeSquigChain(SQUIGS_CHAIN))) add(entry);
+    for (const entry of matches) add(entry);
+  }
+
+  add(fallback);
+  return out;
 }
 
 function loserSide(duel, winnerId) {
@@ -1133,7 +1179,7 @@ async function cancelDuel(guild, duel, reason) {
   scheduleDuelThreadDeletion(guild, duel);
 }
 
-async function tryDirectUglyPointLookup(tokenId) {
+async function tryDirectUglyPointLookup(tokenId, chain = SQUIGS_CHAIN) {
   const pool = deps?.pointsPool;
   if (!pool?.query) return null;
   for (const tableName of ['holder_points_mapping', 'holder_point_mapping', 'holder_point_mappings']) {
@@ -1149,10 +1195,18 @@ async function tryDirectUglyPointLookup(tokenId) {
       const pointCol = ['ugly_points', 'uglypoints', 'points', 'total_points', 'total_ugly_points'].find((c) => cols.has(c));
       if (!pointCol) continue;
       const hasContract = cols.has('contract_address');
-      const query = hasContract
-        ? `SELECT ${pointCol} AS ugly_points FROM ${tableName} WHERE token_id::text = $1 AND LOWER(contract_address) = $2 LIMIT 1`
-        : `SELECT ${pointCol} AS ugly_points FROM ${tableName} WHERE token_id::text = $1 LIMIT 1`;
-      const params = hasContract ? [String(tokenId), SQUIGS_CONTRACT] : [String(tokenId)];
+      const hasChain = cols.has('chain');
+      let query = `SELECT ${pointCol} AS ugly_points FROM ${tableName} WHERE token_id::text = $1`;
+      const params = [String(tokenId)];
+      if (hasContract) {
+        params.push(SQUIGS_CONTRACT);
+        query += ` AND LOWER(contract_address) = $${params.length}`;
+      }
+      if (hasChain) {
+        params.push(normalizeSquigChain(chain));
+        query += ` AND COALESCE(NULLIF(LOWER(chain), ''), 'ethereum') = $${params.length}`;
+      }
+      query += ' LIMIT 1';
       const { rows } = await pool.query(query, params);
       const n = Number(rows[0]?.ugly_points);
       if (Number.isFinite(n) && n >= 0) return Math.floor(n);
@@ -1163,14 +1217,15 @@ async function tryDirectUglyPointLookup(tokenId) {
   return null;
 }
 
-async function calculateUglyPoints(guildId, tokenId) {
-  const direct = await tryDirectUglyPointLookup(tokenId);
+async function calculateUglyPoints(guildId, tokenId, chain = SQUIGS_CHAIN) {
+  const normalizedChain = normalizeSquigChain(chain);
+  const direct = await tryDirectUglyPointLookup(tokenId, normalizedChain);
   if (direct != null) return direct;
   const mappings = await deps.getGuildPointMappings(guildId);
-  const table = deps.hpTableForContract(SQUIGS_CONTRACT, mappings);
+  const table = deps.hpTableForContract(SQUIGS_CONTRACT, mappings, normalizedChain);
   if (!table || !Object.keys(table).length) return null;
-  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
-  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, normalizedChain);
+  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, normalizedChain);
   const grouped = deps.normalizeTraits(attrs);
   const { total } = deps.computeHpFromTraits(grouped, table);
   const n = Number(total);
@@ -1195,16 +1250,27 @@ async function fetchOwnedSquigs(guildId, userId) {
     return { ok: false, reason: walletConnectMessage('You must link your wallet before joining a Squig Duel.') };
   }
 
-  const tokenIds = await deps.getOwnedTokenIdsForContractMany(walletAddresses, SQUIGS_CONTRACT);
+  const candidates = await squigCollectionCandidates(guildId);
+  let tokenIds = [];
+  let selectedCollection = candidates[0] || { chain: normalizeSquigChain(SQUIGS_CHAIN), contractAddress: SQUIGS_CONTRACT };
+  for (const candidate of candidates) {
+    const ids = await deps.getOwnedTokenIdsForContractMany(walletAddresses, candidate.contractAddress, candidate.chain);
+    if (ids.length) {
+      tokenIds = ids;
+      selectedCollection = candidate;
+      break;
+    }
+  }
   if (!tokenIds.length) {
-    return { ok: false, reason: 'No Squigs found in your connected wallet.' };
+    const checked = candidates.map((c) => `${c.chain}:${c.contractAddress}`).join(', ');
+    return { ok: false, reason: `No Squigs found in your connected wallet. Checked: ${checked}` };
   }
 
   const savedProfiles = await getSavedSquigProfiles(guildId, userId);
   const squigs = [];
   for (const tokenId of tokenIds.slice(0, 200)) {
     try {
-      const uglyPoints = await calculateUglyPoints(guildId, tokenId);
+      const uglyPoints = await calculateUglyPoints(guildId, tokenId, selectedCollection.chain);
       if (!Number.isFinite(Number(uglyPoints))) continue;
       const hp = balancedHp(uglyPoints);
       const savedProfile = savedProfiles.get(String(tokenId));
