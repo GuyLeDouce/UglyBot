@@ -1429,6 +1429,60 @@ function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DE
   return loadLocalSquigMetadata().get(String(tokenId || '').trim())?.attrs || [];
 }
 
+function ownershipCollectionKey(collection) {
+  return `${normalizeNftChain(collection?.chain) || DEFAULT_NFT_CHAIN}:${String(collection?.contractAddress || '').toLowerCase()}`;
+}
+
+async function expandCollectionsForOwnership(guildId, collections) {
+  const out = [];
+  const seen = new Set();
+  const add = (collection) => {
+    const chain = normalizeNftChain(collection?.chain) || DEFAULT_NFT_CHAIN;
+    const contractAddress = normalizeEthAddress(collection?.contractAddress || collection?.contract_address);
+    if (!contractAddress) return;
+    const normalized = {
+      name: String(collection?.name || labelForContract(contractAddress, chain)),
+      contractAddress,
+      chain,
+    };
+    const key = ownershipCollectionKey(normalized);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(normalized);
+  };
+
+  const holderCollections = collections.some((c) => isSquigsContract(c?.contractAddress || c?.contract_address))
+    ? await getHolderCollections(guildId).catch((err) => {
+        console.warn('Squigs collection lookup failed:', String(err?.message || err || ''));
+        return [];
+      })
+    : [];
+  const configuredSquigs = holderCollections.filter((c) => isSquigsContract(c.contract_address || c.contractAddress));
+
+  for (const collection of collections) {
+    if (!isSquigsContract(collection?.contractAddress || collection?.contract_address)) {
+      add(collection);
+      continue;
+    }
+
+    for (const configured of configuredSquigs.filter((c) => normalizeNftChain(c.chain) !== DEFAULT_NFT_CHAIN)) {
+      add({ name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: configured.chain });
+    }
+    for (const configured of configuredSquigs.filter((c) => normalizeNftChain(c.chain) === squigsChain())) {
+      add({ name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: configured.chain });
+    }
+    for (const configured of configuredSquigs) {
+      add({ name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: configured.chain });
+    }
+    add({ name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() });
+    for (const chain of Object.keys(NFT_CHAIN_CONFIG)) {
+      add({ name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain });
+    }
+  }
+
+  return out;
+}
+
 async function buildRandomOwnedNftResponse(guildId, discordUserId, username, collections, commandLabel) {
   const links = await getWalletLinks(guildId, discordUserId);
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
@@ -1438,8 +1492,9 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
     };
   }
 
+  const ownershipCollections = await expandCollectionsForOwnership(guildId, collections);
   const pools = await Promise.all(
-    collections.map(async ({ contractAddress, chain = DEFAULT_NFT_CHAIN }) => {
+    ownershipCollections.map(async ({ contractAddress, chain = DEFAULT_NFT_CHAIN }) => {
       const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
       const tokenIds = await getOwnedTokenIdsForContractMany(walletAddresses, contractAddress, normalizedChain);
       return tokenIds.map((tokenId) => ({ tokenId: String(tokenId), contractAddress, chain: normalizedChain }));
@@ -1447,7 +1502,7 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   );
   const owned = pools.flat();
   if (!owned.length) {
-    const names = collections.map((x) => x.name).join(', ');
+    const names = ownershipCollections.map((x) => `${x.name} (${nftChainLabel(x.chain)})`).join(', ');
     return {
       content: `No ${commandLabel} NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\nChecked: ${names}`
     };
