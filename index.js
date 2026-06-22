@@ -4077,6 +4077,8 @@ async function getPassiveClaimQuote(guildId, links, settings) {
       payoutType,
       payoutAmount,
       nftEntries: [],
+      ownedNfts: 0,
+      scoringErrors: [],
       totalNfts: 0,
       totalUnits: 0,
       baseAmount: 0,
@@ -4111,6 +4113,8 @@ async function getPassiveClaimQuote(guildId, links, settings) {
       payoutType,
       payoutAmount,
       nftEntries: [],
+      ownedNfts: 0,
+      scoringErrors: [],
       totalNfts: 0,
       totalUnits: 0,
       baseAmount: 0,
@@ -4119,6 +4123,7 @@ async function getPassiveClaimQuote(guildId, links, settings) {
     };
   }
 
+  const scoringErrors = [];
   if (payoutType === 'per_up') {
     const guildPointMappings = await getGuildPointMappings(guildId);
     await mapLimit(nftEntries, 5, async (entry) => {
@@ -4128,13 +4133,16 @@ async function getPassiveClaimQuote(guildId, links, settings) {
         return;
       }
       try {
-        const meta = await getNftMetadataAlchemy(entry.tokenId, entry.contractAddress, entry.chain);
-        const { attrs } = await getTraitsForToken(meta, entry.tokenId, entry.contractAddress, entry.chain);
+        const { attrs } = await getTraitsForTokenResilient(entry.tokenId, entry.contractAddress, entry.chain);
         const grouped = normalizeTraits(attrs);
         const { total } = computeHpFromTraits(grouped, table);
         entry.unitValue = total || 0;
-      } catch {
+      } catch (err) {
         entry.unitValue = 0;
+        scoringErrors.push(providerFailureSummary(
+          `${nftChainLabel(entry.chain)} ${entry.contractAddress} token ${entry.tokenId}`,
+          err
+        ));
       }
     });
   }
@@ -4145,6 +4153,8 @@ async function getPassiveClaimQuote(guildId, links, settings) {
       payoutType,
       payoutAmount,
       nftEntries: [],
+      ownedNfts: nftEntries.length,
+      scoringErrors: [...new Set(scoringErrors)].slice(0, 3),
       totalNfts: 0,
       totalUnits: 0,
       baseAmount: 0,
@@ -4171,6 +4181,8 @@ async function getPassiveClaimQuote(guildId, links, settings) {
     payoutType,
     payoutAmount,
     nftEntries: eligibleNftEntries,
+    ownedNfts: nftEntries.length,
+    scoringErrors: [...new Set(scoringErrors)].slice(0, 3),
     totalNfts: eligibleNftEntries.length,
     totalUnits: totals.totalUnits,
     baseAmount: totals.baseAmount,
@@ -5994,6 +6006,33 @@ function claimConfirmButtons() {
   );
 }
 
+function claimUnavailableMessage(rewardQuote, pointsLabel = 'UglyPoints') {
+  const ownedNfts = Number(rewardQuote?.ownedNfts || 0);
+  const scorableNfts = Number(rewardQuote?.totalNfts || 0);
+  const scoringErrors = Array.isArray(rewardQuote?.scoringErrors) ? rewardQuote.scoringErrors : [];
+
+  if (ownedNfts <= 0) {
+    return 'No eligible NFTs were found across your linked wallets.';
+  }
+  if (scorableNfts <= 0 && scoringErrors.length) {
+    return (
+      `Found **${ownedNfts} NFT${ownedNfts === 1 ? '' : 's'}** from configured earning contracts, ` +
+      `but the bot could not calculate ${pointsLabel}.\n` +
+      `Scoring error: ${scoringErrors[0]}`
+    );
+  }
+  if (scorableNfts <= 0) {
+    return (
+      `Found **${ownedNfts} NFT${ownedNfts === 1 ? '' : 's'}** from configured earning contracts, ` +
+      `but none matched a positive value in the ${pointsLabel} mappings.`
+    );
+  }
+  return (
+    `Found **${scorableNfts} claimable NFT${scorableNfts === 1 ? '' : 's'}**, but the accrued reward is currently below ` +
+    `the minimum whole-point payout. Your NFTs are still accruing rewards.`
+  );
+}
+
 async function handleClaimPrompt(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: 64 });
@@ -6028,7 +6067,7 @@ async function handleClaimPrompt(interaction) {
   const amount = rewardQuote.claimableAmount;
   if (amount <= 0) {
     await respondInteraction(interaction, {
-      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      content: claimUnavailableMessage(rewardQuote, getPointsLabel(settings)),
       flags: 64
     });
     return;
@@ -6093,7 +6132,7 @@ async function handleClaimCalculation(interaction) {
   const pointsLabel = getPointsLabel(settings);
   if (rewardQuote.claimableAmount <= 0) {
     await respondInteraction(interaction, {
-      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      content: claimUnavailableMessage(rewardQuote, pointsLabel),
       flags: 64
     });
     return;
@@ -6164,7 +6203,7 @@ async function handleClaim(interaction) {
 
   if (amount <= 0) {
     await respondInteraction(interaction, {
-      content: 'Nothing is claimable yet. Your NFTs are still accruing rewards.',
+      content: claimUnavailableMessage(rewardQuote, pointsLabel),
       flags: 64
     });
     return;
@@ -9338,7 +9377,13 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
     return { attrs: normalizeSquigsReloadedAttrs(attrsA, contractAddress), source: 'alchemy' };
   }
 
-  // 2) Fallback to OpenSea if we have an API key
+  // 2) Prefer bundled metadata when this collection has it.
+  const attrsC = localSquigTraits(tokenId, contractAddress, chain);
+  if (attrsC.length > 0) {
+    return { attrs: normalizeSquigsReloadedAttrs(attrsC.map(massageTraitKeys).filter(validAttrFilter), contractAddress), source: 'local_csv' };
+  }
+
+  // 3) Fallback to OpenSea if we have an API key
   if (OPENSEA_API_KEY) {
     try {
       const attrsB = await fetchOpenSeaTraits(tokenId, contractAddress, chain);
@@ -9355,12 +9400,21 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
     }
   }
 
-  const attrsC = localSquigTraits(tokenId, contractAddress, chain);
-  if (attrsC.length > 0) {
-    return { attrs: normalizeSquigsReloadedAttrs(attrsC.map(massageTraitKeys).filter(validAttrFilter), contractAddress), source: 'local_csv' };
+  return { attrs: [], source: 'none' };
+}
+
+async function getTraitsForTokenResilient(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  let alchemyMeta = null;
+  let alchemyError = null;
+  try {
+    alchemyMeta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+  } catch (err) {
+    alchemyError = err;
   }
 
-  return { attrs: [], source: 'none' };
+  const result = await getTraitsForToken(alchemyMeta, tokenId, contractAddress, chain);
+  if (result.attrs.length || !alchemyError) return result;
+  throw alchemyError;
 }
 
 function extractAttributesFlexible(alchemyMeta) {
