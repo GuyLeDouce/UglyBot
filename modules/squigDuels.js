@@ -796,6 +796,12 @@ async function hasHolderRole(guild, userId) {
   return [...ADDITIONAL_DUEL_PLAYER_ROLE_IDS].some((allowedRoleId) => member.roles.cache.has(allowedRoleId));
 }
 
+async function hasAdditionalDuelPlayerRole(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return false;
+  return [...ADDITIONAL_DUEL_PLAYER_ROLE_IDS].some((allowedRoleId) => member.roles.cache.has(allowedRoleId));
+}
+
 async function ensureHolderThreadViewAccess(guild, thread) {
   const roleId = holderRoleId();
   if (!roleId || !thread) return;
@@ -995,7 +1001,7 @@ async function handleStartButton(interaction) {
   await persistDuel(duel);
   await logDuel(interaction.guild, 'Created', `Duel \`${duelId}\` created by <@${interaction.user.id}> in <#${thread.id}>.`);
 
-  const allowOpenChallenge = isAdmin(interaction);
+  const allowOpenChallenge = isAdmin(interaction) || await hasAdditionalDuelPlayerRole(interaction.guild, interaction.user.id);
   await thread.send({
     content:
       `<@${interaction.user.id}> started a Squig Duel setup.\n` +
@@ -1573,6 +1579,11 @@ function buildMySquigRows(userId, state) {
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(!selected),
       new ButtonBuilder()
+        .setCustomId(`sd:my_squig_remove_name:${userId}`)
+        .setLabel('Remove Name')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(!selected?.nickname),
+      new ButtonBuilder()
         .setCustomId(`sd:my_squig_favorite:${userId}`)
         .setLabel(selected?.isFavorite ? 'Unfavorite' : 'Favorite')
         .setStyle(selected?.isFavorite ? ButtonStyle.Secondary : ButtonStyle.Success)
@@ -1762,6 +1773,41 @@ async function handleMySquigNameModal(interaction) {
   if (selected) selected.nickname = nickname;
   state.saved = false;
   await updateMySquigInteraction(interaction, state, nickname ? `Name set to "${nickname}". Press Save to keep it.` : 'Name cleared. Press Save to keep it.');
+  return true;
+}
+
+async function handleMySquigRemoveNameButton(interaction) {
+  const match = interaction.customId.match(/^sd:my_squig_remove_name:(\d{16,22})$/);
+  if (!match) return false;
+  assertReady();
+  if (interaction.user.id !== match[1]) {
+    await interaction.reply({ content: 'This Squig profile editor is not for you.', flags: 64 });
+    return true;
+  }
+  const state = pendingMySquigProfiles.get(mySquigStateKey(interaction.guild.id, interaction.user.id));
+  const selected = selectedMySquig(state);
+  if (!state || !selected) {
+    await interaction.reply({ content: 'Choose a Squig before removing its name.', flags: 64 });
+    return true;
+  }
+  if (!selected.nickname) {
+    await interaction.reply({ content: 'This Squig does not have a saved name.', flags: 64 });
+    return true;
+  }
+
+  const saved = await saveMySquigProfile(interaction.guild.id, interaction.user.id, {
+    tokenId: selected.tokenId,
+    nickname: '',
+    isFavorite: selected.isFavorite,
+  });
+  if (!saved.ok) {
+    await interaction.reply({ content: saved.reason || 'Could not remove this Squig name.', flags: 64 });
+    return true;
+  }
+  selected.nickname = '';
+  applySavedSquigNameToActiveDuels(interaction.guild.id, interaction.user.id, selected.tokenId, '');
+  state.saved = Boolean(selected.isFavorite);
+  await updateMySquigInteraction(interaction, state, `Removed the saved name from Squig #${selected.tokenId}.`);
   return true;
 }
 
@@ -1971,8 +2017,8 @@ async function handleOpenChallengeButton(interaction) {
     await interaction.reply({ content: 'Only the challenger can open this challenge.', flags: 64 });
     return true;
   }
-  if (!isAdmin(interaction)) {
-    await interaction.reply({ content: 'Open Challenge is admin only.', flags: 64 });
+  if (!isAdmin(interaction) && !(await hasAdditionalDuelPlayerRole(interaction.guild, interaction.user.id))) {
+    await interaction.reply({ content: 'Open challenges are limited to Reloaded role players and admins.', flags: 64 });
     return true;
   }
 
@@ -3297,6 +3343,7 @@ async function handleButton(interaction) {
   if (await handleSetMySquigButton(interaction)) return true;
   if (await handleMySquigPageButton(interaction)) return true;
   if (await handleMySquigNameButton(interaction)) return true;
+  if (await handleMySquigRemoveNameButton(interaction)) return true;
   if (await handleMySquigFavoriteButton(interaction)) return true;
   if (await handleMySquigSaveButton(interaction)) return true;
   if (await handleBotDuelButton(interaction)) return true;
