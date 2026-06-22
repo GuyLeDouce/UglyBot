@@ -3160,12 +3160,28 @@ function defaultHolderCollections() {
 
 async function getHolderCollections(guildId) {
   const { rows } = await teamPool.query(
-    `SELECT name, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address FROM holder_collections WHERE guild_id = $1 AND enabled = TRUE ORDER BY created_at ASC`,
+    `SELECT name, COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address, enabled FROM holder_collections WHERE guild_id = $1 ORDER BY created_at ASC`,
     [guildId]
   );
   const out = [];
   const seen = new Set();
-  for (const c of [...defaultHolderCollections(), ...rows]) {
+  const overrides = new Map();
+  for (const row of rows) {
+    const key = collectionKey(row.chain, row.contract_address);
+    if (key) overrides.set(key, row);
+  }
+  for (const defaultCollection of defaultHolderCollections()) {
+    const key = collectionKey(defaultCollection.chain, defaultCollection.contract_address);
+    const override = key ? overrides.get(key) : null;
+    if (override && !override.enabled) continue;
+    const c = override || defaultCollection;
+    const chain = normalizeNftChain(c.chain) || DEFAULT_NFT_CHAIN;
+    const addr = normalizeEthAddress(c.contract_address);
+    if (!addr || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name: String(c.name || addr), chain, contract_address: addr });
+  }
+  for (const c of rows.filter((row) => row.enabled)) {
     const chain = normalizeNftChain(c.chain) || DEFAULT_NFT_CHAIN;
     const addr = normalizeEthAddress(c.contract_address);
     const key = collectionKey(chain, addr);
@@ -3185,6 +3201,49 @@ async function upsertHolderCollection(guildId, name, contractAddress, chain = DE
      SET name = EXCLUDED.name, enabled = TRUE`,
     [guildId, String(name || '').trim(), normalizedChain, String(contractAddress || '').toLowerCase()]
   );
+}
+
+async function removeHolderCollection(guildId, name, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = normalizeEthAddress(contractAddress);
+  if (!normalizedContract) throw new Error('Invalid collection contract address.');
+
+  const client = await teamPool.connect();
+  let holderRuleCount = 0;
+  let traitRuleCount = 0;
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO holder_collections (guild_id, name, chain, contract_address, enabled)
+       VALUES ($1, $2, $3, $4, FALSE)
+       ON CONFLICT (guild_id, chain, contract_address) DO UPDATE SET enabled = FALSE`,
+      [guildId, String(name || normalizedContract).trim(), normalizedChain, normalizedContract]
+    );
+    const holderResult = await client.query(
+      `UPDATE holder_rules SET enabled = FALSE
+       WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND enabled = TRUE`,
+      [guildId, normalizedChain, normalizedContract]
+    );
+    const traitResult = await client.query(
+      `UPDATE trait_role_rules SET enabled = FALSE
+       WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND enabled = TRUE`,
+      [guildId, normalizedChain, normalizedContract]
+    );
+    holderRuleCount = holderResult.rowCount || 0;
+    traitRuleCount = traitResult.rowCount || 0;
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const mappingResult = await pointsPool.query(
+    `DELETE FROM holder_point_mappings WHERE guild_id = $1 AND chain = $2 AND contract_address = $3`,
+    [guildId, normalizedChain, normalizedContract]
+  );
+  return { holderRuleCount, traitRuleCount, mappingCount: mappingResult.rowCount || 0 };
 }
 
 async function setGuildPointMapping(guildId, contractAddress, mappingTable, actorDiscordId = null, chain = DEFAULT_NFT_CHAIN) {
@@ -4495,7 +4554,7 @@ function setupMainEmbed() {
     .setTitle('Holder Verification Setup')
     .setDescription(
       `Choose a setup action.\n` +
-      `• Collections: add collection name + chain + contract for setup options.\n` +
+      `• Collections: add or remove collection name + chain + contract setup.\n` +
       `• Holder roles: add/remove collection-based role rules.\n` +
       `• Trait roles: add/remove trait-based role rules using built-in or custom mapped traits.\n` +
       `• Points Mapping: upload or remove category/trait/points CSV per collection.\n` +
@@ -4744,6 +4803,7 @@ function setupMainButtons() {
       new ButtonBuilder().setCustomId('setup_points_mapping').setLabel('Points Mapping').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_drip_menu').setLabel('Setup DRIP').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('setup_remove_points_mapping').setLabel('Remove Points Mapping').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('setup_remove_collection').setLabel('Remove Collection').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('setup_view').setLabel('View Config').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -7836,7 +7896,6 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'rewards_view_holdings') {
         await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
-        const pointsLabel = getPointsLabel(settings);
         const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
         const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
         if (!walletAddresses.length) {
@@ -7844,10 +7903,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        const [collectionCounts, rewardQuote] = await Promise.all([
-          getConnectedCollectionCounts(interaction.guild.id, walletAddresses),
-          computeDailyRewardQuote(interaction.guild.id, links, settings || {}),
-        ]);
+        const collectionCounts = await getConnectedCollectionCounts(interaction.guild.id, walletAddresses);
 
         let dripBalanceText = 'Unavailable';
         try {
@@ -7879,17 +7935,13 @@ client.on('interactionCreate', async (interaction) => {
         const collectionLines = collectionCounts.length
           ? collectionCounts.map((x) => `• ${x.name} (${nftChainLabel(x.chain)}): **${x.count}** NFT${x.count === 1 ? '' : 's'}`).join('\n')
           : '• No connected collections found.';
-        const penaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
-          ? `\nUnverified wallet dock: **-${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM**`
-          : '';
-
         const embed = new EmbedBuilder()
           .setTitle(`${interaction.user.username}'s Holdings`)
           .setColor(0xB0DEEE)
           .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
           .setDescription(
             `Collections connected to this server across all linked wallets:\n${collectionLines}\n\n` +
-            `Daily earnings: **${rewardQuote.dailyReward} $CHARM**${penaltyLine}\n` +
+            `Use **Claim Rewards** to calculate current accrued earnings.\n` +
             `DRIP $CHARM held: **${dripBalanceText}**`
           );
 
@@ -7914,6 +7966,44 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({
           embeds: [setupMainEmbed()],
           components: setupMainButtons(),
+        });
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_collection_cancel') {
+        await interaction.update({ content: 'Collection removal canceled.', components: [] });
+        return;
+      }
+
+      if (interaction.customId.startsWith('setup_remove_collection_confirm:')) {
+        const selectedRef = parseChainAddressInput(
+          interaction.customId.slice('setup_remove_collection_confirm:'.length)
+        );
+        if (!selectedRef) {
+          await interaction.update({ content: 'Invalid collection selection.', components: [] });
+          return;
+        }
+        const collections = await getHolderCollections(interaction.guild.id);
+        const collection = collections.find(
+          (c) => collectionKey(c.chain, c.contract_address) === collectionKey(selectedRef.chain, selectedRef.contractAddress)
+        );
+        if (!collection) {
+          await interaction.update({ content: 'Collection not found or already removed.', components: [] });
+          return;
+        }
+        const removed = await removeHolderCollection(
+          interaction.guild.id,
+          collection.name,
+          selectedRef.contractAddress,
+          selectedRef.chain
+        );
+        await interaction.update({
+          content:
+            `Removed collection **${collection.name}** on **${nftChainLabel(selectedRef.chain)}** (\`${selectedRef.contractAddress}\`).\n` +
+            `Disabled holder rules: ${removed.holderRuleCount}\n` +
+            `Disabled trait rules: ${removed.traitRuleCount}\n` +
+            `Removed points mappings: ${removed.mappingCount}`,
+          components: [],
         });
         return;
       }
@@ -8013,6 +8103,31 @@ client.on('interactionCreate', async (interaction) => {
           ),
         );
         await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.customId === 'setup_remove_collection') {
+        const collections = await getHolderCollections(interaction.guild.id);
+        if (!collections.length) {
+          await interaction.reply({ content: 'No collections to remove.', flags: 64 });
+          return;
+        }
+        const options = collections.slice(0, 25).map((c) => ({
+          label: String(c.name).slice(0, 100),
+          value: collectionSelectValue(c.chain, c.contract_address),
+          description: `${nftChainLabel(c.chain)} ${c.contract_address}`.slice(0, 100),
+        }));
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('setup_remove_collection_select')
+            .setPlaceholder('Select a collection to remove')
+            .addOptions(options)
+        );
+        await interaction.reply({
+          content: 'Select a collection to remove:',
+          components: [row],
+          flags: 64,
+        });
         return;
       }
 
@@ -8588,6 +8703,43 @@ client.on('interactionCreate', async (interaction) => {
         )
       );
       await interaction.showModal(modal);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup_remove_collection_select') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const selectedRef = parseChainAddressInput(interaction.values?.[0] || '');
+      if (!selectedRef) {
+        await interaction.update({ content: 'Invalid collection selection.', components: [] });
+        return;
+      }
+      const collections = await getHolderCollections(interaction.guild.id);
+      const collection = collections.find(
+        (c) => collectionKey(c.chain, c.contract_address) === collectionKey(selectedRef.chain, selectedRef.contractAddress)
+      );
+      if (!collection) {
+        await interaction.update({ content: 'Collection not found or already removed.', components: [] });
+        return;
+      }
+      const confirmRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`setup_remove_collection_confirm:${collectionSelectValue(selectedRef.chain, selectedRef.contractAddress)}`)
+          .setLabel('Remove Collection')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId('setup_remove_collection_cancel')
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary)
+      );
+      await interaction.update({
+        content:
+          `Remove **${collection.name}** on **${nftChainLabel(selectedRef.chain)}** (\`${selectedRef.contractAddress}\`)?\n\n` +
+          `This also disables its holder and trait rules and deletes its points mapping. Claim history is retained.`,
+        components: [confirmRow],
+      });
       return;
     }
 
@@ -9425,6 +9577,14 @@ async function getTraitsForToken(alchemyMeta, tokenId, contractAddress = SQUIGS_
 }
 
 async function getTraitsForTokenResilient(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  const localAttrs = localSquigTraits(tokenId, contractAddress, chain);
+  if (localAttrs.length > 0) {
+    return {
+      attrs: normalizeSquigsReloadedAttrs(localAttrs.map(massageTraitKeys).filter(validAttrFilter), contractAddress),
+      source: 'local_csv',
+    };
+  }
+
   let alchemyMeta = null;
   let alchemyError = null;
   try {
