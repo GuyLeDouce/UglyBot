@@ -37,6 +37,7 @@ const SQUIG_DUEL_LOSER_IMAGE_NAME = 'squig-duel-loser.png';
 const SQUIG_DUEL_PUNCH_OVERLAY_PATH = path.join(__dirname, '..', 'squig_duel_punch_overlay.png');
 const WALLET_CONNECT_CHANNEL_ID = '1476967108062740622';
 const OPEN_CHALLENGE_ROLE_ID = '1389076094245671002';
+const ADDITIONAL_DUEL_PLAYER_ROLE_IDS = new Set(['1517233987175710850']);
 const BOT_DUEL_WAGER = 50;
 const BOT_DUEL_MAX_WAGER = 5000;
 const BOT_DUEL_PAYOUT_MULTIPLIER = 3;
@@ -790,7 +791,9 @@ async function hasHolderRole(guild, userId) {
   const roleId = holderRoleId();
   if (!roleId) return true;
   const member = await guild.members.fetch(userId).catch(() => null);
-  return Boolean(member?.roles?.cache?.has(roleId));
+  if (!member) return false;
+  if (member.roles.cache.has(roleId)) return true;
+  return [...ADDITIONAL_DUEL_PLAYER_ROLE_IDS].some((allowedRoleId) => member.roles.cache.has(allowedRoleId));
 }
 
 async function ensureHolderThreadViewAccess(guild, thread) {
