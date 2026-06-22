@@ -206,8 +206,10 @@ console.log('ENV CHECK:', {
 // ===== CONTRACTS =====
 const UGLY_CONTRACT    = '0x9492505633d74451bdf3079c09ccc979588bc309';
 const MONSTER_CONTRACT = '0x1cD7fe72D64f6159775643ACEdc7D860dFB80348';
+const OG_SQUIGS_CONTRACT = '0x9bf567ddf41b425264626d1b8b2c7f7c660b1c42';
 const SQUIGS_CONTRACT  = String(process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a').toLowerCase();
 const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
+const OG_SQUIG_IMAGE_BASE_URL = String(process.env.OG_SQUIG_IMAGE_BASE_URL || 'https://assets.bueno.art/images/a49527dc-149c-4cbc-9038-d4b0d1dbf0b2/default').replace(/\/+$/, '');
 const DEFAULT_NFT_CHAIN = 'ethereum';
 const SQUIGS_CHAIN = String(process.env.SQUIG_COLLECTION_CHAIN || process.env.SQUIG_CHAIN || DEFAULT_NFT_CHAIN).trim().toLowerCase();
 const NFT_CHAIN_CONFIG = {
@@ -1197,6 +1199,10 @@ function isSquigsContract(contractAddress) {
   return String(contractAddress || '').toLowerCase() === SQUIGS_CONTRACT.toLowerCase();
 }
 
+function isOgSquigsContract(contractAddress) {
+  return String(contractAddress || '').toLowerCase() === OG_SQUIGS_CONTRACT.toLowerCase();
+}
+
 function collectionKey(chain, contractAddress) {
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const normalizedAddress = normalizeEthAddress(contractAddress);
@@ -1271,6 +1277,7 @@ function labelForContract(contractAddress, chain = DEFAULT_NFT_CHAIN) {
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === UGLY_CONTRACT.toLowerCase()) return 'Charm of the Ugly';
   if (normalizedChain === DEFAULT_NFT_CHAIN && c === MONSTER_CONTRACT.toLowerCase()) return 'Ugly Monsters';
+  if (normalizedChain === DEFAULT_NFT_CHAIN && isOgSquigsContract(c)) return 'Squigs';
   if (isSquigsContract(c)) return 'Squigs Reloaded';
   return String(contractAddress || 'Unknown Contract');
 }
@@ -1429,6 +1436,77 @@ function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DE
   return loadLocalSquigMetadata().get(String(tokenId || '').trim())?.attrs || [];
 }
 
+const directSquigsOwnerCache = new Map();
+const DIRECT_SQUIG_OWNER_CACHE_TTL_MS = Math.max(0, Number(process.env.DIRECT_SQUIG_OWNER_CACHE_TTL_MS || 5 * 60 * 1000));
+const DIRECT_SQUIG_MAX_TOKEN_ID = Math.max(1, Number(process.env.SQUIG_MAX_TOKEN_ID || 4444));
+
+async function getOwnedSquigsReloadedDirect(walletAddress) {
+  const wallet = normalizeEthAddress(walletAddress);
+  if (!wallet) return [];
+  const cacheKey = `ethereum:${SQUIGS_CONTRACT}:${wallet}`;
+  const cached = directSquigsOwnerCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
+    const contract = new ethers.Contract(SQUIGS_CONTRACT, abi, globalThis.__SQUIGS_PROVIDER);
+    const ids = [];
+    await mapLimit(Array.from({ length: DIRECT_SQUIG_MAX_TOKEN_ID }, (_, i) => i + 1), 12, async (tokenId) => {
+      try {
+        const owner = normalizeEthAddress(await contract.ownerOf(tokenId));
+        if (owner === wallet) ids.push(String(tokenId));
+      } catch {}
+    });
+    ids.sort((a, b) => Number(a) - Number(b));
+    return ids;
+  })();
+
+  directSquigsOwnerCache.set(cacheKey, {
+    expiresAt: Date.now() + DIRECT_SQUIG_OWNER_CACHE_TTL_MS,
+    promise,
+  });
+  if (directSquigsOwnerCache.size > 500) {
+    const oldestKey = directSquigsOwnerCache.keys().next().value;
+    if (oldestKey && oldestKey !== cacheKey) directSquigsOwnerCache.delete(oldestKey);
+  }
+  promise.catch(() => directSquigsOwnerCache.delete(cacheKey));
+  return promise;
+}
+
+async function getOwnedSquigsReloadedTokenIds(walletAddresses) {
+  const normalizedWallets = [...new Set((Array.isArray(walletAddresses) ? walletAddresses : [walletAddresses]).map((w) => normalizeEthAddress(w)).filter(Boolean))];
+  const candidates = await expandCollectionsForOwnership(null, [
+    { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: DEFAULT_NFT_CHAIN },
+  ]);
+  const seen = new Set();
+  const tokenIds = [];
+
+  for (const collection of candidates.filter((c) => isSquigsContract(c.contractAddress))) {
+    const ids = await getOwnedTokenIdsForContractMany(normalizedWallets, collection.contractAddress, collection.chain);
+    for (const tokenId of ids) {
+      const key = String(tokenId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tokenIds.push(key);
+    }
+  }
+
+  if (!tokenIds.length) {
+    const directResults = await Promise.all(normalizedWallets.map((wallet) => getOwnedSquigsReloadedDirect(wallet).catch(() => [])));
+    for (const ids of directResults) {
+      for (const tokenId of ids) {
+        const key = String(tokenId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        tokenIds.push(key);
+      }
+    }
+  }
+
+  tokenIds.sort((a, b) => Number(a) - Number(b));
+  return tokenIds;
+}
+
 function ownershipCollectionKey(collection) {
   return `${normalizeNftChain(collection?.chain) || DEFAULT_NFT_CHAIN}:${String(collection?.contractAddress || '').toLowerCase()}`;
 }
@@ -1525,6 +1603,8 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
     ) ||
     (isSquig && SQUIG_IMAGE_BASE_URL
       ? `${SQUIG_IMAGE_BASE_URL}/${chosen.tokenId}`
+      : isOgSquigsContract(chosen.contractAddress) && OG_SQUIG_IMAGE_BASE_URL
+      ? `${OG_SQUIG_IMAGE_BASE_URL}/${chosen.tokenId}`
       : null);
   const localImagePath = isSquig ? localSquigImagePath(chosen.tokenId) : null;
   const localImageName = localImagePath ? `squig-${chosen.tokenId}${path.extname(localImagePath) || '.png'}` : null;
@@ -1546,6 +1626,146 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   return {
     embeds: [embed],
     ...(localImagePath ? { files: [new AttachmentBuilder(localImagePath, { name: localImageName })] } : {}),
+  };
+}
+
+async function squigsReloadedDetails(guildId, tokenIds) {
+  const mappings = await getGuildPointMappings(guildId);
+  const table = hpTableForContract(SQUIGS_CONTRACT, mappings, DEFAULT_NFT_CHAIN);
+  return mapLimit(tokenIds, 8, async (tokenId) => {
+    const localMeta = loadLocalSquigMetadata().get(String(tokenId));
+    let attrs = localSquigTraits(tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN).map(massageTraitKeys).filter(validAttrFilter);
+    let meta = null;
+    if (!attrs.length) {
+      meta = await getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN).catch(() => null);
+      ({ attrs } = await getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN));
+    }
+    attrs = normalizeSquigsReloadedAttrs(attrs, SQUIGS_CONTRACT);
+    const grouped = normalizeTraits(attrs);
+    const { total } = computeHpFromTraits(grouped, table);
+    return {
+      tokenId: String(tokenId),
+      name: String(meta?.name || localMeta?.name || `Squig #${tokenId}`),
+      uglyPoints: Math.max(0, Math.floor(Number(total) || 0)),
+      imagePath: localSquigImagePath(tokenId),
+    };
+  });
+}
+
+async function buildRandomSquigReloadedResponse(guildId, discordUserId, username) {
+  const links = await getWalletLinks(guildId, discordUserId);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
+    return { content: 'Connect your wallet first with the verification menu before using this command.' };
+  }
+
+  const tokenIds = await getOwnedSquigsReloadedTokenIds(walletAddresses);
+  if (!tokenIds.length) {
+    return {
+      content:
+        `No !squig NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\n` +
+        `Checked: Squigs Reloaded (Ethereum) \`${SQUIGS_CONTRACT}\``,
+    };
+  }
+
+  const chosenTokenId = pickRandom(tokenIds);
+  const [detail] = await squigsReloadedDetails(guildId, [chosenTokenId]);
+  const imageName = detail.imagePath ? `squig-${detail.tokenId}${path.extname(detail.imagePath) || '.png'}` : null;
+  const embed = new EmbedBuilder()
+    .setTitle(detail.name)
+    .setColor(0xB0DEEE)
+    .setDescription(
+      `Collection: **Squigs Reloaded**\n` +
+      `Token ID: **${detail.tokenId}**\n` +
+      `UglyPoints: **${detail.uglyPoints}**\n` +
+      `OpenSea: ${openseaAssetUrl(DEFAULT_NFT_CHAIN, SQUIGS_CONTRACT, detail.tokenId)}`
+    )
+    .setFooter({ text: `!squig pull for ${username}` });
+  if (detail.imagePath) embed.setImage(`attachment://${imageName}`);
+  else if (SQUIG_IMAGE_BASE_URL) embed.setImage(`${SQUIG_IMAGE_BASE_URL}/${detail.tokenId}`);
+
+  return {
+    embeds: [embed],
+    ...(detail.imagePath ? { files: [new AttachmentBuilder(detail.imagePath, { name: imageName })] } : {}),
+  };
+}
+
+function drawGridText(ctx, text, x, y, maxWidth) {
+  let value = String(text || '');
+  while (value.length > 3 && ctx.measureText(value).width > maxWidth) {
+    value = `${value.slice(0, -4)}...`;
+  }
+  ctx.fillText(value, x, y);
+}
+
+async function buildSquigGridAttachment(details, username) {
+  const maxShown = Math.min(details.length, 120);
+  const shown = details.slice(0, maxShown);
+  const cols = Math.min(5, Math.max(1, shown.length));
+  const cell = 170;
+  const pad = 24;
+  const titleH = 76;
+  const rows = Math.max(1, Math.ceil(shown.length / cols));
+  const width = pad * 2 + cols * cell;
+  const height = titleH + pad + rows * cell;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#111816';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#B0DEEE';
+  ctx.font = '700 28px Arial, sans-serif';
+  ctx.fillText(`${username}'s Squigs Reloaded`, pad, 34);
+  ctx.fillStyle = '#d4a43b';
+  ctx.font = '600 16px Arial, sans-serif';
+  ctx.fillText(`${details.length} owned${details.length > maxShown ? ` - showing first ${maxShown}` : ''}`, pad, 58);
+
+  for (let i = 0; i < shown.length; i++) {
+    const item = shown[i];
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = pad + col * cell;
+    const y = titleH + row * cell;
+    ctx.fillStyle = '#eef5f0';
+    ctx.fillRect(x + 8, y + 8, cell - 16, cell - 42);
+    if (item.imagePath) {
+      try {
+        const img = await loadImage(item.imagePath);
+        const box = cell - 24;
+        const scale = Math.min(box / img.width, (cell - 58) / img.height);
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        ctx.drawImage(img, x + (cell - w) / 2, y + 12 + ((cell - 58) - h) / 2, w, h);
+      } catch {}
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 15px Arial, sans-serif';
+    drawGridText(ctx, `#${item.tokenId} - ${item.uglyPoints} UP`, x + 10, y + cell - 24, cell - 20);
+  }
+
+  return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'squigs-reloaded-grid.png' });
+}
+
+async function buildSquigGridResponse(guildId, discordUserId, username) {
+  const links = await getWalletLinks(guildId, discordUserId);
+  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+  if (!walletAddresses.length) {
+    return { content: 'Connect your wallet first with the verification menu before using this command.' };
+  }
+
+  const tokenIds = await getOwnedSquigsReloadedTokenIds(walletAddresses);
+  if (!tokenIds.length) {
+    return {
+      content:
+        `No !grid NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\n` +
+        `Checked: Squigs Reloaded (Ethereum) \`${SQUIGS_CONTRACT}\``,
+    };
+  }
+
+  const details = await squigsReloadedDetails(guildId, tokenIds);
+  const attachment = await buildSquigGridAttachment(details, username);
+  return {
+    content: `Squigs Reloaded owned: **${details.length}**`,
+    files: [attachment],
   };
 }
 
@@ -2871,6 +3091,7 @@ function defaultHolderCollections() {
   return [
     { name: 'Charm of the Ugly', chain: DEFAULT_NFT_CHAIN, contract_address: UGLY_CONTRACT.toLowerCase() },
     { name: 'Ugly Monsters', chain: DEFAULT_NFT_CHAIN, contract_address: MONSTER_CONTRACT.toLowerCase() },
+    { name: 'Squigs', chain: DEFAULT_NFT_CHAIN, contract_address: OG_SQUIGS_CONTRACT.toLowerCase() },
     { name: 'Squigs Reloaded', chain: squigsChain(), contract_address: SQUIGS_CONTRACT.toLowerCase() },
   ];
 }
@@ -8830,13 +9051,30 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  if (command === '!squig') {
+    try {
+      await message.channel.sendTyping().catch(() => {});
+      await message.reply(await buildRandomSquigReloadedResponse(message.guild.id, message.author.id, message.author.username));
+    } catch (err) {
+      console.error('!squig command error:', err);
+      await message.reply('Something went wrong handling that command.').catch(() => {});
+    }
+    return;
+  }
+
+  if (command === '!grid') {
+    try {
+      await message.channel.sendTyping().catch(() => {});
+      await message.reply(await buildSquigGridResponse(message.guild.id, message.author.id, message.author.username));
+    } catch (err) {
+      console.error('!grid command error:', err);
+      await message.reply('Something went wrong handling that command.').catch(() => {});
+    }
+    return;
+  }
+
   const collectionCommands = {
     '!flex': [
-      { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
-      { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
-      { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
-    ],
-    '!grid': [
       { name: 'Charm of the Ugly', contractAddress: UGLY_CONTRACT },
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
       { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
@@ -8847,8 +9085,8 @@ client.on('messageCreate', async (message) => {
     '!monster': [
       { name: 'Ugly Monsters', contractAddress: MONSTER_CONTRACT },
     ],
-    '!squig': [
-      { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
+    '!og': [
+      { name: 'Squigs', contractAddress: OG_SQUIGS_CONTRACT, chain: DEFAULT_NFT_CHAIN },
     ],
   };
 
