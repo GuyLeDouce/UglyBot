@@ -3590,24 +3590,6 @@ async function syncHolderRoles(member, walletAddresses) {
         }
       }
     });
-
-    if (chain === DEFAULT_NFT_CHAIN && contractAddresses.some((contractAddress) => isSquigsContract(contractAddress))) {
-      const squigsKey = collectionKey(DEFAULT_NFT_CHAIN, SQUIGS_CONTRACT);
-      if (contractMap.has(squigsKey)) {
-        const directResults = await Promise.all(normalizedAddresses.map((walletAddress) => getOwnedSquigsReloadedDirect(walletAddress).catch(() => null)));
-        if (directResults.some((ids) => Array.isArray(ids))) {
-          if (!tokenIdsByContract.has(squigsKey)) tokenIdsByContract.set(squigsKey, new Set());
-          for (const ids of directResults) {
-            if (!Array.isArray(ids)) continue;
-            for (const tokenId of ids) {
-              tokenIdsByContract.get(squigsKey).add(String(tokenId));
-            }
-          }
-          unavailableContracts.delete(squigsKey);
-          unavailableTraitContracts.delete(squigsKey);
-        }
-      }
-    }
   }
 
   for (const [key, tokenIds] of tokenIdsByContract.entries()) {
@@ -3636,14 +3618,9 @@ async function syncHolderRoles(member, walletAddresses) {
     for (const tokenId of tokenIds) {
       let grouped = null;
       try {
-        const localAttrs = localSquigTraits(tokenId, contractAddress, chain);
-        if (localAttrs.length) {
-          grouped = normalizeTraits(normalizeSquigsReloadedAttrs(localAttrs.map(massageTraitKeys).filter(validAttrFilter), contractAddress));
-        } else {
-          const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
-          const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
-          grouped = normalizeTraits(attrs);
-        }
+        const meta = await getNftMetadataAlchemy(tokenId, contractAddress, chain);
+        const { attrs } = await getTraitsForToken(meta, tokenId, contractAddress, chain);
+        grouped = normalizeTraits(attrs);
       } catch {
         grouped = null;
       }
