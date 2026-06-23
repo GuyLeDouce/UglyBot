@@ -1040,6 +1040,7 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     challengerCurrentHp: null,
     opponentCurrentHp: null,
     currentRound: 0,
+    suddenDeathResetRound: 0,
     currentActions: {},
     readyUsers: {},
     status: 'setup',
@@ -3254,8 +3255,8 @@ async function beginRound(guild, duel) {
   await persistDuel(duel);
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (!thread?.isTextBased()) return;
-  const sudden = duel.currentRound > SUDDEN_DEATH_AFTER_ROUND;
-  const suddenDamage = suddenDeathDamage(duel.currentRound);
+  const suddenDamage = suddenDeathDamage(duel);
+  const sudden = suddenDamage > 0;
   const roundPrompt =
     `Choose within **${Math.round(ROUND_TIMEOUT_MS / 1000)}s**.\n` +
     (isBotDuel(duel)
@@ -3354,8 +3355,14 @@ function clampHp(value, maxHp) {
   return Math.max(0, Math.min(Math.round(Number(value) || 0), Math.round(Number(maxHp) || 0)));
 }
 
-function suddenDeathDamage(roundNumber) {
-  const suddenRound = Math.max(0, Math.floor(Number(roundNumber) || 0) - SUDDEN_DEATH_AFTER_ROUND);
+function suddenDeathRoundNumber(duel, roundNumber = null) {
+  const round = Math.floor(Number(roundNumber ?? duel?.currentRound) || 0);
+  const resetRound = Math.floor(Number(duel?.suddenDeathResetRound) || 0);
+  return Math.max(0, round - resetRound - SUDDEN_DEATH_AFTER_ROUND);
+}
+
+function suddenDeathDamage(duel, roundNumber = null) {
+  const suddenRound = suddenDeathRoundNumber(duel, roundNumber);
   if (suddenRound <= 0) return 0;
   return SUDDEN_DEATH_BASE_DAMAGE + ((suddenRound - 1) * SUDDEN_DEATH_DAMAGE_STEP);
 }
@@ -3465,7 +3472,7 @@ function resolveRoundMath(duel, timedOut) {
   }
 
   const hpBeforeSuddenDeath = { challenger: cHp, opponent: oHp };
-  const burn = suddenDeathDamage(duel.currentRound);
+  const burn = suddenDeathDamage(duel);
   if (burn > 0) {
     cHp -= burn;
     oHp -= burn;
@@ -3481,6 +3488,7 @@ function resolveRoundMath(duel, timedOut) {
     before,
     hpBeforeSuddenDeath,
     finalBeforeClamp: { challenger: cHp, opponent: oHp },
+    suddenDeathBurn: burn,
     lines,
   };
 }
@@ -3509,12 +3517,19 @@ function recoverDoubleKoIfNeeded(duel, result) {
   result.doubleKoRecovery = {
     challengerHp: duel.challengerCurrentHp,
     opponentHp: duel.opponentCurrentHp,
+    suddenDeathEnded: Number(result.suddenDeathBurn || 0) > 0,
   };
+  if (result.doubleKoRecovery.suddenDeathEnded) {
+    duel.suddenDeathResetRound = duel.currentRound;
+  }
   result.lines.push(
     `Double KO! Both Squigs recover 25% HP and the duel continues: ` +
     `Challenger ${squigNameForSide(duel, 'challenger')} ${duel.challengerCurrentHp} HP, ` +
     `Opponent ${squigNameForSide(duel, 'opponent')} ${duel.opponentCurrentHp} HP.`
   );
+  if (result.doubleKoRecovery.suddenDeathEnded) {
+    result.lines.push('Sudden Death ends after the Double KO.');
+  }
   return true;
 }
 
