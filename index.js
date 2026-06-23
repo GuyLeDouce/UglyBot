@@ -987,6 +987,16 @@ function buildSlashCommands() {
       )
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('refreshuser')
+      .setDescription('Admin: recheck one user\'s wallet verification and holder roles')
+      .addUserOption((opt) =>
+        opt
+          .setName('user')
+          .setDescription('Discord user to refresh')
+          .setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('verifyall')
       .setDescription('Admin: recheck DRIP wallet verification for linked users in a role')
       .addRoleOption((opt) =>
@@ -5339,36 +5349,49 @@ async function handleVerificationRefresh(interaction) {
   const guildId = interaction.guild.id;
   await interaction.deferReply({ flags: 64 });
 
-  const settings = await getGuildSettings(guildId);
-  const links = await getWalletLinks(guildId, interaction.user.id);
+  const result = await refreshUserVerificationAndRoles(
+    interaction.guild,
+    interaction.user.id,
+    'wallet refresh'
+  );
+  await interaction.editReply({ content: result.message });
+}
+
+async function refreshUserVerificationAndRoles(guild, discordId, context = 'wallet refresh') {
+  const guildId = guild.id;
+  const links = await getWalletLinks(guildId, discordId);
   if (!links.length) {
-    await interaction.editReply({
-      content:
+    return {
+      ok: false,
+      message:
         `No wallets connected yet.\n` +
-        `Click **Connect Wallet** first, then use **Refresh Verification** after your wallet is linked.`
-    });
-    return;
+        `Connect a wallet first, then refresh verification after the wallet is linked.`,
+    };
   }
 
+  const settings = await getGuildSettings(guildId);
   const verification = await refreshLinkedWalletVerification(
-    interaction.guild,
+    guild,
     guildId,
-    interaction.user.id,
+    discordId,
     links,
-    settings || {}
+    settings || {},
+    { context }
   );
 
   const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
-  const member = await interaction.guild.members.fetch(interaction.user.id);
-  const sync = await syncHolderRoles(member, walletAddresses);
-  await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet refresh');
+  const member = await guild.members.fetch(discordId).catch(() => null);
+  const sync = member
+    ? await syncHolderRoles(member, walletAddresses)
+    : { changed: 0, applied: ['Skipped: member not found in this server.'], granted: [] };
+  await postRoleSyncFailures(guild, discordId, sync, context);
 
   const unverifiedChecks = verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable);
   if (unverifiedChecks.length && sync.granted?.length) {
     for (const item of unverifiedChecks) {
       await postAdminVerificationFlag(
-        interaction.guild,
-        interaction.user.id,
+        guild,
+        discordId,
         item.walletAddress,
         item.reason,
         sync.granted
@@ -5376,16 +5399,24 @@ async function handleVerificationRefresh(interaction) {
     }
   }
 
-  await interaction.editReply({
-    content: truncateDiscordContent(
+  return {
+    ok: true,
+    walletCount: walletAddresses.length,
+    checkedWalletCount: verification.checks.length,
+    verifiedWalletCount: verification.checks.filter((x) => x.verified).length,
+    pendingWalletCount: verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable).length,
+    unavailableWalletCount: verification.checks.filter((x) => x.temporaryUnavailable).length,
+    roleChanges: Number(sync.changed || 0),
+    rolesGranted: Array.isArray(sync.granted) ? sync.granted.length : 0,
+    message: truncateDiscordContent(
       `Holder verification refreshed.\n` +
       `Linked wallets: ${walletAddresses.length}\n` +
       `${verification.statusText}\n` +
       `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
       `New roles added:\n${formatGrantedRolesForUser(sync.granted)}` +
       formatRoleSyncUserNote(sync)
-    )
-  });
+    ),
+  };
 }
 
 let dailyHolderRefreshInterval = null;
@@ -6980,6 +7011,43 @@ client.on('interactionCreate', async (interaction) => {
             `Manual verification override saved for <@${discordId}>.\n` +
             `Wallet links marked DRIP verified: **${updated}**\n` +
             `DRIP User ID: \`${resolvedDripMemberId}\``
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'refreshuser') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        const targetUser = interaction.options.getUser('user', true);
+        const discordId = String(targetUser.id || '').trim();
+        const result = await refreshUserVerificationAndRoles(
+          interaction.guild,
+          discordId,
+          'admin /refreshuser'
+        );
+
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Refresh User',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Target: <@${discordId}>\n` +
+            `Result: ${result.ok ? 'complete' : 'not refreshed'}\n` +
+            `Wallets: ${result.walletCount ?? 0}\n` +
+            `DRIP checks: ${result.checkedWalletCount ?? 0}\n` +
+            `Role changes: ${result.roleChanges ?? 0}\n` +
+            `Roles granted: ${result.rolesGranted ?? 0}`
+        });
+
+        await interaction.editReply({
+          content: truncateDiscordContent(
+            `Admin refresh for <@${discordId}>:\n` +
+            result.message
+          )
         });
         return;
       }
