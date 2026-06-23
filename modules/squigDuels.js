@@ -33,7 +33,10 @@ const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
 ).trim();
-const SQUIG_DUEL_ROUND_BACKGROUND_PATH = path.join(__dirname, '..', 'Squig Duels.png');
+const SQUIG_DUEL_ROUND_BACKGROUND_PATHS = [
+  path.join(__dirname, '..', 'Squig Duels.jpg'),
+  path.join(__dirname, '..', 'Squig Duels.png'),
+];
 const SQUIG_DUEL_ROUND_NFT_RECTS = {
   challenger: { x: 82, y: 378, width: 384, height: 384 },
   opponent: { x: 988, y: 378, width: 384, height: 384 },
@@ -394,6 +397,13 @@ async function fetchImageBuffer(source) {
   return Buffer.from(arrayBuffer);
 }
 
+async function loadCanvasImage(source) {
+  const value = String(source || '').trim();
+  if (!value) throw new Error('Missing image source.');
+  if (!/^https?:\/\//i.test(value)) return loadImage(value);
+  return loadImage(await fetchImageBuffer(value));
+}
+
 function walletConnectMessage(prefix = 'Connect your wallet before joining a Squig Duel.') {
   return `${prefix} Go to <#${WALLET_CONNECT_CHANNEL_ID}> to connect your wallet.`;
 }
@@ -541,10 +551,31 @@ async function postOpenChallengeAnnouncement(guild, duel) {
       roles: [OPEN_CHALLENGE_ROLE_ID],
       users: [duel.challengerId],
     },
-  }).then(() => {
+  }).then((message) => {
     duel.openChallengeAnnouncementSent = true;
+    duel.openChallengeAnnouncementChannelId = message?.channelId || channel.id;
+    duel.openChallengeAnnouncementMessageId = message?.id || null;
   }).catch((err) => {
     console.warn('[SquigDuels] open challenge announcement failed:', String(err?.message || err || ''));
+  });
+}
+
+async function deleteOpenChallengeAnnouncement(guild, duel) {
+  const channelId = String(duel?.openChallengeAnnouncementChannelId || OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID || '').trim();
+  const messageId = String(duel?.openChallengeAnnouncementMessageId || '').trim();
+  if (!channelId || !messageId || duel.openChallengeAnnouncementDeleted) return;
+
+  const channel = guild?.channels?.fetch
+    ? await guild.channels.fetch(channelId).catch(() => null)
+    : null;
+  const fallbackChannel = channel || await fetchOpenChallengeAnnounceChannel(guild);
+  const message = await fallbackChannel?.messages?.fetch?.(messageId).catch(() => null);
+  if (!message?.delete) return;
+
+  await message.delete().then(() => {
+    duel.openChallengeAnnouncementDeleted = true;
+  }).catch((err) => {
+    console.warn('[SquigDuels] open challenge announcement delete failed:', String(err?.message || err || ''));
   });
 }
 
@@ -1015,6 +1046,9 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     isBotDuel,
     openChallenge: false,
     openChallengeAnnouncementSent: false,
+    openChallengeAnnouncementChannelId: null,
+    openChallengeAnnouncementMessageId: null,
+    openChallengeAnnouncementDeleted: false,
     acceptTimeoutMs: DEFAULT_ACCEPT_TIMEOUT_MS,
     createdAt: Date.now(),
     setupTimeout: null,
@@ -1301,6 +1335,7 @@ async function cancelDuel(guild, duel, reason) {
   duel.status = 'cancelled';
   duel.completedAt = Date.now();
   releaseDuelUsers(duel);
+  await deleteOpenChallengeAnnouncement(guild, duel);
   await persistDuel(duel);
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (thread?.isTextBased()) {
@@ -2573,7 +2608,7 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
 
   if (imageUrl) {
     try {
-      const squig = await loadImage(await fetchImageBuffer(imageUrl));
+      const squig = await loadCanvasImage(imageUrl);
       const art = containRect(squig.width, squig.height, artBox.w - 24, artBox.h - 24);
       ctx.drawImage(squig, artBox.x + 12 + art.x, artBox.y + 12 + art.y, art.width, art.height);
     } catch (err) {
@@ -2941,14 +2976,21 @@ function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
 
 async function loadRoundBackground() {
   if (globalThis.__SQUIG_DUEL_ROUND_BACKGROUND) return globalThis.__SQUIG_DUEL_ROUND_BACKGROUND;
-  try {
-    const buffer = await fs.promises.readFile(SQUIG_DUEL_ROUND_BACKGROUND_PATH);
-    const background = await loadImage(buffer);
-    globalThis.__SQUIG_DUEL_ROUND_BACKGROUND = background;
-    return background;
-  } catch (err) {
-    throw new Error(`round background failed (${SQUIG_DUEL_ROUND_BACKGROUND_PATH}): ${String(err?.message || err || '')}`);
+  const failures = [];
+  for (const backgroundPath of SQUIG_DUEL_ROUND_BACKGROUND_PATHS) {
+    if (!fs.existsSync(backgroundPath)) {
+      failures.push(`${backgroundPath}: file not found`);
+      continue;
+    }
+    try {
+      const background = await loadImage(backgroundPath);
+      globalThis.__SQUIG_DUEL_ROUND_BACKGROUND = background;
+      return background;
+    } catch (err) {
+      failures.push(`${backgroundPath}: ${String(err?.message || err || '')}`);
+    }
   }
+  throw new Error(`round background failed (${failures.join(' | ')})`);
 }
 
 async function loadRoundSquigImage(imageUrl) {
@@ -2957,7 +2999,7 @@ async function loadRoundSquigImage(imageUrl) {
   const key = String(imageUrl || '');
   if (cache.has(key)) return cache.get(key);
 
-  const image = await loadImage(await fetchImageBuffer(imageUrl));
+  const image = await loadCanvasImage(imageUrl);
   cache.set(key, image);
   if (cache.size > 100) {
     const oldestKey = cache.keys().next().value;
@@ -3124,7 +3166,7 @@ async function buildLoserSquigAttachment(duel, winnerId) {
   if (!imageUrl) return { imageUrl: null, files: [] };
 
   try {
-    const squig = await loadImage(await fetchImageBuffer(imageUrl));
+    const squig = await loadCanvasImage(imageUrl);
     const maxSide = 1200;
     const scale = Math.min(1, maxSide / Math.max(squig.width, squig.height));
     const width = Math.max(1, Math.round(squig.width * scale));
@@ -3443,26 +3485,44 @@ function resolveRoundMath(duel, timedOut) {
   };
 }
 
-function determineWinner(duel, result) {
+function determineWinner(duel) {
   const cOut = duel.challengerCurrentHp <= 0;
   const oOut = duel.opponentCurrentHp <= 0;
   if (cOut && !oOut) return duel.opponentId;
   if (oOut && !cOut) return duel.challengerId;
-  if (!cOut && !oOut) return null;
+  return null;
+}
 
-  const tiebreakHp = result.hpBeforeSuddenDeath || result.finalBeforeClamp || {};
-  const cRaw = Number(tiebreakHp.challenger || 0);
-  const oRaw = Number(tiebreakHp.opponent || 0);
-  if (cRaw > oRaw) return duel.challengerId;
-  if (oRaw > cRaw) return duel.opponentId;
-  return Math.random() < 0.5 ? duel.challengerId : duel.opponentId;
+function doubleKoRecoveryHp(maxHp) {
+  return Math.max(1, Math.ceil((Number(maxHp) || 0) * 0.25));
+}
+
+function recoverDoubleKoIfNeeded(duel, result) {
+  const cOut = duel.challengerCurrentHp <= 0;
+  const oOut = duel.opponentCurrentHp <= 0;
+  if (!cOut || !oOut) return false;
+
+  const challengerRecoveryHp = doubleKoRecoveryHp(duel.challengerMaxHp);
+  const opponentRecoveryHp = doubleKoRecoveryHp(duel.opponentMaxHp);
+  duel.challengerCurrentHp = clampHp(challengerRecoveryHp, duel.challengerMaxHp);
+  duel.opponentCurrentHp = clampHp(opponentRecoveryHp, duel.opponentMaxHp);
+  result.doubleKoRecovery = {
+    challengerHp: duel.challengerCurrentHp,
+    opponentHp: duel.opponentCurrentHp,
+  };
+  result.lines.push(
+    `Double KO! Both Squigs recover 25% HP and the duel continues: ` +
+    `Challenger ${squigNameForSide(duel, 'challenger')} ${duel.challengerCurrentHp} HP, ` +
+    `Opponent ${squigNameForSide(duel, 'opponent')} ${duel.opponentCurrentHp} HP.`
+  );
+  return true;
 }
 
 function duelCompletionReason(duel, winnerId, result = null) {
   const cOut = duel.challengerCurrentHp <= 0;
   const oOut = duel.opponentCurrentHp <= 0;
   if (cOut && oOut) {
-    return `Both Squigs hit 0 HP; <@${winnerId}> won by tiebreaker.`;
+    return `Both Squigs hit 0 HP.`;
   }
   if (cOut) {
     return `Challenger ${squigNameForSide(duel, 'challenger')} hit 0 HP.`;
@@ -3485,7 +3545,9 @@ async function resolveRound(guild, duel, timedOut) {
   duel.processingRound = true;
   if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
   const result = resolveRoundMath(duel, timedOut);
+  recoverDoubleKoIfNeeded(duel, result);
   await persistRound(duel, result);
+  const winnerId = determineWinner(duel);
 
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (thread?.isTextBased()) {
@@ -3501,7 +3563,6 @@ async function resolveRound(guild, duel, timedOut) {
     );
   }
 
-  const winnerId = determineWinner(duel, result);
   if (winnerId) {
     await completeDuel(guild, duel, winnerId, result);
     return;
@@ -3527,7 +3588,9 @@ async function completeDuel(guild, duel, winnerId, result = null) {
   duel.winnerId = winnerId;
   duel.completedAt = Date.now();
   releaseDuelUsers(duel);
+  await deleteOpenChallengeAnnouncement(guild, duel);
   const reason = duelCompletionReason(duel, winnerId, result);
+  const completionIntro = `Winner: <@${winnerId}>\nReason: ${reason}\n`;
   const loserImage = await buildLoserSquigAttachment(duel, winnerId);
   if (isBotDuel(duel)) {
     const wagerAmount = botWagerAmount(duel);
@@ -3550,7 +3613,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
         embeds: [buildStatusEmbed(
           duel,
           'Bot Squig Duel Complete',
-          `Winner: <@${winnerId}>\n` +
+          completionIntro +
           `Wager: **${formatCharm(wagerAmount)} $CHARM**\n` +
           (playerWon
             ? `Payout: **${formatCharm(payoutAmount)} $CHARM**\n` +
@@ -3601,7 +3664,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
       embeds: [buildStatusEmbed(
         duel,
         'Squig Duel Complete',
-        `Winner: <@${winnerId}>\n` +
+        completionIntro +
         `Pot: **${formatCharm(pot)} $CHARM**\n` +
         `Tax: **${formatCharm(taxAmount)} $CHARM** (${taxPercent}%)\n` +
         `Payout: **${formatCharm(payout)} $CHARM**\n` +
