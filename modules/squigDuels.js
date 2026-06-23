@@ -33,10 +33,22 @@ const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
 ).trim();
+const SQUIG_DUEL_ROUND_BACKGROUND_PATH = path.join(__dirname, '..', 'Squig Duels.png');
+const SQUIG_DUEL_ROUND_NFT_RECTS = {
+  challenger: { x: 82, y: 378, width: 384, height: 384 },
+  opponent: { x: 988, y: 378, width: 384, height: 384 },
+};
+const SQUIG_DUEL_ROUND_HP_TEXT = {
+  challenger: { x: 274, y: 808 },
+  opponent: { x: 1180, y: 808 },
+  fontSize: 56,
+  maxWidth: 300,
+};
 const SQUIG_DUEL_LOSER_IMAGE_NAME = 'squig-duel-loser.png';
 const SQUIG_DUEL_PUNCH_OVERLAY_PATH = path.join(__dirname, '..', 'squig_duel_punch_overlay.png');
 const WALLET_CONNECT_CHANNEL_ID = '1476967108062740622';
 const OPEN_CHALLENGE_ROLE_ID = '1389076094245671002';
+const OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID = '1321864977270706257';
 const ADDITIONAL_DUEL_PLAYER_ROLE_IDS = new Set(['1517233987175710850']);
 const BOT_DUEL_WAGER = 50;
 const BOT_DUEL_MAX_WAGER = 5000;
@@ -56,8 +68,8 @@ const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 6;
 const SUDDEN_DEATH_DAMAGE = 8;
-const HEAL_VS_DEFEND_MULTIPLIER = 0.55;
-const HEAL_VS_ATTACK_MULTIPLIER = 1.30;
+const HEAL_VS_DEFEND_MULTIPLIER = 0.45;
+const HEAL_VS_ATTACK_MULTIPLIER = 0.75;
 
 let deps = null;
 
@@ -263,7 +275,7 @@ function squigImageUrl(tokenId) {
 
 function discordImageUrl(source) {
   const value = String(source || '').trim();
-  return /^https?:\/\//i.test(value) ? value : null;
+  return /^(https?:|attachment:)\/\//i.test(value) ? value : null;
 }
 
 function normalizeSquigChain(chain) {
@@ -379,7 +391,7 @@ async function hasConnectedWallet(guildId, userId) {
 }
 
 function baseAttack(uglyPoints) {
-  return Math.max(1, Math.round(8 + ((Number(uglyPoints) || 0) / 25)));
+  return Math.max(1, Math.round(10 + ((Number(uglyPoints) || 0) / 18)));
 }
 
 function randomId() {
@@ -480,6 +492,40 @@ async function postPublicDuelFinalLog(guild, content) {
   if (!channel) return;
   await channel.send(content).catch((err) => {
     console.warn('[SquigDuels] public final log failed:', String(err?.message || err || ''));
+  });
+}
+
+async function fetchOpenChallengeAnnounceChannel(guild) {
+  if (!OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID) return null;
+  const fromGuild = guild?.channels?.fetch
+    ? await guild.channels.fetch(OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID).catch(() => null)
+    : null;
+  if (fromGuild?.isTextBased?.()) return fromGuild;
+  const cached = deps?.client?.channels?.cache?.get(OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID);
+  if (cached?.isTextBased?.()) return cached;
+  const fromClient = deps?.client?.channels?.fetch
+    ? await deps.client.channels.fetch(OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID).catch(() => null)
+    : null;
+  return fromClient?.isTextBased?.() ? fromClient : null;
+}
+
+async function postOpenChallengeAnnouncement(guild, duel) {
+  if (!duel?.openChallenge || duel.openChallengeAnnouncementSent) return;
+  const channel = await fetchOpenChallengeAnnounceChannel(guild);
+  if (!channel) return;
+  const threadUrl = `https://discord.com/channels/${duel.guildId}/${duel.threadId}`;
+  await channel.send({
+    content:
+      `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> is looking for a Squig Duel opponent for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
+      `Join here: [Squig Duel thread](${threadUrl})`,
+    allowedMentions: {
+      roles: [OPEN_CHALLENGE_ROLE_ID],
+      users: [duel.challengerId],
+    },
+  }).then(() => {
+    duel.openChallengeAnnouncementSent = true;
+  }).catch((err) => {
+    console.warn('[SquigDuels] open challenge announcement failed:', String(err?.message || err || ''));
   });
 }
 
@@ -796,12 +842,6 @@ async function hasHolderRole(guild, userId) {
   return [...ADDITIONAL_DUEL_PLAYER_ROLE_IDS].some((allowedRoleId) => member.roles.cache.has(allowedRoleId));
 }
 
-async function hasAdditionalDuelPlayerRole(guild, userId) {
-  const member = await guild.members.fetch(userId).catch(() => null);
-  if (!member) return false;
-  return [...ADDITIONAL_DUEL_PLAYER_ROLE_IDS].some((allowedRoleId) => member.roles.cache.has(allowedRoleId));
-}
-
 async function ensureHolderThreadViewAccess(guild, thread) {
   const roleId = holderRoleId();
   if (!roleId || !thread) return;
@@ -899,8 +939,8 @@ function botDuelSetupModal(userId) {
   return modal;
 }
 
-function opponentSelectRows(duelId, allowOpenChallenge = false) {
-  const rows = [
+function opponentSelectRows(duelId) {
+  return [
     new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`sd:opponent:${duelId}`)
@@ -908,16 +948,17 @@ function opponentSelectRows(duelId, allowOpenChallenge = false) {
         .setMinValues(1)
         .setMaxValues(1)
     ),
-  ];
-  if (allowOpenChallenge) {
-    rows.push(new ActionRowBuilder().addComponents(
+    new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`sd:open:${duelId}`)
         .setLabel('Open Challenge')
-        .setStyle(ButtonStyle.Primary)
-    ));
-  }
-  return rows;
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`sd:cancel:${duelId}`)
+        .setLabel('Cancel Challenge')
+        .setStyle(ButtonStyle.Danger)
+    ),
+  ];
 }
 
 function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerAmount = null, isBotDuel = false }) {
@@ -947,6 +988,7 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     status: 'setup',
     isBotDuel,
     openChallenge: false,
+    openChallengeAnnouncementSent: false,
     acceptTimeoutMs: DEFAULT_ACCEPT_TIMEOUT_MS,
     createdAt: Date.now(),
     setupTimeout: null,
@@ -1001,15 +1043,12 @@ async function handleStartButton(interaction) {
   await persistDuel(duel);
   await logDuel(interaction.guild, 'Created', `Duel \`${duelId}\` created by <@${interaction.user.id}> in <#${thread.id}>.`);
 
-  const allowOpenChallenge = isAdmin(interaction) || await hasAdditionalDuelPlayerRole(interaction.guild, interaction.user.id);
   await thread.send({
     content:
       `<@${interaction.user.id}> started a Squig Duel setup.\n` +
       `Holders can spectate here. Only duel participants and admins should write in this thread.\n\n` +
-      (allowOpenChallenge
-        ? `Select your opponent, or post an open challenge for holders to accept.`
-        : `Select your opponent. Start typing their name in the picker below.`),
-    components: opponentSelectRows(duelId, allowOpenChallenge),
+      `Select your opponent, post an open challenge for holders to accept, or cancel this challenge.`,
+    components: opponentSelectRows(duelId),
   });
   await interaction.editReply({ content: `Duel thread created: <#${thread.id}>. Continue setup there.` });
   return true;
@@ -1250,6 +1289,17 @@ async function cancelDuel(guild, duel, reason) {
     (failures.length ? `\nRefund issue(s): ${failures.join(' | ')}` : '')
   );
   scheduleDuelThreadDeletion(guild, duel);
+}
+
+async function closeDuelThread(guild, duel, reason) {
+  const thread = await guild?.channels?.fetch?.(duel?.threadId).catch(() => null);
+  if (!thread) return;
+  if (typeof thread.setLocked === 'function') {
+    await thread.setLocked(true, reason).catch(() => null);
+  }
+  if (typeof thread.setArchived === 'function') {
+    await thread.setArchived(true, reason).catch(() => null);
+  }
 }
 
 async function calculateUglyPoints(guildId, tokenId, chain = SQUIGS_CHAIN) {
@@ -2017,11 +2067,6 @@ async function handleOpenChallengeButton(interaction) {
     await interaction.reply({ content: 'Only the challenger can open this challenge.', flags: 64 });
     return true;
   }
-  if (!isAdmin(interaction) && !(await hasAdditionalDuelPlayerRole(interaction.guild, interaction.user.id))) {
-    await interaction.reply({ content: 'Open challenges are limited to Reloaded role players and admins.', flags: 64 });
-    return true;
-  }
-
   if (duel.opponentId) {
     activeUserToDuel.delete(String(duel.opponentId));
   }
@@ -2029,6 +2074,28 @@ async function handleOpenChallengeButton(interaction) {
   duel.openChallenge = true;
   await persistDuel(duel);
   await interaction.showModal(challengerSetupModal(duel.id));
+  return true;
+}
+
+async function handleCancelChallengeButton(interaction) {
+  const match = interaction.customId.match(/^sd:cancel:([a-f0-9]{12})$/i);
+  if (!match) return false;
+  assertReady();
+
+  const duel = getDuel(match[1]);
+  if (!duel || !['setup', 'awaiting_accept'].includes(duel.status)) {
+    await interaction.reply({ content: 'This challenge can no longer be cancelled from this button.', flags: 64 });
+    return true;
+  }
+  if (interaction.user.id !== duel.challengerId && !isAdmin(interaction)) {
+    await interaction.reply({ content: 'Only the challenger or an admin can cancel this challenge.', flags: 64 });
+    return true;
+  }
+
+  await interaction.deferUpdate();
+  await cancelDuel(interaction.guild, duel, `Challenge cancelled by <@${interaction.user.id}>.`);
+  await interaction.editReply({ components: [] }).catch(() => null);
+  await closeDuelThread(interaction.guild, duel, 'Squig Duel challenge cancelled');
   return true;
 }
 
@@ -2142,6 +2209,12 @@ function challengeRows(duel) {
         .setStyle(ButtonStyle.Secondary)
     );
   }
+  buttons.push(
+    new ButtonBuilder()
+      .setCustomId(`sd:cancel:${duel.id}`)
+      .setLabel('Cancel Challenge')
+      .setStyle(ButtonStyle.Danger)
+  );
   return [new ActionRowBuilder().addComponents(buttons)];
 }
 
@@ -2203,6 +2276,9 @@ async function postChallenge(guild, duel) {
     embeds: [buildChallengeEmbed(duel)],
     components: challengeRows(duel),
   });
+  if (openChallenge) {
+    await postOpenChallengeAnnouncement(guild, duel);
+  }
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   duel.acceptTimeout = setTimeout(() => {
     const active = getDuel(duel.id);
@@ -2829,6 +2905,124 @@ function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
   };
 }
 
+async function loadRoundBackground() {
+  if (globalThis.__SQUIG_DUEL_ROUND_BACKGROUND) return globalThis.__SQUIG_DUEL_ROUND_BACKGROUND;
+  const buffer = await fs.promises.readFile(SQUIG_DUEL_ROUND_BACKGROUND_PATH);
+  const background = await loadImage(buffer);
+  globalThis.__SQUIG_DUEL_ROUND_BACKGROUND = background;
+  return background;
+}
+
+function drawCoverClippedImage(ctx, image, rect) {
+  const placement = coverRect(image.width, image.height, rect.width, rect.height);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, rect.width, rect.height);
+  ctx.clip();
+  ctx.drawImage(
+    image,
+    rect.x + placement.x,
+    rect.y + placement.y,
+    placement.width,
+    placement.height
+  );
+  ctx.restore();
+}
+
+async function drawRoundSquig(ctx, duel, side) {
+  const tokenId = tokenIdForSide(duel, side);
+  const imageUrl = squigImageUrl(tokenId);
+  if (!imageUrl) return;
+
+  try {
+    const squig = await loadImage(await fetchImageBuffer(imageUrl));
+    drawCoverClippedImage(ctx, squig, SQUIG_DUEL_ROUND_NFT_RECTS[side]);
+  } catch (err) {
+    console.warn(`[SquigDuels] round ${side} image failed:`, String(err?.message || err || ''));
+  }
+}
+
+function roundHpForSide(duel, side) {
+  const hp = side === 'challenger' ? duel.challengerCurrentHp : duel.opponentCurrentHp;
+  return Math.max(0, Math.round(Number(hp) || 0));
+}
+
+function drawRoundHp(ctx, duel, side) {
+  const point = SQUIG_DUEL_ROUND_HP_TEXT[side];
+  const text = `${roundHpForSide(duel, side)} HP`;
+  let fontSize = SQUIG_DUEL_ROUND_HP_TEXT.fontSize;
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  do {
+    ctx.font = `900 ${fontSize}px sans-serif`;
+    if (ctx.measureText(text).width <= SQUIG_DUEL_ROUND_HP_TEXT.maxWidth || fontSize <= 38) break;
+    fontSize -= 2;
+  } while (fontSize > 38);
+
+  ctx.shadowColor = 'rgba(103, 22, 176, 0.92)';
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = '#1a111f';
+  ctx.lineWidth = Math.max(10, Math.round(fontSize * 0.22));
+  ctx.strokeText(text, point.x, point.y, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+
+  ctx.shadowColor = 'rgba(38, 13, 28, 0.8)';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 7;
+  ctx.strokeStyle = '#2a1219';
+  ctx.lineWidth = Math.max(5, Math.round(fontSize * 0.1));
+  ctx.strokeText(text, point.x, point.y + 4, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+
+  ctx.shadowColor = 'rgba(103, 22, 176, 0.68)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  const gradient = ctx.createLinearGradient(point.x, point.y - fontSize / 2, point.x, point.y + fontSize / 2);
+  gradient.addColorStop(0, '#fff45c');
+  gradient.addColorStop(0.48, '#ffcb16');
+  gradient.addColorStop(1, '#f36b00');
+  ctx.fillStyle = gradient;
+  ctx.fillText(text, point.x, point.y, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.38)';
+  ctx.font = `900 ${Math.max(12, Math.round(fontSize * 0.28))}px sans-serif`;
+  ctx.fillText(text, point.x, point.y - Math.round(fontSize * 0.27), SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+  ctx.restore();
+}
+
+async function buildRoundDuelAttachment(duel) {
+  const background = await loadRoundBackground();
+  const canvas = createCanvas(background.width, background.height);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  ctx.drawImage(background, 0, 0, background.width, background.height);
+  await drawRoundSquig(ctx, duel, 'challenger');
+  await drawRoundSquig(ctx, duel, 'opponent');
+  drawRoundHp(ctx, duel, 'challenger');
+  drawRoundHp(ctx, duel, 'opponent');
+
+  const name = `squig-duel-round-${duel.id}-${duel.currentRound}.png`;
+  return {
+    imageUrl: `attachment://${name}`,
+    files: [
+      new AttachmentBuilder(canvas.toBuffer('image/png'), {
+        name,
+        description: `Squig Duel round ${duel.currentRound}`,
+      }),
+    ],
+  };
+}
+
 async function drawPunchOverlay(ctx, width, height) {
   const overlay = await loadPunchOverlay();
   const overlayCanvas = createCanvas(width, height);
@@ -2948,14 +3142,21 @@ async function beginRound(guild, duel) {
   const roundPrompt = isBotDuel(duel)
     ? `Choose your action within ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds.\nThe bot will answer after you lock in.\n`
     : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\nSelections reveal after both players choose.\n`;
+  let roundImage = { imageUrl: roundImageUrl(duel), files: [] };
+  try {
+    roundImage = await buildRoundDuelAttachment(duel);
+  } catch (err) {
+    console.warn('[SquigDuels] round image render failed:', String(err?.message || err || ''));
+  }
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
       `Round ${duel.currentRound}${sudden ? ' - Sudden Death' : ''}`,
       roundPrompt +
       (sudden ? `Sudden Death: both Squigs lose ${SUDDEN_DEATH_DAMAGE} HP at the end of the round.` : ''),
-      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE, imageUrl: roundImageUrl(duel) }
+      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE, imageUrl: roundImage.imageUrl }
     )],
+    ...(roundImage.files.length ? { files: roundImage.files } : {}),
     components: actionRows(duel),
   });
   if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
@@ -3007,12 +3208,12 @@ async function handleActionButton(interaction) {
 }
 
 function attackDamage(attackPower) {
-  const multiplier = 0.8 + (Math.random() * 0.4);
+  const multiplier = 0.9 + (Math.random() * 0.4);
   return Math.max(1, Math.round((Number(attackPower) || 1) * multiplier));
 }
 
 function healAmount(maxHp, opposingAction) {
-  const baseHealAmount = Math.round(14 + (Number(maxHp) || 0) * 0.14);
+  const baseHealAmount = Math.round(8 + (Number(maxHp) || 0) * 0.08);
   if (opposingAction === 'defend') {
     return Math.max(1, Math.round(baseHealAmount * HEAL_VS_DEFEND_MULTIPLIER));
   }
@@ -3349,6 +3550,7 @@ async function handleButton(interaction) {
   if (await handleBotDuelButton(interaction)) return true;
   if (await handleStartButton(interaction)) return true;
   if (await handleOpenChallengeButton(interaction)) return true;
+  if (await handleCancelChallengeButton(interaction)) return true;
   if (await handleAcceptDecline(interaction)) return true;
   if (await handleReadyButton(interaction)) return true;
   if (await handleSquigSelectionPageButton(interaction)) return true;
