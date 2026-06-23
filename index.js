@@ -10225,12 +10225,12 @@ function computeHpFromTraits(groupedTraits, table = HP_TABLE) {
 
 function findMatchingTraitDefinition(table, traitCategory, traitValue) {
   const desiredValue = String(traitValue || '').trim().toLowerCase();
-  const desiredCategory = String(traitCategory || '').trim().toLowerCase();
+  const desiredCategory = normalizeTraitCategoryForMatch(traitCategory);
   if (!desiredValue || !table || typeof table !== 'object') return null;
 
   for (const [category, traits] of Object.entries(table)) {
     if (!traits || typeof traits !== 'object') continue;
-    if (desiredCategory && String(category).trim().toLowerCase() !== desiredCategory) continue;
+    if (desiredCategory && normalizeTraitCategoryForMatch(category) !== desiredCategory) continue;
     for (const trait of Object.keys(traits)) {
       if (String(trait).trim().toLowerCase() === desiredValue) {
         return { category, trait };
@@ -10242,11 +10242,11 @@ function findMatchingTraitDefinition(table, traitCategory, traitValue) {
 
 function hasTraitMatch(groupedTraits, traitCategory, traitValue) {
   const desiredValue = String(traitValue || '').trim().toLowerCase();
-  const desiredCategory = String(traitCategory || '').trim().toLowerCase();
+  const desiredCategory = normalizeTraitCategoryForMatch(traitCategory);
   if (!desiredValue || !groupedTraits || typeof groupedTraits !== 'object') return false;
 
   if (desiredCategory) {
-    const matchedCategory = Object.keys(groupedTraits).find((cat) => String(cat || '').trim().toLowerCase() === desiredCategory);
+    const matchedCategory = Object.keys(groupedTraits).find((cat) => normalizeTraitCategoryForMatch(cat) === desiredCategory);
     const entries = matchedCategory && Array.isArray(groupedTraits[matchedCategory]) ? groupedTraits[matchedCategory] : [];
     return entries.some((t) => String(t?.value || '').trim().toLowerCase() === desiredValue);
   }
@@ -10256,6 +10256,12 @@ function hasTraitMatch(groupedTraits, traitCategory, traitValue) {
     if (entries.some((t) => String(t?.value || '').trim().toLowerCase() === desiredValue)) return true;
   }
   return false;
+}
+
+function normalizeTraitCategoryForMatch(category) {
+  const normalized = String(category || '').trim().toLowerCase();
+  if (normalized === 'legend') return 'legendary';
+  return normalized;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

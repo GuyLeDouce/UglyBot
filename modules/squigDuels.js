@@ -44,6 +44,15 @@ const SQUIG_DUEL_ROUND_HP_TEXT = {
   fontSize: 56,
   maxWidth: 300,
 };
+const SQUIG_DUEL_ROUND_NATIVE_WIDTH = 1448;
+const SQUIG_DUEL_ROUND_OUTPUT_WIDTH = (() => {
+  const value = Number(process.env.SQUIG_DUEL_ROUND_IMAGE_WIDTH || 1024);
+  return Math.max(640, Math.min(SQUIG_DUEL_ROUND_NATIVE_WIDTH, Number.isFinite(value) ? value : 1024));
+})();
+const SQUIG_DUEL_ROUND_JPEG_QUALITY = (() => {
+  const value = Number(process.env.SQUIG_DUEL_ROUND_JPEG_QUALITY || 88);
+  return Math.max(50, Math.min(95, Number.isFinite(value) ? value : 88));
+})();
 const SQUIG_DUEL_LOSER_IMAGE_NAME = 'squig-duel-loser.png';
 const SQUIG_DUEL_PUNCH_OVERLAY_PATH = path.join(__dirname, '..', 'squig_duel_punch_overlay.png');
 const WALLET_CONNECT_CHANNEL_ID = '1476967108062740622';
@@ -61,15 +70,16 @@ const ACCEPT_TIMEOUT_MINUTE_OPTIONS = [1, 2, 3, 5];
 const DEFAULT_ACCEPT_TIMEOUT_MINUTES = 3;
 const DEFAULT_ACCEPT_TIMEOUT_MS = DEFAULT_ACCEPT_TIMEOUT_MINUTES * 60 * 1000;
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
-const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 30 * 1000);
+const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 20 * 1000);
 const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 1500);
-const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 10 * 1000);
+const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 5 * 1000);
 const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
-const SUDDEN_DEATH_AFTER_ROUND = 6;
-const SUDDEN_DEATH_DAMAGE = 8;
-const HEAL_VS_DEFEND_MULTIPLIER = 0.45;
-const HEAL_VS_ATTACK_MULTIPLIER = 0.75;
+const SUDDEN_DEATH_AFTER_ROUND = 5;
+const SUDDEN_DEATH_BASE_DAMAGE = 20;
+const SUDDEN_DEATH_DAMAGE_STEP = 15;
+const HEAL_VS_DEFEND_MULTIPLIER = 0.35;
+const HEAL_VS_ATTACK_MULTIPLIER = 0.55;
 
 let deps = null;
 
@@ -262,15 +272,24 @@ function formatCharm(amount) {
   return new Intl.NumberFormat('en-US').format(Math.floor(Number(amount) || 0));
 }
 
-function squigImageUrl(tokenId) {
+function localSquigImagePath(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return null;
-  if (SQUIG_IMAGE_BASE) return `${SQUIG_IMAGE_BASE}/${tid}`;
   for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
     const candidate = path.join(imageDir, `${tid}.png`);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+function squigImageUrl(tokenId, options = {}) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return null;
+  const localImage = localSquigImagePath(tid);
+  if (options.preferLocal && localImage) return localImage;
+  if (options.localOnly) return null;
+  if (SQUIG_IMAGE_BASE) return `${SQUIG_IMAGE_BASE}/${tid}`;
+  return localImage;
 }
 
 function discordImageUrl(source) {
@@ -391,7 +410,7 @@ async function hasConnectedWallet(guildId, userId) {
 }
 
 function baseAttack(uglyPoints) {
-  return Math.max(1, Math.round(10 + ((Number(uglyPoints) || 0) / 18)));
+  return Math.max(1, Math.round(12 + ((Number(uglyPoints) || 0) / 14)));
 }
 
 function randomId() {
@@ -952,7 +971,14 @@ function opponentSelectRows(duelId) {
       new ButtonBuilder()
         .setCustomId(`sd:open:${duelId}`)
         .setLabel('Open Challenge')
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(ButtonStyle.Primary)
+    ),
+  ];
+}
+
+function setupCancelRows(duelId) {
+  return [
+    new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`sd:cancel:${duelId}`)
         .setLabel('Cancel Challenge')
@@ -1047,10 +1073,15 @@ async function handleStartButton(interaction) {
     content:
       `<@${interaction.user.id}> started a Squig Duel setup.\n` +
       `Holders can spectate here. Only duel participants and admins should write in this thread.\n\n` +
-      `Select your opponent, post an open challenge for holders to accept, or cancel this challenge.`,
+      `Select your opponent or post an open challenge for holders to accept.`,
     components: opponentSelectRows(duelId),
   });
-  await interaction.editReply({ content: `Duel thread created: <#${thread.id}>. Continue setup there.` });
+  await interaction.editReply({
+    content:
+      `Duel thread created: <#${thread.id}>. Continue setup there.\n` +
+      `Only you can see this cancel button while setup is active.`,
+    components: setupCancelRows(duelId),
+  });
   return true;
 }
 
@@ -2083,12 +2114,12 @@ async function handleCancelChallengeButton(interaction) {
   assertReady();
 
   const duel = getDuel(match[1]);
-  if (!duel || !['setup', 'awaiting_accept'].includes(duel.status)) {
+  if (!duel || duel.status !== 'setup') {
     await interaction.reply({ content: 'This challenge can no longer be cancelled from this button.', flags: 64 });
     return true;
   }
-  if (interaction.user.id !== duel.challengerId && !isAdmin(interaction)) {
-    await interaction.reply({ content: 'Only the challenger or an admin can cancel this challenge.', flags: 64 });
+  if (interaction.user.id !== duel.challengerId) {
+    await interaction.reply({ content: 'Only the challenger can cancel this challenge from setup.', flags: 64 });
     return true;
   }
 
@@ -2209,12 +2240,6 @@ function challengeRows(duel) {
         .setStyle(ButtonStyle.Secondary)
     );
   }
-  buttons.push(
-    new ButtonBuilder()
-      .setCustomId(`sd:cancel:${duel.id}`)
-      .setLabel('Cancel Challenge')
-      .setStyle(ButtonStyle.Danger)
-  );
   return [new ActionRowBuilder().addComponents(buttons)];
 }
 
@@ -2534,7 +2559,7 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
   const maxHp = isChallenger ? duel.challengerMaxHp : duel.opponentMaxHp;
   const currentHp = isChallenger ? duel.challengerCurrentHp : duel.opponentCurrentHp;
   const ready = Boolean(duel.readyUsers?.[side]);
-  const imageUrl = squigImageUrl(tokenId);
+  const imageUrl = squigImageUrl(tokenId, { preferLocal: true, localOnly: true });
   const accent = isChallenger ? '#d4a43b' : '#7ADDC0';
 
   fillReadyRoundRect(ctx, panel.x, panel.y, panel.w, panel.h, 34, 'rgba(13, 17, 16, 0.86)', accent, 6);
@@ -2552,8 +2577,10 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
       const art = containRect(squig.width, squig.height, artBox.w - 24, artBox.h - 24);
       ctx.drawImage(squig, artBox.x + 12 + art.x, artBox.y + 12 + art.y, art.width, art.height);
     } catch (err) {
-      console.warn('[SquigDuels] ready squig image failed:', String(err?.message || err || ''));
+      console.warn(`[SquigDuels] ready squig #${tokenId} image failed (${imageUrl}):`, String(err?.message || err || ''));
     }
+  } else {
+    console.warn(`[SquigDuels] ready squig #${tokenId} local PNG not found.`);
   }
 
   drawReadyText(ctx, isChallenger ? 'CHALLENGER' : 'OPPONENT', panel.x + 34, panel.y + 30, 24, 900, accent);
@@ -2582,7 +2609,7 @@ async function buildReadyDuelAttachment(duel) {
   ctx.fillRect(0, 0, width, height);
 
   try {
-    const lobby = await loadImage(await fetchImageBuffer(SQUIG_DUEL_MENU_IMAGE));
+    const lobby = await loadRoundBackground();
     const bg = coverRect(lobby.width, lobby.height, width, height);
     ctx.globalAlpha = 0.18;
     ctx.drawImage(lobby, bg.x, bg.y, bg.width, bg.height);
@@ -2782,25 +2809,32 @@ function buildStatusEmbed(duel, title, description, options = {}) {
   const imageUrl = Object.prototype.hasOwnProperty.call(options, 'imageUrl')
     ? options.imageUrl
     : squigImageUrl(duel.opponentSquigTokenId);
+  const compact = Boolean(options.compact);
   const embed = new EmbedBuilder()
     .setTitle(title)
     .setColor(0x7ADDC0)
     .setDescription(description)
     .addFields(
       {
-        name: `Challenger ${squigNameForSide(duel, 'challenger')}`,
-        value:
-          `<@${duel.challengerId}>\n` +
-          `UglyPoints: **${duel.challengerUglyPoints}**\n` +
-          `HP: **${Math.max(0, duel.challengerCurrentHp)} / ${duel.challengerMaxHp}**`,
+        name: compact ? 'Challenger' : `Challenger ${squigNameForSide(duel, 'challenger')}`,
+        value: compact
+          ? `<@${duel.challengerId}>\n` +
+            `**${squigNameForSide(duel, 'challenger')}**\n` +
+            `UP **${duel.challengerUglyPoints}** | HP **${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}**`
+          : `<@${duel.challengerId}>\n` +
+            `UglyPoints: **${duel.challengerUglyPoints}**\n` +
+            `HP: **${Math.max(0, duel.challengerCurrentHp)} / ${duel.challengerMaxHp}**`,
         inline: true,
       },
       {
-        name: `Opponent ${squigNameForSide(duel, 'opponent')}`,
-        value:
-          `<@${duel.opponentId}>\n` +
-          `UglyPoints: **${duel.opponentUglyPoints}**\n` +
-          `HP: **${Math.max(0, duel.opponentCurrentHp)} / ${duel.opponentMaxHp}**`,
+        name: compact ? 'Opponent' : `Opponent ${squigNameForSide(duel, 'opponent')}`,
+        value: compact
+          ? `<@${duel.opponentId}>\n` +
+            `**${squigNameForSide(duel, 'opponent')}**\n` +
+            `UP **${duel.opponentUglyPoints}** | HP **${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}**`
+          : `<@${duel.opponentId}>\n` +
+            `UglyPoints: **${duel.opponentUglyPoints}**\n` +
+            `HP: **${Math.max(0, duel.opponentCurrentHp)} / ${duel.opponentMaxHp}**`,
         inline: true,
       }
     );
@@ -2907,10 +2941,38 @@ function coverRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
 
 async function loadRoundBackground() {
   if (globalThis.__SQUIG_DUEL_ROUND_BACKGROUND) return globalThis.__SQUIG_DUEL_ROUND_BACKGROUND;
-  const buffer = await fs.promises.readFile(SQUIG_DUEL_ROUND_BACKGROUND_PATH);
-  const background = await loadImage(buffer);
-  globalThis.__SQUIG_DUEL_ROUND_BACKGROUND = background;
-  return background;
+  try {
+    const buffer = await fs.promises.readFile(SQUIG_DUEL_ROUND_BACKGROUND_PATH);
+    const background = await loadImage(buffer);
+    globalThis.__SQUIG_DUEL_ROUND_BACKGROUND = background;
+    return background;
+  } catch (err) {
+    throw new Error(`round background failed (${SQUIG_DUEL_ROUND_BACKGROUND_PATH}): ${String(err?.message || err || '')}`);
+  }
+}
+
+async function loadRoundSquigImage(imageUrl) {
+  globalThis.__SQUIG_DUEL_ROUND_SQUIG_IMAGES ||= new Map();
+  const cache = globalThis.__SQUIG_DUEL_ROUND_SQUIG_IMAGES;
+  const key = String(imageUrl || '');
+  if (cache.has(key)) return cache.get(key);
+
+  const image = await loadImage(await fetchImageBuffer(imageUrl));
+  cache.set(key, image);
+  if (cache.size > 100) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey && oldestKey !== key) cache.delete(oldestKey);
+  }
+  return image;
+}
+
+function scaleRoundRect(rect, scale) {
+  return {
+    x: Math.round(rect.x * scale),
+    y: Math.round(rect.y * scale),
+    width: Math.round(rect.width * scale),
+    height: Math.round(rect.height * scale),
+  };
 }
 
 function drawCoverClippedImage(ctx, image, rect) {
@@ -2929,16 +2991,19 @@ function drawCoverClippedImage(ctx, image, rect) {
   ctx.restore();
 }
 
-async function drawRoundSquig(ctx, duel, side) {
+async function drawRoundSquig(ctx, duel, side, scale) {
   const tokenId = tokenIdForSide(duel, side);
-  const imageUrl = squigImageUrl(tokenId);
-  if (!imageUrl) return;
+  const imageUrl = squigImageUrl(tokenId, { preferLocal: true, localOnly: true });
+  if (!imageUrl) {
+    console.warn(`[SquigDuels] round ${side} local PNG not found for token #${tokenId}.`);
+    return;
+  }
 
   try {
-    const squig = await loadImage(await fetchImageBuffer(imageUrl));
-    drawCoverClippedImage(ctx, squig, SQUIG_DUEL_ROUND_NFT_RECTS[side]);
+    const squig = await loadRoundSquigImage(imageUrl);
+    drawCoverClippedImage(ctx, squig, scaleRoundRect(SQUIG_DUEL_ROUND_NFT_RECTS[side], scale));
   } catch (err) {
-    console.warn(`[SquigDuels] round ${side} image failed:`, String(err?.message || err || ''));
+    console.warn(`[SquigDuels] round ${side} image failed (${imageUrl}):`, String(err?.message || err || ''));
   }
 }
 
@@ -2947,10 +3012,16 @@ function roundHpForSide(duel, side) {
   return Math.max(0, Math.round(Number(hp) || 0));
 }
 
-function drawRoundHp(ctx, duel, side) {
-  const point = SQUIG_DUEL_ROUND_HP_TEXT[side];
+function drawRoundHp(ctx, duel, side, scale) {
+  const nativePoint = SQUIG_DUEL_ROUND_HP_TEXT[side];
+  const point = {
+    x: Math.round(nativePoint.x * scale),
+    y: Math.round(nativePoint.y * scale),
+  };
   const text = `${roundHpForSide(duel, side)} HP`;
-  let fontSize = SQUIG_DUEL_ROUND_HP_TEXT.fontSize;
+  let fontSize = Math.round(SQUIG_DUEL_ROUND_HP_TEXT.fontSize * scale);
+  const maxWidth = Math.round(SQUIG_DUEL_ROUND_HP_TEXT.maxWidth * scale);
+  const minFontSize = Math.max(24, Math.round(38 * scale));
 
   ctx.save();
   ctx.textAlign = 'center';
@@ -2960,28 +3031,28 @@ function drawRoundHp(ctx, duel, side) {
 
   do {
     ctx.font = `900 ${fontSize}px sans-serif`;
-    if (ctx.measureText(text).width <= SQUIG_DUEL_ROUND_HP_TEXT.maxWidth || fontSize <= 38) break;
+    if (ctx.measureText(text).width <= maxWidth || fontSize <= minFontSize) break;
     fontSize -= 2;
-  } while (fontSize > 38);
+  } while (fontSize > minFontSize);
 
   ctx.shadowColor = 'rgba(103, 22, 176, 0.92)';
-  ctx.shadowBlur = 18;
+  ctx.shadowBlur = Math.max(8, Math.round(18 * scale));
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
   ctx.strokeStyle = '#1a111f';
   ctx.lineWidth = Math.max(10, Math.round(fontSize * 0.22));
-  ctx.strokeText(text, point.x, point.y, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+  ctx.strokeText(text, point.x, point.y, maxWidth);
 
   ctx.shadowColor = 'rgba(38, 13, 28, 0.8)';
   ctx.shadowBlur = 0;
   ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 7;
+  ctx.shadowOffsetY = Math.max(3, Math.round(7 * scale));
   ctx.strokeStyle = '#2a1219';
   ctx.lineWidth = Math.max(5, Math.round(fontSize * 0.1));
-  ctx.strokeText(text, point.x, point.y + 4, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+  ctx.strokeText(text, point.x, point.y + Math.max(2, Math.round(4 * scale)), maxWidth);
 
   ctx.shadowColor = 'rgba(103, 22, 176, 0.68)';
-  ctx.shadowBlur = 12;
+  ctx.shadowBlur = Math.max(6, Math.round(12 * scale));
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
   const gradient = ctx.createLinearGradient(point.x, point.y - fontSize / 2, point.x, point.y + fontSize / 2);
@@ -2989,33 +3060,36 @@ function drawRoundHp(ctx, duel, side) {
   gradient.addColorStop(0.48, '#ffcb16');
   gradient.addColorStop(1, '#f36b00');
   ctx.fillStyle = gradient;
-  ctx.fillText(text, point.x, point.y, SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+  ctx.fillText(text, point.x, point.y, maxWidth);
 
   ctx.shadowColor = 'transparent';
   ctx.fillStyle = 'rgba(255, 255, 255, 0.38)';
   ctx.font = `900 ${Math.max(12, Math.round(fontSize * 0.28))}px sans-serif`;
-  ctx.fillText(text, point.x, point.y - Math.round(fontSize * 0.27), SQUIG_DUEL_ROUND_HP_TEXT.maxWidth);
+  ctx.fillText(text, point.x, point.y - Math.round(fontSize * 0.27), maxWidth);
   ctx.restore();
 }
 
 async function buildRoundDuelAttachment(duel) {
   const background = await loadRoundBackground();
-  const canvas = createCanvas(background.width, background.height);
+  const scale = Math.min(1, SQUIG_DUEL_ROUND_OUTPUT_WIDTH / background.width);
+  const width = Math.max(1, Math.round(background.width * scale));
+  const height = Math.max(1, Math.round(background.height * scale));
+  const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  ctx.drawImage(background, 0, 0, background.width, background.height);
-  await drawRoundSquig(ctx, duel, 'challenger');
-  await drawRoundSquig(ctx, duel, 'opponent');
-  drawRoundHp(ctx, duel, 'challenger');
-  drawRoundHp(ctx, duel, 'opponent');
+  ctx.drawImage(background, 0, 0, width, height);
+  await drawRoundSquig(ctx, duel, 'challenger', scale);
+  await drawRoundSquig(ctx, duel, 'opponent', scale);
+  drawRoundHp(ctx, duel, 'challenger', scale);
+  drawRoundHp(ctx, duel, 'opponent', scale);
 
-  const name = `squig-duel-round-${duel.id}-${duel.currentRound}.png`;
+  const name = `squig-duel-round-${duel.id}-${duel.currentRound}.jpg`;
   return {
     imageUrl: `attachment://${name}`,
     files: [
-      new AttachmentBuilder(canvas.toBuffer('image/png'), {
+      new AttachmentBuilder(canvas.toBuffer('image/jpeg', { quality: SQUIG_DUEL_ROUND_JPEG_QUALITY }), {
         name,
         description: `Squig Duel round ${duel.currentRound}`,
       }),
@@ -3139,9 +3213,15 @@ async function beginRound(guild, duel) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (!thread?.isTextBased()) return;
   const sudden = duel.currentRound > SUDDEN_DEATH_AFTER_ROUND;
-  const roundPrompt = isBotDuel(duel)
-    ? `Choose your action within ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds.\nThe bot will answer after you lock in.\n`
-    : `Both players have ${Math.round(ROUND_TIMEOUT_MS / 1000)} seconds to choose.\nSelections reveal after both players choose.\n`;
+  const suddenDamage = suddenDeathDamage(duel.currentRound);
+  const roundPrompt =
+    `Choose within **${Math.round(ROUND_TIMEOUT_MS / 1000)}s**.\n` +
+    (isBotDuel(duel)
+      ? `The bot answers after you lock in.`
+      : `Actions reveal after both players choose.`) +
+    (sudden
+      ? `\nSudden Death: **${suddenDamage} HP burn** this round, then +${SUDDEN_DEATH_DAMAGE_STEP} HP each round.`
+      : '');
   let roundImage = { imageUrl: roundImageUrl(duel), files: [] };
   try {
     roundImage = await buildRoundDuelAttachment(duel);
@@ -3152,9 +3232,8 @@ async function beginRound(guild, duel) {
     embeds: [buildStatusEmbed(
       duel,
       `Round ${duel.currentRound}${sudden ? ' - Sudden Death' : ''}`,
-      roundPrompt +
-      (sudden ? `Sudden Death: both Squigs lose ${SUDDEN_DEATH_DAMAGE} HP at the end of the round.` : ''),
-      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE, imageUrl: roundImage.imageUrl }
+      roundPrompt,
+      { thumbnailUrl: SQUIG_DUEL_MENU_IMAGE, imageUrl: roundImage.imageUrl, compact: true }
     )],
     ...(roundImage.files.length ? { files: roundImage.files } : {}),
     components: actionRows(duel),
@@ -3208,12 +3287,12 @@ async function handleActionButton(interaction) {
 }
 
 function attackDamage(attackPower) {
-  const multiplier = 0.9 + (Math.random() * 0.4);
+  const multiplier = 1.0 + (Math.random() * 0.45);
   return Math.max(1, Math.round((Number(attackPower) || 1) * multiplier));
 }
 
 function healAmount(maxHp, opposingAction) {
-  const baseHealAmount = Math.round(8 + (Number(maxHp) || 0) * 0.08);
+  const baseHealAmount = Math.round(6 + (Number(maxHp) || 0) * 0.055);
   if (opposingAction === 'defend') {
     return Math.max(1, Math.round(baseHealAmount * HEAL_VS_DEFEND_MULTIPLIER));
   }
@@ -3231,6 +3310,12 @@ function healContext(opposingAction) {
 
 function clampHp(value, maxHp) {
   return Math.max(0, Math.min(Math.round(Number(value) || 0), Math.round(Number(maxHp) || 0)));
+}
+
+function suddenDeathDamage(roundNumber) {
+  const suddenRound = Math.max(0, Math.floor(Number(roundNumber) || 0) - SUDDEN_DEATH_AFTER_ROUND);
+  if (suddenRound <= 0) return 0;
+  return SUDDEN_DEATH_BASE_DAMAGE + ((suddenRound - 1) * SUDDEN_DEATH_DAMAGE_STEP);
 }
 
 function resolveRoundMath(duel, timedOut) {
@@ -3338,10 +3423,11 @@ function resolveRoundMath(duel, timedOut) {
   }
 
   const hpBeforeSuddenDeath = { challenger: cHp, opponent: oHp };
-  if (duel.currentRound > SUDDEN_DEATH_AFTER_ROUND) {
-    cHp -= SUDDEN_DEATH_DAMAGE;
-    oHp -= SUDDEN_DEATH_DAMAGE;
-    lines.push(`Sudden Death burns both Squigs for ${SUDDEN_DEATH_DAMAGE} HP.`);
+  const burn = suddenDeathDamage(duel.currentRound);
+  if (burn > 0) {
+    cHp -= burn;
+    oHp -= burn;
+    lines.push(`Sudden Death burns both Squigs for ${burn} HP.`);
   }
 
   duel.challengerCurrentHp = clampHp(cHp, duel.challengerMaxHp);
