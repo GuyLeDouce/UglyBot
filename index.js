@@ -6618,15 +6618,20 @@ client.on('interactionCreate', async (interaction) => {
 
         if (sub === 'trigger') {
           await interaction.deferReply({ flags: 64 });
-          const out = await portalEvent.triggerPortalEvent({
-            guildId: interaction.guild.id,
-            channelId: interaction.channel.id,
-          });
-          if (!out.ok) {
-            await interaction.editReply({ content: `Portal trigger failed: ${out.reason}` });
-            return;
+          try {
+            const out = await portalEvent.triggerPortalEvent({
+              guildId: interaction.guild.id,
+              channelId: interaction.channel.id,
+            });
+            if (!out.ok) {
+              await interaction.editReply({ content: `Portal trigger failed: ${out.reason}` });
+              return;
+            }
+            await interaction.editReply({ content: 'Portal triggered.' });
+          } catch (err) {
+            console.error('Portal trigger command failed:', err);
+            await interaction.editReply({ content: `Portal trigger failed: ${err.message || err}` }).catch(() => {});
           }
-          await interaction.editReply({ content: 'Portal triggered.' });
           return;
         }
       }
@@ -7517,10 +7522,20 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        const out = await portalEvent.triggerPortalEvent({
-          guildId: interaction.guild.id,
-          channelId: state?.portalChannelId || interaction.channel.id,
-        });
+        let out;
+        try {
+          out = await portalEvent.triggerPortalEvent({
+            guildId: interaction.guild.id,
+            channelId: state?.portalChannelId || interaction.channel.id,
+          });
+        } catch (err) {
+          console.error('Portal admin trigger button failed:', err);
+          await interaction.editReply({
+            content: `Portal trigger failed: ${err.message || err}`,
+            components: [buildPortalAdminActionRow({ canTriggerNow: true })]
+          });
+          return;
+        }
         if (!out.ok) {
           const refreshed = portalEvent.getPortalState();
           await interaction.editReply({

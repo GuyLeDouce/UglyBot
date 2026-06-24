@@ -6,6 +6,12 @@ const {
   StringSelectMenuBuilder,
 } = require('discord.js');
 
+function readPositiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const MIN_DELAY_MS = 4 * 60 * 60 * 1000;
 const MAX_DELAY_MS = 12 * 60 * 60 * 1000;
@@ -13,6 +19,12 @@ const SINGLE_TRAIT_CHANCE = 0.85;
 const MAX_SELECT_OPTIONS = 25;
 const SQUIGS_CONTRACT = String(process.env.SQUIG_COLLECTION_CONTRACT || '0x8c9a02c0585200c4c65608df6b8def543d33792a').toLowerCase();
 const DEFAULT_MAX_TOKEN_ID = Number(process.env.PORTAL_MAX_SQUIG_TOKEN_ID || 10000);
+const REAL_SQUIG_SCAN_ATTEMPTS = readPositiveIntEnv('PORTAL_REAL_SQUIG_SCAN_ATTEMPTS', 40, { min: 1, max: 500 });
+const PREVIEW_SCAN_ATTEMPTS = readPositiveIntEnv('PORTAL_PREVIEW_SCAN_ATTEMPTS', 30, { min: 0, max: 300 });
+const PREVIEW_LINEAR_SCAN_ATTEMPTS = readPositiveIntEnv('PORTAL_PREVIEW_LINEAR_SCAN_ATTEMPTS', 80, { min: 0, max: 1000 });
+const TOKEN_LOOKUP_TIMEOUT_MS = readPositiveIntEnv('PORTAL_TOKEN_LOOKUP_TIMEOUT_MS', 7000, { min: 1000, max: 30000 });
+const REAL_SQUIG_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_REAL_SQUIG_SCAN_BUDGET_MS', 25000, { min: 1000, max: 120000 });
+const PREVIEW_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_PREVIEW_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
 const SQUIGS_MINT_URL = 'https://squigs.io/';
 const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
 const SQUIGS_IMAGE_TEMPLATE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
@@ -48,6 +60,32 @@ function randomInt(min, maxInclusive) {
 function pickRandom(arr) {
   if (!Array.isArray(arr) || !arr.length) return null;
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function portalLog(message, extra = null) {
+  if (extra) {
+    console.log(`[portal] ${message}`, extra);
+  } else {
+    console.log(`[portal] ${message}`);
+  }
+}
+
+function portalWarn(message, extra = null) {
+  if (extra) {
+    console.warn(`[portal] ${message}`, extra);
+  } else {
+    console.warn(`[portal] ${message}`);
+  }
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timeout = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function normalizeImageUrl(input) {
@@ -163,70 +201,84 @@ function choosePortalTraits(traitPool) {
   return { type: 'dual', traitA, traitB, reward: traitA.uglyPoints + traitB.uglyPoints };
 }
 
+async function inspectTokenForPortalChoice(tokenId, table) {
+  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
+  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+  const mapped = [];
+  for (const a of Array.isArray(attrs) ? attrs : []) {
+    const category = String(a?.trait_type || '').trim();
+    const value = String(a?.value || '').trim();
+    if (!category || !value) continue;
+    const m = findMappedTraitPoint(table, category, value);
+    if (!m) continue;
+    mapped.push(m);
+  }
+  if (!mapped.length) return null;
+
+  const byTrait = new Map();
+  for (const m of mapped) {
+    const key = String(m.trait || '').toLowerCase();
+    if (!key || byTrait.has(key)) continue;
+    byTrait.set(key, m);
+  }
+  const unique = [...byTrait.values()];
+  if (!unique.length) return null;
+
+  const wantsDual = Math.random() > SINGLE_TRAIT_CHANCE;
+  const traitA = pickRandom(unique);
+  if (!traitA) return null;
+
+  let type = 'single';
+  let traitB = null;
+  if (wantsDual) {
+    const dualCandidates = unique.filter(
+      (x) => x.trait.toLowerCase() !== traitA.trait.toLowerCase() &&
+        String(x.category || '').toLowerCase() !== String(traitA.category || '').toLowerCase()
+    );
+    if (dualCandidates.length) {
+      traitB = pickRandom(dualCandidates);
+      type = 'dual';
+    }
+  }
+
+  const reward = type === 'dual'
+    ? traitA.uglyPoints + (traitB?.uglyPoints || 0)
+    : traitA.uglyPoints;
+
+  const imageUrl = normalizeImageUrl(
+    squigImageUrl(tokenId) ||
+    meta?.image ||
+    meta?.metadata?.image ||
+    meta?.raw?.metadata?.image ||
+    meta?.tokenUri?.gateway ||
+    meta?.tokenUri?.raw
+  );
+  if (!imageUrl) return null;
+
+  return {
+    portal: { type, traitA, traitB, reward },
+    preview: { tokenId, imageUrl, name: String(meta?.name || `Squig #${tokenId}`) },
+  };
+}
+
 async function choosePortalFromRealSquig(table) {
-  const tries = Math.max(80, Number(process.env.PORTAL_REAL_SQUIG_SCAN_ATTEMPTS || 220));
-  for (let i = 0; i < tries; i++) {
+  const deadline = Date.now() + REAL_SQUIG_SCAN_BUDGET_MS;
+  let failures = 0;
+  for (let i = 0; i < REAL_SQUIG_SCAN_ATTEMPTS && Date.now() < deadline; i++) {
     const tokenId = String(randomInt(1, DEFAULT_MAX_TOKEN_ID));
     try {
-      const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
-      const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
-      const mapped = [];
-      for (const a of Array.isArray(attrs) ? attrs : []) {
-        const category = String(a?.trait_type || '').trim();
-        const value = String(a?.value || '').trim();
-        if (!category || !value) continue;
-        const m = findMappedTraitPoint(table, category, value);
-        if (!m) continue;
-        mapped.push(m);
-      }
-      if (!mapped.length) continue;
-
-      const byTrait = new Map();
-      for (const m of mapped) {
-        const key = String(m.trait || '').toLowerCase();
-        if (!key || byTrait.has(key)) continue;
-        byTrait.set(key, m);
-      }
-      const unique = [...byTrait.values()];
-      if (!unique.length) continue;
-
-      const wantsDual = Math.random() > SINGLE_TRAIT_CHANCE;
-      const traitA = pickRandom(unique);
-      if (!traitA) continue;
-
-      let type = 'single';
-      let traitB = null;
-      if (wantsDual) {
-        const dualCandidates = unique.filter(
-          (x) => x.trait.toLowerCase() !== traitA.trait.toLowerCase() &&
-            String(x.category || '').toLowerCase() !== String(traitA.category || '').toLowerCase()
-        );
-        if (dualCandidates.length) {
-          traitB = pickRandom(dualCandidates);
-          type = 'dual';
-        }
-      }
-
-      const reward = type === 'dual'
-        ? traitA.uglyPoints + (traitB?.uglyPoints || 0)
-        : traitA.uglyPoints;
-
-      const imageUrl = normalizeImageUrl(
-        squigImageUrl(tokenId) ||
-        meta?.image ||
-        meta?.metadata?.image ||
-        meta?.raw?.metadata?.image ||
-        meta?.tokenUri?.gateway ||
-        meta?.tokenUri?.raw
+      const result = await withTimeout(
+        inspectTokenForPortalChoice(tokenId, table),
+        TOKEN_LOOKUP_TIMEOUT_MS,
+        `Portal real Squig lookup #${tokenId}`
       );
-      if (!imageUrl) continue;
-
-      return {
-        portal: { type, traitA, traitB, reward },
-        preview: { tokenId, imageUrl, name: String(meta?.name || `Squig #${tokenId}`) },
-      };
-    } catch {}
+      if (result) return result;
+    } catch (err) {
+      failures++;
+      if (failures <= 3) portalWarn(`real Squig scan skipped #${tokenId}: ${err.message}`);
+    }
   }
+  portalWarn(`real Squig scan found no usable token after ${REAL_SQUIG_SCAN_ATTEMPTS} attempt(s) or ${REAL_SQUIG_SCAN_BUDGET_MS}ms`);
   return null;
 }
 
@@ -246,39 +298,50 @@ async function resolvePortalChannel() {
 
 async function findSquigForPreview(requiredTraitA, requiredTraitB = null) {
   assertReady();
-  const randomTries = Math.max(25, Number(process.env.PORTAL_PREVIEW_SCAN_ATTEMPTS || 120));
-  const linearTries = Math.max(100, Number(process.env.PORTAL_PREVIEW_LINEAR_SCAN_ATTEMPTS || 450));
+  const deadline = Date.now() + PREVIEW_SCAN_BUDGET_MS;
+  const randomTries = PREVIEW_SCAN_ATTEMPTS;
+  const linearTries = PREVIEW_LINEAR_SCAN_ATTEMPTS;
   const candidates = [];
+  let failures = 0;
 
   const inspectToken = async (tokenId) => {
     try {
-      const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
-      const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
-      const traitValues = traitValuesFromAttrs(attrs);
-      if (!hasRequiredTraits(traitValues, requiredTraitA, requiredTraitB)) return;
-      const imageUrl = normalizeImageUrl(
-        squigImageUrl(tokenId) ||
-        meta?.image ||
-        meta?.metadata?.image ||
-        meta?.raw?.metadata?.image ||
-        meta?.tokenUri?.gateway ||
-        meta?.tokenUri?.raw
+      await withTimeout(
+        (async () => {
+          const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
+          const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+          const traitValues = traitValuesFromAttrs(attrs);
+          if (!hasRequiredTraits(traitValues, requiredTraitA, requiredTraitB)) return;
+          const imageUrl = normalizeImageUrl(
+            squigImageUrl(tokenId) ||
+            meta?.image ||
+            meta?.metadata?.image ||
+            meta?.raw?.metadata?.image ||
+            meta?.tokenUri?.gateway ||
+            meta?.tokenUri?.raw
+          );
+          const name = String(meta?.name || `Squig #${tokenId}`);
+          candidates.push({ tokenId, imageUrl, name });
+        })(),
+        TOKEN_LOOKUP_TIMEOUT_MS,
+        `Portal preview lookup #${tokenId}`
       );
-      const name = String(meta?.name || `Squig #${tokenId}`);
-      candidates.push({ tokenId, imageUrl, name });
-    } catch {}
+    } catch (err) {
+      failures++;
+      if (failures <= 3) portalWarn(`preview scan skipped #${tokenId}: ${err.message}`);
+    }
   };
 
-  for (let i = 0; i < randomTries; i++) {
+  for (let i = 0; i < randomTries && Date.now() < deadline; i++) {
     const tokenId = String(randomInt(1, DEFAULT_MAX_TOKEN_ID));
     await inspectToken(tokenId);
     if (candidates.length >= 3) break;
   }
 
   // Fallback: linear probe from a random start for better hit-rate on rare trait combos.
-  if (!candidates.length) {
+  if (!candidates.length && Date.now() < deadline) {
     const start = randomInt(1, DEFAULT_MAX_TOKEN_ID);
-    for (let i = 0; i < linearTries; i++) {
+    for (let i = 0; i < linearTries && Date.now() < deadline; i++) {
       const next = ((start + i - 1) % DEFAULT_MAX_TOKEN_ID) + 1;
       await inspectToken(String(next));
       if (candidates.length >= 3) break;
@@ -413,6 +476,11 @@ async function closePortal({ announce = true } = {}) {
 async function triggerPortalEvent(options = {}) {
   assertReady();
   if (portalActive) return { ok: false, reason: 'Portal already active.' };
+  const startedAt = Date.now();
+  portalLog('trigger requested', {
+    channelId: options.channelId || portalChannelId || process.env.PORTAL_CHANNEL_ID || null,
+    guildId: options.guildId || portalGuildId || process.env.PORTAL_GUILD_ID || null,
+  });
 
   if (portalTimeout) {
     clearTimeout(portalTimeout);
@@ -426,6 +494,7 @@ async function triggerPortalEvent(options = {}) {
   const channel = await resolvePortalChannel();
   if (!channel || !channel.isTextBased()) {
     schedulePortal();
+    portalWarn('trigger failed: channel not found or not text-based');
     return { ok: false, reason: 'Portal channel not found or not text-based.' };
   }
 
@@ -438,20 +507,31 @@ async function triggerPortalEvent(options = {}) {
   if (realSquigChoice?.portal && realSquigChoice?.preview) {
     selected = realSquigChoice.portal;
     preview = realSquigChoice.preview;
+    portalLog('selected traits from real Squig preview', {
+      tokenId: preview.tokenId,
+      type: selected.type,
+      reward: selected.reward,
+    });
   } else {
     const traitPool = flattenTraitTable(squigTable);
     selected = choosePortalTraits(traitPool);
     if (!selected) {
       schedulePortal();
+      portalWarn('trigger failed: no valid traits available');
       return { ok: false, reason: 'No valid traits available for portal event.' };
     }
+    portalLog('selected traits from point table fallback', {
+      type: selected.type,
+      traitA: selected.traitA?.trait,
+      traitB: selected.traitB?.trait || null,
+      reward: selected.reward,
+    });
     preview = await findSquigForPreview(
       selected.traitA.trait,
       selected.type === 'dual' ? selected.traitB.trait : null
     );
     if (!preview?.imageUrl) {
-      schedulePortal();
-      return { ok: false, reason: 'No matching Squig image found for selected portal traits.' };
+      portalWarn('posting portal without example Squig image; preview scan found no match');
     }
   }
 
@@ -467,17 +547,29 @@ async function triggerPortalEvent(options = {}) {
     expiresAt: Date.now() + ONE_HOUR_MS,
   };
 
-  const portalMessage = await channel.send({
-    content: '@everyone  PORTAL MALFUNCTION',
-    embeds: [buildPortalEmbed(currentPortal, preview)],
-    components: [buildPortalButtonRow(false)],
-  });
+  let portalMessage = null;
+  try {
+    portalMessage = await channel.send({
+      content: '@everyone  PORTAL MALFUNCTION',
+      embeds: [buildPortalEmbed(currentPortal, preview)],
+      components: [buildPortalButtonRow(false)],
+    });
+  } catch (err) {
+    portalActive = false;
+    currentPortal = null;
+    claimedUsers = new Set();
+    clearPendingSelections();
+    schedulePortal();
+    portalWarn(`trigger failed while sending portal message: ${err.message}`);
+    return { ok: false, reason: `Failed to send portal message: ${err.message}` };
+  }
   portalMessageRef = portalMessage;
 
   portalCloseTimeout = setTimeout(() => {
     closePortal({ announce: true }).catch((err) => console.error('Portal close error:', err));
   }, ONE_HOUR_MS);
 
+  portalLog(`trigger completed in ${Date.now() - startedAt}ms`, { messageId: portalMessage.id });
   return { ok: true, portal: currentPortal, messageId: portalMessage.id };
 }
 
