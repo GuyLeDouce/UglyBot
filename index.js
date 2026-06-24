@@ -2072,20 +2072,48 @@ async function postWalletReceipt(guild, settings, actorDiscordId, action, wallet
   }
 }
 
-async function postAdminSystemLog({ guild = null, guildId = null, category = 'System', message }) {
+async function postAdminSystemLog({ guild = null, guildId = null, category = 'System', message, files = [] }) {
   if (!ADMIN_LOG_CHANNEL_ID) return;
   try {
     const ch = await client.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
     if (!ch?.isTextBased()) return;
     const guildLabel = guild?.name || guildId || 'unknown';
-    await ch.send(
-      `**${category}**\n` +
-      `Guild: ${guildLabel}\n` +
-      `${String(message || '').slice(0, 1600)}`
-    );
+    await ch.send({
+      content:
+        `**${category}**\n` +
+        `Guild: ${guildLabel}\n` +
+        `${String(message || '').slice(0, 1600)}`,
+      files,
+    });
   } catch (err) {
     console.warn('⚠️ Admin system log failed:', String(err?.message || err || ''));
   }
+}
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildPendingWalletCsv(pendingWallets = []) {
+  const headers = ['discord_id', 'mention', 'wallet_address', 'drip_member_id', 'reason'];
+  const rows = pendingWallets.map((item) => [
+    item.discordId,
+    `<@${item.discordId}>`,
+    item.walletAddress,
+    item.dripMemberId || '',
+    item.reason || '',
+  ]);
+  return [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
+}
+
+function pendingWalletReportAttachment(summary) {
+  const pendingWallets = Array.isArray(summary?.pendingWallets) ? summary.pendingWallets : [];
+  if (!pendingWallets.length) return null;
+  const csv = buildPendingWalletCsv(pendingWallets);
+  const roleId = String(summary?.roleId || 'role').replace(/[^a-zA-Z0-9_-]/g, '');
+  const filename = `verifyall-pending-wallets-${roleId}.csv`;
+  return new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: filename });
 }
 
 async function postRoleSyncFailures(guild, actorDiscordId, syncResult, context) {
@@ -3895,8 +3923,8 @@ async function computeDailyRewardQuote(guildId, links, settings) {
       : Promise.resolve({ unitTotal: 0, totalNfts: 0, totalUp: 0, byCollection: [] }),
   ]);
 
-  const effectiveUnits = verifiedStats.unitTotal + (unverifiedStats.unitTotal * 0.5);
-  const unverifiedPenaltyAmount = Math.max(0, (unverifiedStats.unitTotal * 0.5) * payoutAmount);
+  const effectiveUnits = verifiedStats.unitTotal + unverifiedStats.unitTotal;
+  const unverifiedPenaltyAmount = 0;
   const dailyReward = Math.max(0, Math.floor(effectiveUnits * payoutAmount));
 
   return {
@@ -4003,7 +4031,7 @@ function calculatePassiveClaimTotals(nftEntries, payoutAmount) {
     const elapsedMs = Math.max(0, Number(entry.elapsedMs || 0));
     const unitValue = Number(entry.unitValue || 0);
     const fullAmount = (elapsedMs / DAY_IN_MS) * unitValue * Number(payoutAmount || 0);
-    const walletPenalty = entry.verified ? 0 : fullAmount * 0.5;
+    const walletPenalty = 0;
     const claimableForNft = fullAmount - walletPenalty;
     entry.claimableAmount = claimableForNft;
     totalUnits += unitValue;
@@ -4627,9 +4655,8 @@ function infoEmbeds(guildName, settings = null) {
           name: 'Claim Rewards',
           value:
             `Users claim rewards accrued by each NFT since that NFT's last claim.\n` +
-            `Verified wallets count at full value.\n` +
-            `Unverified wallets only count at **50%**.\n` +
-            `If a user is docked, they get a hidden note telling them to verify in DRIP or open a support ticket.`
+            `Verified and pending wallets currently count at full value.\n` +
+            `Pending wallets remain visible in admin reports so the team can help users finish DRIP verification.`
         },
         {
           name: 'Check Wallets / Holdings',
@@ -4732,7 +4759,7 @@ function infoEmbeds(guildName, settings = null) {
         {
           name: 'Support Flow',
           value:
-            `If DRIP cannot verify a wallet, the user can still get holder roles, but their rewards are reduced for that wallet.\n` +
+            `If DRIP cannot verify a wallet, the user can still get holder roles and claim rewards.\n` +
             `They should connect the same wallet in DRIP or open a ticket for manual help.`
         }
       ),
@@ -4766,7 +4793,7 @@ function infoUserEmbeds(guildName, settings = null) {
           name: 'Verified vs Unverified Wallets',
           value:
             `If your wallet is verified through DRIP, it counts at full value.\n` +
-            `If your wallet is not verified through DRIP yet, it still counts, but only at **50%** for rewards.`
+            `If your wallet is not verified through DRIP yet, it still counts at full value while it is pending.`
         },
         {
           name: 'NFT Timers',
@@ -4776,18 +4803,18 @@ function infoUserEmbeds(guildName, settings = null) {
         }
       ),
     new EmbedBuilder()
-      .setTitle('How To Avoid Reduced Rewards')
+      .setTitle('How To Finish Verification')
       .setColor(0x7A83BF)
       .addFields(
         {
           name: 'Verify Your Wallet In DRIP',
           value:
-            `To get full rewards, make sure the same wallet you linked here is also connected to your DRIP profile in the correct realm.`
+            `Make sure the same wallet you linked here is also connected to your DRIP profile in the correct realm.`
         },
         {
           name: 'If Verification Fails',
           value:
-            `You can still keep your holder roles, but your unverified wallet rewards are reduced.\n` +
+            `You can still keep your holder roles and claim rewards while the wallet is pending.\n` +
             `If you need help, open a support ticket with the team so they can review your wallet manually.`
         },
         {
@@ -5757,6 +5784,7 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
     unavailableWalletCount: 0,
     roleChanges: 0,
     rolesGranted: 0,
+    pendingWallets: [],
     failures: [],
   };
 
@@ -5814,6 +5842,14 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
         summary.verifiedWalletCount += verification.checks.filter((x) => x.verified).length;
         summary.pendingWalletCount += verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable).length;
         summary.unavailableWalletCount += verification.checks.filter((x) => x.temporaryUnavailable).length;
+        for (const check of verification.checks.filter((x) => !x.verified && !x.temporaryUnavailable)) {
+          summary.pendingWallets.push({
+            discordId,
+            walletAddress: check.walletAddress,
+            dripMemberId: check.dripMemberId || '',
+            reason: check.reason || '',
+          });
+        }
         summary.roleChanges += Number(sync.changed || 0);
         summary.rolesGranted += Array.isArray(sync.granted) ? sync.granted.length : 0;
       } catch (err) {
@@ -5848,7 +5884,9 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
       category: 'Admin Verify All',
       message:
         `Actor: <@${actorDiscordId}>\n` +
-        message,
+        message +
+        `${summary.pendingWallets.length ? `\nPending wallet report attached: ${summary.pendingWallets.length} row${summary.pendingWallets.length === 1 ? '' : 's'}.` : ''}`,
+      files: [pendingWalletReportAttachment(summary)].filter(Boolean),
     });
     return { ok: true, skipped: false, message, summary };
   } catch (err) {
@@ -6429,28 +6467,12 @@ async function handleClaimPrompt(interaction) {
     return;
   }
 
-  const unverifiedLinks = links.filter((x) => !x?.verified).map((x) => normalizeEthAddress(x.wallet_address) || x.wallet_address);
-  const hasPenalty = rewardQuote.unverifiedPenaltyAmount > 0 && unverifiedLinks.length > 0;
-  const amountSummary = hasPenalty
-    ? `Base accrued: **${rewardQuote.baseAmount} $CHARM**\n` +
-      `DRIP penalty: **-${rewardQuote.unverifiedPenaltyAmount} $CHARM**\n` +
-      `You will receive: **${amount} $CHARM**`
-    : `You will receive: **${amount} $CHARM**`;
-  const penaltyBlock = hasPenalty
-    ? `\n\nSome linked wallets are not verified in DRIP yet, so those wallets only earn **50%** rewards until they are linked to the same DRIP profile.\n` +
-      `Unverified wallet${unverifiedLinks.length === 1 ? '' : 's'}:\n${unverifiedLinks.map((x) => `• \`${x}\``).join('\n')}\n\n` +
-      `To fix this:\n` +
-      `1. Open https://app.drip.re/user\n` +
-      `2. Sign in with the same Discord account\n` +
-      `3. Add the same wallet address${unverifiedLinks.length === 1 ? '' : 'es'} to your DRIP profile\n` +
-      `4. Click **Check DRIP Status** below to confirm the wallet is connected`
-    : '';
+  const amountSummary = `You will receive: **${amount} $CHARM**`;
 
   await respondInteraction(interaction, {
     content:
       `You are about to claim rewards. Are you sure?\n\n` +
-      `${amountSummary}` +
-      penaltyBlock,
+      `${amountSummary}`,
     components: [claimConfirmButtons()],
     flags: 64
   });
@@ -6509,9 +6531,9 @@ async function handleClaimCalculation(interaction) {
       ? `You last claimed these NFTs about **${formatElapsedTimeSimple(maxElapsed)}** ago, and they have been collecting ever since.`
       : `Your NFTs were last claimed between **${formatElapsedTimeSimple(minElapsed)}** and **${formatElapsedTimeSimple(maxElapsed)}** ago, and they have been collecting ever since.`;
   const accrualLine = `Accrued so far: **${rewardQuote.baseAmount} $CHARM**`;
-  const penaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
-    ? `DRIP penalty: **-${rewardQuote.unverifiedPenaltyAmount} $CHARM** because unverified wallets only count at 50%`
-    : `DRIP penalty: **0 $CHARM**`;
+  const verificationLine = rewardQuote.unverifiedPenaltyAmount > 0
+    ? `DRIP verification adjustment: **-${rewardQuote.unverifiedPenaltyAmount} $CHARM**`
+    : `DRIP verification adjustment: **0 $CHARM**`;
   const resultLine = `Claim now: **${rewardQuote.claimableAmount} $CHARM**`;
   const simpleExplain = rewardQuote.payoutType === 'per_nft'
     ? `Simple formula: each eligible NFT earns over time until that NFT is claimed.`
@@ -6523,7 +6545,7 @@ async function handleClaimCalculation(interaction) {
       `${timingLine}\n` +
       `${basisLine}\n` +
       `${accrualLine}\n` +
-      `${penaltyLine}\n` +
+      `${verificationLine}\n` +
       `${resultLine}\n\n` +
       `${simpleExplain}`,
     flags: 64
@@ -6635,7 +6657,7 @@ async function handleClaim(interaction) {
             : `${formatNumber(rewardQuote.totalUnits)} ${pointsLabel}`;
         const accrualLine = `\nClaimed NFTs: ${rewardQuote.totalNfts}`;
         const verificationPenaltyLine = rewardQuote.unverifiedPenaltyAmount > 0
-          ? `\nUnverified wallet dock: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM (50%)`
+          ? `\nDRIP verification adjustment: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM`
           : '';
         receiptMessage = await receiptChannel.send(
           `🧾 Claim Receipt\n` +
@@ -6665,7 +6687,7 @@ async function handleClaim(interaction) {
     await markPassiveClaimAttemptRecorded(claimAttemptId);
 
     const verificationLine = rewardQuote.unverifiedPenaltyAmount > 0
-      ? `Unverified wallet dock: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM (50%)\nVerify your wallet in DRIP or open a ticket in <#${SUPPORT_TICKET_CHANNEL_ID}> for help.\n`
+      ? `DRIP verification adjustment: -${Math.floor(rewardQuote.unverifiedPenaltyAmount)} $CHARM\n`
       : '';
     await respondInteraction(interaction, {
       content:
@@ -7324,8 +7346,13 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const result = await runRoleWalletVerificationRefresh(interaction.guild, role, interaction.user.id);
+        const pendingAttachment = pendingWalletReportAttachment(result?.summary);
         await interaction.editReply({
-          content: String(result?.message || 'No verification summary was returned.').slice(0, 1900)
+          content: (
+            String(result?.message || 'No verification summary was returned.') +
+            `${pendingAttachment ? '\nPending wallet report attached.' : ''}`
+          ).slice(0, 1900),
+          files: pendingAttachment ? [pendingAttachment] : [],
         });
         return;
       }
