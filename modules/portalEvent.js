@@ -32,7 +32,7 @@ const CLAIM_OWNERSHIP_TIMEOUT_MS = readPositiveIntEnv('PORTAL_CLAIM_OWNERSHIP_TI
 const CLAIM_TRAIT_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_CLAIM_TRAIT_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
 const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigs-reloaded';
 const SQUIGS_IMAGE_TEMPLATE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
-const PORTAL_RECEIPT_CHANNEL_ID = '1477463175665287410';
+const PORTAL_RECEIPT_CHANNEL_ID = '1403005536982794371';
 const LOCAL_SQUIG_METADATA_CANDIDATES = [
   path.join(__dirname, '..', 'metadata.csv'),
   path.join(__dirname, 'metadata.csv'),
