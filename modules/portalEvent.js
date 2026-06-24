@@ -4,7 +4,10 @@ const {
   ButtonStyle,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  AttachmentBuilder,
 } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 
 function readPositiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const value = Number(process.env[name]);
@@ -25,10 +28,20 @@ const PREVIEW_LINEAR_SCAN_ATTEMPTS = readPositiveIntEnv('PORTAL_PREVIEW_LINEAR_S
 const TOKEN_LOOKUP_TIMEOUT_MS = readPositiveIntEnv('PORTAL_TOKEN_LOOKUP_TIMEOUT_MS', 7000, { min: 1000, max: 30000 });
 const REAL_SQUIG_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_REAL_SQUIG_SCAN_BUDGET_MS', 25000, { min: 1000, max: 120000 });
 const PREVIEW_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_PREVIEW_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
+const CLAIM_OWNERSHIP_TIMEOUT_MS = readPositiveIntEnv('PORTAL_CLAIM_OWNERSHIP_TIMEOUT_MS', 25000, { min: 3000, max: 120000 });
+const CLAIM_TRAIT_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_CLAIM_TRAIT_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
 const SQUIGS_MINT_URL = 'https://squigs.io/';
 const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
 const SQUIGS_IMAGE_TEMPLATE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const PORTAL_RECEIPT_CHANNEL_ID = '1477463175665287410';
+const LOCAL_SQUIG_METADATA_CANDIDATES = [
+  path.join(__dirname, '..', 'metadata.csv'),
+  path.join(__dirname, 'metadata.csv'),
+];
+const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
+  path.join(__dirname, '..', 'images'),
+  path.join(__dirname, 'images'),
+];
 
 let deps = null;
 
@@ -44,6 +57,7 @@ let currentPortal = null;
 let schedulerEnabled = false;
 let nextPortalAt = null;
 let nextPortalDelayOverrideMs = null;
+let localSquigMetadataCache = null;
 
 function initPortalEvent(injectedDeps) {
   deps = injectedDeps;
@@ -86,6 +100,113 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timeout) clearTimeout(timeout);
   });
+}
+
+function parseCsvRecords(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < String(text || '').length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch !== '\r') {
+      field += ch;
+    }
+  }
+
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function loadLocalSquigMetadata() {
+  if (localSquigMetadataCache) return localSquigMetadataCache;
+  const byTokenId = new Map();
+  const csvPath = LOCAL_SQUIG_METADATA_CANDIDATES.find((candidate) => fs.existsSync(candidate));
+  if (!csvPath) {
+    localSquigMetadataCache = byTokenId;
+    return byTokenId;
+  }
+
+  try {
+    const rows = parseCsvRecords(fs.readFileSync(csvPath, 'utf8'));
+    const rawHeader = (rows.shift() || []).map((h) => String(h || '').trim());
+    const normalizedHeader = rawHeader.map((h) => h.toLowerCase());
+    const tokenIdx = normalizedHeader.indexOf('tokenid');
+    const nameIdx = normalizedHeader.indexOf('name');
+    const fileIdx = normalizedHeader.indexOf('file_name');
+    if (tokenIdx < 0) throw new Error('missing tokenID column');
+
+    for (const row of rows) {
+      const tokenId = String(row[tokenIdx] || '').trim();
+      if (!/^\d+$/.test(tokenId)) continue;
+      const attrs = [];
+      for (let i = 0; i < rawHeader.length; i++) {
+        const match = String(rawHeader[i] || '').match(/^attributes\[(.+)\]$/i);
+        if (!match) continue;
+        const value = String(row[i] || '').trim();
+        if (!value || /^none(\s*\(ignore\))?$/i.test(value)) continue;
+        attrs.push({ trait_type: match[1], value });
+      }
+      byTokenId.set(tokenId, {
+        name: nameIdx >= 0 ? String(row[nameIdx] || '').trim() : `Squig #${tokenId}`,
+        fileName: fileIdx >= 0 ? String(row[fileIdx] || '').trim() : `${tokenId}.png`,
+        attrs,
+      });
+    }
+    portalLog(`loaded ${byTokenId.size} local Squig metadata rows`);
+  } catch (err) {
+    portalWarn(`could not load local Squig metadata: ${err.message}`);
+  }
+
+  localSquigMetadataCache = byTokenId;
+  return byTokenId;
+}
+
+function localSquigImagePath(tokenId) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return null;
+  const localMeta = loadLocalSquigMetadata().get(tid);
+  const fileName = path.basename(localMeta?.fileName || `${tid}.png`);
+  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
+    const candidate = path.join(imageDir, fileName);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function localSquigTraits(tokenId) {
+  return loadLocalSquigMetadata().get(String(tokenId || '').trim())?.attrs || [];
+}
+
+function attachmentNameForSquig(tokenId, prefix = 'portal-squig') {
+  return `${prefix}-${String(tokenId || 'unknown').replace(/[^\w.-]/g, '')}.png`;
 }
 
 function normalizeImageUrl(input) {
@@ -201,9 +322,7 @@ function choosePortalTraits(traitPool) {
   return { type: 'dual', traitA, traitB, reward: traitA.uglyPoints + traitB.uglyPoints };
 }
 
-async function inspectTokenForPortalChoice(tokenId, table) {
-  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
-  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+function buildPortalChoiceFromAttrs(tokenId, attrs, table) {
   const mapped = [];
   for (const a of Array.isArray(attrs) ? attrs : []) {
     const category = String(a?.trait_type || '').trim();
@@ -244,7 +363,38 @@ async function inspectTokenForPortalChoice(tokenId, table) {
   const reward = type === 'dual'
     ? traitA.uglyPoints + (traitB?.uglyPoints || 0)
     : traitA.uglyPoints;
+  const localMeta = loadLocalSquigMetadata().get(String(tokenId));
+  const imagePath = localSquigImagePath(tokenId);
+  const imageUrl = normalizeImageUrl(squigImageUrl(tokenId));
+  if (!imagePath && !imageUrl) return null;
 
+  return {
+    portal: { type, traitA, traitB, reward },
+    preview: {
+      tokenId: String(tokenId),
+      imagePath,
+      imageUrl,
+      name: String(localMeta?.name || `Squig #${tokenId}`),
+    },
+  };
+}
+
+function choosePortalFromLocalSquig(table) {
+  const local = loadLocalSquigMetadata();
+  const tokenIds = [...local.keys()];
+  if (!tokenIds.length) return null;
+
+  for (let i = 0; i < Math.min(80, tokenIds.length); i++) {
+    const tokenId = pickRandom(tokenIds);
+    const result = buildPortalChoiceFromAttrs(tokenId, local.get(tokenId)?.attrs, table);
+    if (result) return result;
+  }
+  return null;
+}
+
+async function inspectTokenForPortalChoice(tokenId, table) {
+  const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
+  const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
   const imageUrl = normalizeImageUrl(
     squigImageUrl(tokenId) ||
     meta?.image ||
@@ -254,9 +404,11 @@ async function inspectTokenForPortalChoice(tokenId, table) {
     meta?.tokenUri?.raw
   );
   if (!imageUrl) return null;
+  const choice = buildPortalChoiceFromAttrs(tokenId, attrs, table);
+  if (!choice) return null;
 
   return {
-    portal: { type, traitA, traitB, reward },
+    portal: choice.portal,
     preview: { tokenId, imageUrl, name: String(meta?.name || `Squig #${tokenId}`) },
   };
 }
@@ -298,6 +450,23 @@ async function resolvePortalChannel() {
 
 async function findSquigForPreview(requiredTraitA, requiredTraitB = null) {
   assertReady();
+  const localCandidates = [];
+  for (const [tokenId, meta] of loadLocalSquigMetadata().entries()) {
+    const traitValues = traitValuesFromAttrs(meta?.attrs);
+    if (!hasRequiredTraits(traitValues, requiredTraitA, requiredTraitB)) continue;
+    const imagePath = localSquigImagePath(tokenId);
+    if (!imagePath && !SQUIGS_IMAGE_TEMPLATE) continue;
+    localCandidates.push({
+      tokenId,
+      imagePath,
+      imageUrl: normalizeImageUrl(squigImageUrl(tokenId)),
+      name: String(meta?.name || `Squig #${tokenId}`),
+    });
+    if (localCandidates.length >= 50) break;
+  }
+  const localPick = pickRandom(localCandidates);
+  if (localPick) return localPick;
+
   const deadline = Date.now() + PREVIEW_SCAN_BUDGET_MS;
   const randomTries = PREVIEW_SCAN_ATTEMPTS;
   const linearTries = PREVIEW_LINEAR_SCAN_ATTEMPTS;
@@ -369,14 +538,34 @@ function buildPortalEmbed(portal, preview) {
     )
     .setColor(0xE67E22);
 
-  if (preview?.imageUrl) {
+  if (preview?.imagePath) {
+    embed.setImage(`attachment://${attachmentNameForSquig(preview.tokenId, 'portal-preview')}`);
+  } else if (preview?.imageUrl) {
     embed.setImage(preview.imageUrl);
+  }
+  if (preview?.imagePath || preview?.imageUrl) {
     embed.addFields({
       name: 'Example Squig Match',
       value: `Squig #${preview.tokenId}\nhttps://opensea.io/assets/ethereum/${SQUIGS_CONTRACT}/${preview.tokenId}`,
     });
   }
   return embed;
+}
+
+function buildPortalMessagePayload(portal, preview) {
+  const payload = {
+    content: '@everyone  PORTAL MALFUNCTION',
+    embeds: [buildPortalEmbed(portal, preview)],
+    components: [buildPortalButtonRow(false)],
+  };
+  if (preview?.imagePath) {
+    payload.files = [
+      new AttachmentBuilder(preview.imagePath, {
+        name: attachmentNameForSquig(preview.tokenId, 'portal-preview'),
+      }),
+    ];
+  }
+  return payload;
 }
 
 function buildPortalButtonRow(disabled = false) {
@@ -503,11 +692,12 @@ async function triggerPortalEvent(options = {}) {
   let selected = null;
   let preview = null;
 
-  const realSquigChoice = await choosePortalFromRealSquig(squigTable);
+  const localSquigChoice = choosePortalFromLocalSquig(squigTable);
+  const realSquigChoice = localSquigChoice || await choosePortalFromRealSquig(squigTable);
   if (realSquigChoice?.portal && realSquigChoice?.preview) {
     selected = realSquigChoice.portal;
     preview = realSquigChoice.preview;
-    portalLog('selected traits from real Squig preview', {
+    portalLog(localSquigChoice ? 'selected traits from local Squig preview' : 'selected traits from real Squig preview', {
       tokenId: preview.tokenId,
       type: selected.type,
       reward: selected.reward,
@@ -549,11 +739,7 @@ async function triggerPortalEvent(options = {}) {
 
   let portalMessage = null;
   try {
-    portalMessage = await channel.send({
-      content: '@everyone  PORTAL MALFUNCTION',
-      embeds: [buildPortalEmbed(currentPortal, preview)],
-      components: [buildPortalButtonRow(false)],
-    });
+    portalMessage = await channel.send(buildPortalMessagePayload(currentPortal, preview));
   } catch (err) {
     portalActive = false;
     currentPortal = null;
@@ -630,14 +816,47 @@ async function fetchEligibleSquigsForUser(links) {
   const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
   if (!walletAddresses.length) return [];
 
-  const tokenIds = await deps.getOwnedTokenIdsForContractMany(walletAddresses, SQUIGS_CONTRACT);
+  portalLog('claim ownership lookup started', { wallets: walletAddresses.length });
+  const tokenIds = await withTimeout(
+    deps.getOwnedTokenIdsForContractMany(walletAddresses, SQUIGS_CONTRACT, undefined, { concurrency: 3 }),
+    CLAIM_OWNERSHIP_TIMEOUT_MS,
+    'Portal claim ownership lookup'
+  );
+  portalLog('claim ownership lookup completed', { tokenCount: tokenIds.length });
   if (!tokenIds.length) return [];
 
   const squigs = [];
+  const deadline = Date.now() + CLAIM_TRAIT_SCAN_BUDGET_MS;
+  let remoteLookups = 0;
+  let failures = 0;
   for (const tokenId of tokenIds) {
     try {
-      const meta = await deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT);
-      const { attrs } = await deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT);
+      let attrs = localSquigTraits(tokenId);
+      let imagePath = localSquigImagePath(tokenId);
+      let imageUrl = normalizeImageUrl(squigImageUrl(tokenId));
+      if (!attrs.length) {
+        if (Date.now() >= deadline) break;
+        remoteLookups++;
+        const meta = await withTimeout(
+          deps.getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT),
+          TOKEN_LOOKUP_TIMEOUT_MS,
+          `Portal claim metadata lookup #${tokenId}`
+        );
+        const traitsResult = await withTimeout(
+          deps.getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT),
+          TOKEN_LOOKUP_TIMEOUT_MS,
+          `Portal claim traits lookup #${tokenId}`
+        );
+        attrs = traitsResult?.attrs || [];
+        imageUrl = normalizeImageUrl(
+          imageUrl ||
+          meta?.image ||
+          meta?.metadata?.image ||
+          meta?.raw?.metadata?.image ||
+          meta?.tokenUri?.gateway ||
+          meta?.tokenUri?.raw
+        );
+      }
       const traits = traitValuesFromAttrs(attrs);
       const valid = hasRequiredTraits(
         traits,
@@ -645,18 +864,18 @@ async function fetchEligibleSquigsForUser(links) {
         currentPortal?.type === 'dual' ? currentPortal?.traitB?.trait : null
       );
       if (!valid) continue;
-      const imageUrl = normalizeImageUrl(
-        squigImageUrl(tokenId) ||
-        meta?.image ||
-        meta?.metadata?.image ||
-        meta?.raw?.metadata?.image ||
-        meta?.tokenUri?.gateway ||
-        meta?.tokenUri?.raw
-      );
-      squigs.push({ tokenId: String(tokenId), traits, imageUrl });
-    } catch {}
+      squigs.push({ tokenId: String(tokenId), traits, imagePath, imageUrl });
+    } catch (err) {
+      failures++;
+      if (failures <= 3) portalWarn(`claim trait scan skipped #${tokenId}: ${err.message}`);
+    }
   }
 
+  portalLog('claim trait scan completed', {
+    eligibleCount: squigs.length,
+    scannedTokens: tokenIds.length,
+    remoteLookups,
+  });
   return squigs;
 }
 
@@ -680,7 +899,16 @@ async function handlePortalClaim(interaction) {
     return;
   }
 
-  const squigs = await fetchEligibleSquigsForUser(links);
+  let squigs = [];
+  try {
+    squigs = await fetchEligibleSquigsForUser(links);
+  } catch (err) {
+    portalWarn(`claim lookup failed for ${interaction.user.id}: ${err.message}`);
+    await interaction.editReply({
+      content: `Portal scan timed out while checking your Squigs. Try again in a moment.`
+    });
+    return;
+  }
   if (!squigs.length) {
     await interaction.editReply({ content: buildNoTraitFunnyResponse(currentPortal) });
     return;
@@ -811,10 +1039,20 @@ async function handlePortalSelect(interaction) {
     )
     .setColor(0x2ECC71);
 
+  const selectedImageName = attachmentNameForSquig(selectedTokenId, 'portal-claim');
   const safeImageUrl = normalizeImageUrl(chosenSquig.imageUrl);
-  if (safeImageUrl) embed.setImage(safeImageUrl);
+  if (chosenSquig.imagePath) {
+    embed.setImage(`attachment://${selectedImageName}`);
+  } else if (safeImageUrl) {
+    embed.setImage(safeImageUrl);
+  }
 
-  await interaction.channel.send({ embeds: [embed] });
+  await interaction.channel.send({
+    embeds: [embed],
+    ...(chosenSquig.imagePath
+      ? { files: [new AttachmentBuilder(chosenSquig.imagePath, { name: selectedImageName })] }
+      : {}),
+  });
   try {
     const receiptChannel = deps.client.channels.cache.get(PORTAL_RECEIPT_CHANNEL_ID)
       || await deps.client.channels.fetch(PORTAL_RECEIPT_CHANNEL_ID);
