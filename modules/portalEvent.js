@@ -30,8 +30,7 @@ const REAL_SQUIG_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_REAL_SQUIG_SCAN_BUD
 const PREVIEW_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_PREVIEW_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
 const CLAIM_OWNERSHIP_TIMEOUT_MS = readPositiveIntEnv('PORTAL_CLAIM_OWNERSHIP_TIMEOUT_MS', 25000, { min: 3000, max: 120000 });
 const CLAIM_TRAIT_SCAN_BUDGET_MS = readPositiveIntEnv('PORTAL_CLAIM_TRAIT_SCAN_BUDGET_MS', 15000, { min: 1000, max: 120000 });
-const SQUIGS_MINT_URL = 'https://squigs.io/';
-const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigsnft';
+const SQUIGS_OPENSEA_URL = 'https://opensea.io/collection/squigs-reloaded';
 const SQUIGS_IMAGE_TEMPLATE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const PORTAL_RECEIPT_CHANNEL_ID = '1477463175665287410';
 const LOCAL_SQUIG_METADATA_CANDIDATES = [
@@ -593,9 +592,8 @@ function buildNoTraitFunnyResponse(portal) {
   const pick = lines[Math.floor(Math.random() * lines.length)];
   return (
     `${pick}\n\n` +
-    `Keep collecting:\n` +
-    `Mint: ${SQUIGS_MINT_URL}\n` +
-    `OpenSea: ${SQUIGS_OPENSEA_URL}`
+    `Find one on OpenSea:\n` +
+    `${SQUIGS_OPENSEA_URL}`
   );
 }
 
