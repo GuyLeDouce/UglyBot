@@ -1022,10 +1022,10 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('listuserwallets')
       .setDescription('Admin: view linked wallets and verification status for a user')
-      .addStringOption((opt) =>
+      .addUserOption((opt) =>
         opt
-          .setName('discord_id')
-          .setDescription('Discord user ID to inspect')
+          .setName('user')
+          .setDescription('Discord user to inspect')
           .setRequired(true)
       )
       .toJSON(),
@@ -7363,11 +7363,8 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await interaction.deferReply({ flags: 64 });
-        const discordId = String(interaction.options.getString('discord_id', true) || '').trim();
-        if (!/^\d{16,20}$/.test(discordId)) {
-          await interaction.editReply({ content: 'Invalid Discord ID.' });
-          return;
-        }
+        const targetUser = interaction.options.getUser('user', true);
+        const discordId = String(targetUser.id || '').trim();
         const links = await getWalletLinks(interaction.guild.id, discordId);
         if (!links.length) {
           await interaction.editReply({
