@@ -54,6 +54,19 @@ const DRIP_INITIATOR_ID = String(process.env.DRIP_INITIATOR_ID || '').trim();
 const DRIP_SENDER_ID = String(process.env.DRIP_SENDER_ID || process.env.DRIP_TRANSFER_SENDER_ID || '').trim();
 const DEFAULT_DRIP_MEMBER_SENDER_ID = String(process.env.DRIP_DEFAULT_MEMBER_SENDER_ID || '').trim();
 const DRIP_AUTO_VERIFY_SEED_AMOUNT = Math.max(0, Math.floor(Number(process.env.DRIP_AUTO_VERIFY_SEED_AMOUNT || 0)));
+const DRIP_CREDENTIAL_BOOTSTRAP_AMOUNT = Math.max(
+  0,
+  Math.floor(Number(process.env.DRIP_CREDENTIAL_BOOTSTRAP_AMOUNT ?? process.env.DRIP_AUTO_VERIFY_SEED_AMOUNT ?? 1))
+);
+const DRIP_CREDENTIAL_SENDER_TYPE = String(process.env.DRIP_CREDENTIAL_SENDER_TYPE || 'discord-id').trim().toLowerCase();
+const DRIP_CREDENTIAL_SENDER_VALUE = String(
+  process.env.DRIP_CREDENTIAL_SENDER_VALUE ||
+  process.env.DRIP_CREDENTIAL_SENDER_ID ||
+  DISCORD_CLIENT_ID ||
+  ''
+).trim();
+const DRIP_CREDENTIAL_SENDER_SOURCE = String(process.env.DRIP_CREDENTIAL_SENDER_SOURCE || '').trim();
+const DRIP_CREDENTIAL_BOOTSTRAP_TARGET_TYPE = String(process.env.DRIP_CREDENTIAL_BOOTSTRAP_TARGET_TYPE || 'wallet').trim().toLowerCase();
 
 // Visual/render tunables
 const RENDER_SCALE = 3; // 1 = 750x1050. 2 = 1500x2100. 3 = 2250x3150
@@ -4958,8 +4971,12 @@ async function searchDripMembers(realmId, type, value, settings) {
   return [];
 }
 
-async function findDripAccountByDiscordId(discordId, settings) {
-  const typeCandidates = ['discord', 'discord-id'];
+async function findDripAccountByCredential(type, value, settings) {
+  const normalizedType = String(type || '').trim().toLowerCase();
+  const typeCandidates =
+    normalizedType === 'discord' || normalizedType === 'discord-id'
+      ? ['discord', 'discord-id']
+      : [normalizedType].filter(Boolean);
   const valueParamCandidates = ['value', 'values'];
   const errors = [];
 
@@ -4967,7 +4984,7 @@ async function findDripAccountByDiscordId(discordId, settings) {
     for (const valueParam of valueParamCandidates) {
       const url =
         `https://api.drip.re/api/v1/accounts/find` +
-        `?type=${encodeURIComponent(typeCandidate)}&${valueParam}=${encodeURIComponent(discordId)}`;
+        `?type=${encodeURIComponent(typeCandidate)}&${valueParam}=${encodeURIComponent(value)}`;
       const res = await fetchWithTimeout(url, { timeoutMs: 15000, headers: buildDripHeaders(settings) });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -4993,6 +5010,10 @@ async function findDripAccountByDiscordId(discordId, settings) {
     throw new Error(`DRIP account lookup failed (all query variants rejected): ${errors.join(' | ')}`);
   }
   return null;
+}
+
+async function findDripAccountByDiscordId(discordId, settings) {
+  return findDripAccountByCredential('discord', discordId, settings);
 }
 
 async function resolveDripMemberForDiscordUser(realmId, discordId, walletAddress, settings) {
@@ -5147,6 +5168,224 @@ async function seedDripMemberForVerification(realmId, discordId, walletAddress, 
   };
 }
 
+function isLikelyExistingDripCredentialResponse(status, body) {
+  return (
+    status === 409 ||
+    (
+      (status === 400 || status === 422) &&
+      /(already|exist|duplicate|unique|conflict)/i.test(String(body || ''))
+    )
+  );
+}
+
+function dripCredentialSenderConfig() {
+  const allowed = new Set(['twitter-id', 'discord-id', 'wallet', 'email', 'custom']);
+  const type = allowed.has(DRIP_CREDENTIAL_SENDER_TYPE) ? DRIP_CREDENTIAL_SENDER_TYPE : 'discord-id';
+  const value = String(DRIP_CREDENTIAL_SENDER_VALUE || '').trim();
+  const source = String(DRIP_CREDENTIAL_SENDER_SOURCE || '').trim();
+  if (!value) return { ok: false, reason: 'DRIP credential sender value is not configured.' };
+  if (type === 'custom' && !source) {
+    return { ok: false, reason: 'DRIP credential sender source is required when sender type is custom.' };
+  }
+  return { ok: true, type, value, source };
+}
+
+async function postDripCredential(realmId, suffix, payload, settings, context) {
+  const url = `https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}/credentials/${suffix}`;
+  const res = await fetchWithTimeout(url, {
+    timeoutMs: 15000,
+    headers: buildDripHeaders(settings, true),
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    const data = await res.json().catch(() => ({}));
+    return { ok: true, created: true, data };
+  }
+  const body = await res.text().catch(() => '');
+  if (isLikelyExistingDripCredentialResponse(res.status, body)) {
+    return { ok: true, created: false, existing: true, status: res.status, body: String(body || '').slice(0, 300) };
+  }
+  throw new Error(`${context} failed: HTTP ${res.status} ${body}`);
+}
+
+async function createDripDiscordCredential(realmId, discordId, settings, options = {}) {
+  const payload = {
+    provider: 'discord',
+    providerId: String(discordId),
+    username: String(options.username || discordId).slice(0, 100),
+    metadata: {
+      source: 'uglybot',
+      context: options.context || 'wallet_verification_bootstrap',
+    },
+  };
+  if (options.accountId) payload.accountId = String(options.accountId);
+  return postDripCredential(realmId, 'social', payload, settings, 'DRIP Discord credential creation');
+}
+
+async function createDripWalletCredential(realmId, walletAddress, settings, options = {}) {
+  const payload = {
+    address: walletAddress,
+    chain: 'ethereum',
+    walletProvider: 'uglybot',
+    walletName: 'UglyBot linked wallet',
+    metadata: {
+      source: 'uglybot',
+      discordId: String(options.discordId || ''),
+      context: options.context || 'wallet_verification_bootstrap',
+    },
+  };
+  if (options.accountId) payload.accountId = String(options.accountId);
+  return postDripCredential(realmId, 'wallet', payload, settings, 'DRIP wallet credential creation');
+}
+
+function credentialTransferTarget(discordId, walletAddress) {
+  if (DRIP_CREDENTIAL_BOOTSTRAP_TARGET_TYPE === 'discord-id') {
+    return { type: 'discord-id', value: String(discordId), source: '' };
+  }
+  return { type: 'wallet', value: walletAddress, source: '' };
+}
+
+async function transferDripCredentialPoints(realmId, target, amount, currencyId, settings, options = {}) {
+  const sender = dripCredentialSenderConfig();
+  if (!sender.ok) throw new Error(sender.reason);
+  const url = new URL(`https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}/credentials/transfer`);
+  url.searchParams.set('fromType', sender.type);
+  url.searchParams.set('fromValue', sender.value);
+  if (sender.type === 'custom') url.searchParams.set('fromSource', sender.source);
+  url.searchParams.set('toType', target.type);
+  url.searchParams.set('toValue', target.value);
+  if (target.type === 'custom' && target.source) url.searchParams.set('toSource', target.source);
+
+  const payload = { amount: Math.max(1, Math.floor(Number(amount) || 0)) };
+  if (currencyId) payload.realmPointId = String(currencyId);
+
+  logDripPayout('credential transfer request', {
+    context: options.context || 'wallet_verification_bootstrap',
+    realmId,
+    amount: payload.amount,
+    currencyId: currencyId ? String(currencyId) : null,
+    fromType: sender.type,
+    fromValue: sender.value,
+    toType: target.type,
+    toValue: target.value,
+  });
+
+  const res = await fetchWithTimeout(url.toString(), {
+    timeoutMs: 15000,
+    headers: buildDripHeaders(settings, true),
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    const data = await res.json().catch(() => ({}));
+    return { ok: true, data, sender, target, amount: payload.amount };
+  }
+  const body = await res.text().catch(() => '');
+  logDripPayout('credential transfer failure', {
+    context: options.context || 'wallet_verification_bootstrap',
+    realmId,
+    status: res.status,
+    body: String(body || '').slice(0, 500),
+    fromType: sender.type,
+    toType: target.type,
+  });
+  throw new Error(`DRIP credential transfer failed: HTTP ${res.status} ${body}`);
+}
+
+async function bootstrapDripCredentialVerification(realmId, discordId, walletAddress, settings, options = {}) {
+  const amount = Number(options.amount ?? DRIP_CREDENTIAL_BOOTSTRAP_AMOUNT);
+  const currencyId = settings?.currency_id;
+  const normalizedWallet = normalizeEthAddress(walletAddress);
+  if (!amount || amount <= 0) return { ok: false, attempted: false, reason: 'DRIP credential bootstrap is disabled.' };
+  if (!settings?.drip_api_key || !realmId || !currencyId) {
+    return { ok: false, attempted: false, reason: 'DRIP credential bootstrap skipped because API key, realm, or currency is not configured.' };
+  }
+  if (!normalizedWallet) {
+    return { ok: false, attempted: false, reason: 'DRIP credential bootstrap skipped because the wallet address is invalid.' };
+  }
+
+  const [discordAccountId, walletAccountId] = await Promise.all([
+    findDripAccountByCredential('discord', discordId, settings).catch(() => null),
+    findDripAccountByCredential('wallet', normalizedWallet, settings).catch(() => null),
+  ]);
+  const accountId = discordAccountId || walletAccountId || null;
+  const context = options.context || 'wallet_verification_bootstrap';
+
+  const [discordCredential, walletCredential] = await Promise.all([
+    createDripDiscordCredential(realmId, discordId, settings, {
+      accountId,
+      username: options.username || discordId,
+      context,
+    }),
+    createDripWalletCredential(realmId, normalizedWallet, settings, {
+      accountId,
+      discordId,
+      context,
+    }),
+  ]);
+
+  const target = credentialTransferTarget(discordId, normalizedWallet);
+  const transfer = await transferDripCredentialPoints(realmId, target, amount, currencyId, settings, { context });
+  return {
+    ok: true,
+    attempted: true,
+    amount: transfer.amount,
+    accountId,
+    discordCredential,
+    walletCredential,
+    transfer,
+    reason: `DRIP credential bootstrap complete; ${transfer.amount} point${transfer.amount === 1 ? '' : 's'} sent to ${target.type}.`,
+  };
+}
+
+async function verifyOrBootstrapWalletViaDrip(realmId, discordId, walletAddress, settings, options = {}) {
+  const existingVerified = Boolean(options.existingVerified);
+  const live = await verifyWalletViaDrip(realmId, discordId, walletAddress, settings);
+  if (live.verified) return live;
+
+  const temporaryUnavailable = /temporarily unavailable/i.test(String(live.reason || ''));
+  if (temporaryUnavailable) return live;
+
+  if (existingVerified) {
+    return {
+      verified: true,
+      dripMemberId: live.dripMemberId || options.existingDripMemberId || null,
+      reason: 'Already verified in the bot; DRIP credential bootstrap skipped for existing verified wallet.',
+      bootstrapSkippedExisting: true,
+    };
+  }
+
+  try {
+    const bootstrap = await bootstrapDripCredentialVerification(
+      realmId,
+      discordId,
+      walletAddress,
+      settings,
+      options
+    );
+    if (bootstrap.ok) {
+      return {
+        verified: true,
+        dripMemberId: live.dripMemberId || options.existingDripMemberId || null,
+        reason: bootstrap.reason,
+        bootstrap,
+      };
+    }
+    return {
+      ...live,
+      reason: `${live.reason} Bootstrap not completed: ${bootstrap.reason}`,
+      bootstrap,
+    };
+  } catch (err) {
+    return {
+      ...live,
+      reason: `${live.reason} Bootstrap failed: ${String(err?.message || err || '').slice(0, 220)}`,
+      bootstrapError: err,
+    };
+  }
+}
+
 async function handleDripStatusCheck(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: 64 });
@@ -5184,6 +5423,14 @@ async function handleDripStatusCheck(interaction) {
         verified: false,
         reason: 'Wallet address is invalid or could not be normalized.',
         dripMemberId: null,
+      };
+    }
+    if (link.verified) {
+      return {
+        walletAddress,
+        verified: true,
+        reason: 'Already verified/bootstrap-complete in this bot.',
+        dripMemberId: link.drip_member_id || null,
       };
     }
     const result = await verifyWalletViaDrip(
@@ -5264,11 +5511,16 @@ async function refreshLinkedWalletVerification(guild, guildId, discordId, links,
       };
     }
 
-    const result = await verifyWalletViaDrip(
+    const result = await verifyOrBootstrapWalletViaDrip(
       settings.drip_realm_id,
       discordId,
       walletAddress,
-      settings
+      settings,
+      {
+        existingVerified: Boolean(link.verified),
+        existingDripMemberId: link.drip_member_id || null,
+        context,
+      }
     );
 
     return {
@@ -9061,7 +9313,7 @@ client.on('interactionCreate', async (interaction) => {
             interaction.guild.id,
             interaction.user.id,
             addr,
-            true,
+            Boolean(existingLink?.verified),
             existingLink?.drip_member_id || null
           );
           if (!existingSet.has(addr)) {
@@ -9069,14 +9321,21 @@ client.on('interactionCreate', async (interaction) => {
             await postWalletReceipt(interaction.guild, settings, interaction.user.id, 'Connected', addr);
           }
         }
-        const allLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const savedLinks = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const verification = await refreshLinkedWalletVerification(
+          interaction.guild,
+          interaction.guild.id,
+          interaction.user.id,
+          savedLinks,
+          settings || {},
+          { context: 'wallet connect' }
+        );
+        const allLinks = verification.refreshedLinks;
         const allAddresses = allLinks.map((x) => x.wallet_address);
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const sync = await syncHolderRoles(member, allAddresses);
         await postRoleSyncFailures(interaction.guild, interaction.user.id, sync, 'wallet connect');
-        const dripStatus =
-          `Connected wallets were automatically marked as verified.\n` +
-          `DRIP member resolution will still run when needed for claims and payouts.`;
+        const dripStatus = `${verification.statusText}\n`;
         const blockedText = blockedByOtherUser.length
           ? `\nBlocked duplicate wallet(s): ${blockedByOtherUser.map((x) => `\`${x.walletAddress}\``).join(', ')}`
           : '';
@@ -9085,7 +9344,7 @@ client.on('interactionCreate', async (interaction) => {
             `Wallet connect processed.\n` +
             `Added: ${added.length}\n` +
             `Total linked wallets: ${allAddresses.length}\n` +
-            `${dripStatus}\n` +
+            `${dripStatus}` +
             `${blockedText}\n` +
             `Role sync complete (${sync.changed} change${sync.changed === 1 ? '' : 's'}).\n` +
             `${sync.granted?.length ? `Roles granted: ${sync.granted.join(', ')}` : 'Roles granted: none'}` +
