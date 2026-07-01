@@ -827,7 +827,14 @@ function buildMenuEmbed() {
     .setColor(0xd4a43b)
     .setDescription(
       'Start a duel, pick your Squig, and battle for $CHARM.\n' +
-      'Open challenges become bot battles only if nobody accepts in time.'
+      'Open Challenge - anyone can join the battle.\n' +
+      'Choose Opponent - challenge any holder directly.\n' +
+      'You must have enough $CHARM to wager.\n\n' +
+      'Attack - hit an opponent\n' +
+      'Defend - block a hit\n' +
+      'Heal - repair HP\n' +
+      'Panic - who tf knows?\n\n' +
+      'This is a wager game. Both players put up the wager before the battle, and the winner takes the pot.'
     )
     .setImage(SQUIG_DUEL_MENU_IMAGE)
     .setFooter({ text: 'Attack, Defend, Heal, or Panic.' });
