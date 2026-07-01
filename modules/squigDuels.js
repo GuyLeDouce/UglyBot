@@ -74,8 +74,8 @@ const DEFAULT_ACCEPT_TIMEOUT_MINUTES = 3;
 const DEFAULT_ACCEPT_TIMEOUT_MS = DEFAULT_ACCEPT_TIMEOUT_MINUTES * 60 * 1000;
 const SETUP_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_SETUP_TIMEOUT_MS || 10 * 60 * 1000);
 const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 20 * 1000);
-const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 1500);
-const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 5 * 1000);
+const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 750);
+const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 1500);
 const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 5;
@@ -545,8 +545,9 @@ async function postOpenChallengeAnnouncement(guild, duel) {
   const threadUrl = `https://discord.com/channels/${duel.guildId}/${duel.threadId}`;
   await channel.send({
     content:
-      `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> is looking for a Squig Duel opponent for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
+      `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> opened a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
       `Join here: [Squig Duel thread](${threadUrl})`,
+    embeds: [buildChallengeEmbed(duel)],
     allowedMentions: {
       roles: [OPEN_CHALLENGE_ROLE_ID],
       users: [duel.challengerId],
@@ -822,32 +823,14 @@ function applySavedSquigNameToActiveDuels(guildId, userId, tokenId, nickname) {
 
 function buildMenuEmbed() {
   return new EmbedBuilder()
-    .setTitle('⚔️ Squig Duels')
+    .setTitle('Squig Duels')
     .setColor(0xd4a43b)
     .setDescription(
-      'Challenge another holder, wager $CHARM, choose one of your own Squigs, and battle using UglyPoints-powered HP.\n\n' +
-      '**How it works:**\n' +
-      '1. Click Start Duel\n' +
-      '2. Pick an opponent\n' +
-      '3. Choose your $CHARM wager and opponent response time\n' +
-      '4. Select one of your wallet-linked Squigs\n' +
-      '5. Opponent accepts and matches the wager\n' +
-      '6. Both Squigs battle round by round until one hits 0 HP\n\n' +
-      '**Stats:**\n' +
-      '- Squig HP is based on UglyPoints\n' +
-      '- Higher UglyPoints helps, but strategy matters\n' +
-      '- Every round you choose Attack, Defend, Heal, or Panic\n\n' +
-      '**Actions:**\n' +
-      'Attack — damage your opponent unless blocked\n' +
-      'Defend — block attacks and reduce enemy healing\n' +
-      'Heal — recover HP; stronger against attacks\n' +
-      'Panic — force chaos, but both Squigs lose HP\n\n' +
-      '**Bot Duel:**\n' +
-      `Choose a wager up to ${formatCharm(BOT_DUEL_MAX_WAGER)} $CHARM. Win to receive ${BOT_DUEL_PAYOUT_MULTIPLIER}x your wager; lose and the bot keeps it.\n` +
-      'Each Squig can play the bot once per day.'
+      'Start a duel, pick your Squig, and battle for $CHARM.\n' +
+      'Open challenges become bot battles only if nobody accepts in time.'
     )
     .setImage(SQUIG_DUEL_MENU_IMAGE)
-    .setFooter({ text: 'Use your Squig wisely. The portal remembers everything.' });
+    .setFooter({ text: 'Attack, Defend, Heal, or Panic.' });
 }
 
 function buildMenuRow() {
@@ -863,11 +846,7 @@ function buildMenuRow() {
     new ButtonBuilder()
       .setCustomId('sd:my_squig')
       .setLabel('Manage Squigs')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId('sd:bot')
-      .setLabel('Bot Duel')
-      .setStyle(ButtonStyle.Primary)
+      .setStyle(ButtonStyle.Success)
   );
 }
 
@@ -950,12 +929,12 @@ function formatAcceptTimeout(ms) {
 function challengerSetupModal(duelId) {
   const modal = new ModalBuilder()
     .setCustomId(`sd:setup:${duelId}`)
-    .setTitle('Set Squig Duel Rules');
+    .setTitle('Squig Duel Setup');
   modal.addComponents(
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('wager')
-        .setLabel('Wager amount in $CHARM')
+        .setLabel('How much is the wager?')
         .setRequired(true)
         .setPlaceholder('100')
         .setStyle(TextInputStyle.Short)
@@ -963,7 +942,7 @@ function challengerSetupModal(duelId) {
     new ActionRowBuilder().addComponents(
       new TextInputBuilder()
         .setCustomId('accept_timeout_minutes')
-        .setLabel('Opponent time: 1, 2, 3, or 5 min')
+        .setLabel('How much time? 1, 2, 3, or 5 min')
         .setRequired(true)
         .setPlaceholder(String(DEFAULT_ACCEPT_TIMEOUT_MINUTES))
         .setStyle(TextInputStyle.Short)
@@ -972,21 +951,19 @@ function challengerSetupModal(duelId) {
   return modal;
 }
 
-function botDuelSetupModal(userId) {
-  const modal = new ModalBuilder()
-    .setCustomId(`sd:bot_setup:${userId}`)
-    .setTitle('Set Bot Duel Wager');
-  modal.addComponents(
+function duelStartChoiceRows(duelId) {
+  return [
     new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('wager')
-        .setLabel(`Wager amount, max ${formatCharm(BOT_DUEL_MAX_WAGER)}`)
-        .setRequired(true)
-        .setPlaceholder(String(BOT_DUEL_WAGER))
-        .setStyle(TextInputStyle.Short)
-    )
-  );
-  return modal;
+      new ButtonBuilder()
+        .setCustomId(`sd:open:${duelId}`)
+        .setLabel('Open Challenge')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`sd:choose_opponent:${duelId}`)
+        .setLabel('Choose Opponent')
+        .setStyle(ButtonStyle.Secondary)
+    ),
+  ];
 }
 
 function opponentSelectRows(duelId) {
@@ -994,15 +971,15 @@ function opponentSelectRows(duelId) {
     new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`sd:opponent:${duelId}`)
-        .setPlaceholder('Start typing to select your opponent')
+        .setPlaceholder('Which user?')
         .setMinValues(1)
         .setMaxValues(1)
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`sd:open:${duelId}`)
-        .setLabel('Open Challenge')
-        .setStyle(ButtonStyle.Primary)
+        .setCustomId(`sd:cancel:${duelId}`)
+        .setLabel('Cancel Fight')
+        .setStyle(ButtonStyle.Danger)
     ),
   ];
 }
@@ -1012,7 +989,7 @@ function setupCancelRows(duelId) {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`sd:cancel:${duelId}`)
-        .setLabel('Cancel Challenge')
+        .setLabel('Cancel Fight')
         .setStyle(ButtonStyle.Danger)
     ),
   ];
@@ -1106,108 +1083,39 @@ async function handleStartButton(interaction) {
 
   await thread.send({
     content:
-      `<@${interaction.user.id}> started a Squig Duel setup.\n` +
-      `Holders can spectate here. Only duel participants and admins should write in this thread.\n\n` +
-      `Select your opponent or post an open challenge for holders to accept.`,
-    components: opponentSelectRows(duelId),
+      `<@${interaction.user.id}> started a Squig Duel\n` +
+      `Who would you like to fight?`,
+    components: duelStartChoiceRows(duelId),
   });
   await interaction.editReply({
-    content:
-      `Duel thread created: <#${thread.id}>. Continue setup there.\n` +
-      `Only you can see this cancel button while setup is active.`,
+    content: `Duel thread created: <#${thread.id}>.`,
     components: setupCancelRows(duelId),
   });
   return true;
 }
 
-async function handleBotDuelButton(interaction) {
-  if (interaction.customId !== 'sd:bot') return false;
-  assertReady();
-
-  if (activeUserToDuel.has(interaction.user.id)) {
-    await interaction.reply({ content: 'You are already in an active Squig Duel.', flags: 64 });
-    return true;
-  }
-  if (!interaction.channel?.threads?.create) {
-    await interaction.reply({ content: 'This channel cannot create duel threads.', flags: 64 });
-    return true;
-  }
-  if (!botUserId()) {
-    await interaction.reply({ content: 'Bot duel is unavailable until the bot user is ready.', flags: 64 });
-    return true;
-  }
-  await interaction.showModal(botDuelSetupModal(interaction.user.id));
-  return true;
-}
-
-async function handleBotDuelSetupModal(interaction) {
-  const match = interaction.customId.match(/^sd:bot_setup:(\d{16,22})$/);
+async function handleChooseOpponentButton(interaction) {
+  const match = interaction.customId.match(/^sd:choose_opponent:([a-f0-9]{12})$/i);
   if (!match) return false;
   assertReady();
-  if (interaction.user.id !== match[1]) {
-    await interaction.reply({ content: 'This bot duel setup is not for you.', flags: 64 });
-    return true;
-  }
-  if (activeUserToDuel.has(interaction.user.id)) {
-    await interaction.reply({ content: 'You are already in an active Squig Duel.', flags: 64 });
-    return true;
-  }
-  if (!interaction.channel?.threads?.create) {
-    await interaction.reply({ content: 'This channel cannot create duel threads.', flags: 64 });
-    return true;
-  }
-  if (!botUserId()) {
-    await interaction.reply({ content: 'Bot duel is unavailable until the bot user is ready.', flags: 64 });
-    return true;
-  }
-  const wagerAmount = parseWager(interaction.fields.getTextInputValue('wager'), BOT_DUEL_MAX_WAGER);
-  if (!wagerAmount) {
-    await interaction.reply({
-      content: `Bot Duel wager must be a whole number between 1 and ${formatCharm(BOT_DUEL_MAX_WAGER)} $CHARM.`,
-      flags: 64,
-    });
-    return true;
-  }
-  await interaction.deferReply({ flags: 64 });
-  const eligibility = await checkDuelWagerEligibility(interaction.guild, interaction.user.id, wagerAmount);
-  if (!eligibility.ok) {
-    await interaction.editReply({
-      content: eligibility.reason || `You need ${formatCharm(wagerAmount)} $CHARM to start this Bot Duel.`,
-    });
-    return true;
-  }
 
-  const duelId = randomId();
-  const thread = await interaction.channel.threads.create({
-    name: `Bot Squig Duel-${interaction.user.username}`.slice(0, 90),
-    autoArchiveDuration: 1440,
-    type: ChannelType.PublicThread,
-    reason: `Bot Squig Duel created by ${interaction.user.tag}`,
-  });
-  await ensureHolderThreadViewAccess(interaction.guild, thread);
-
-  const duel = createBaseDuel({
-    interaction,
-    duelId,
-    thread,
-    opponentId: botUserId(),
-    wagerAmount,
-    isBotDuel: true,
-  });
-  duels.set(duelId, duel);
-  registerActiveUser(interaction.user.id, duelId);
-  armSetupTimeout(interaction.guild, duel);
-
-  await thread.members.add(interaction.user.id).catch(() => null);
+  const duel = getDuel(match[1]);
+  if (!duel || duel.status !== 'setup') {
+    await interaction.reply({ content: 'This duel setup expired or is no longer valid.', flags: 64 });
+    return true;
+  }
+  if (interaction.user.id !== duel.challengerId) {
+    await interaction.reply({ content: 'Only the challenger can choose the opponent.', flags: 64 });
+    return true;
+  }
+  duel.openChallenge = false;
   await persistDuel(duel);
-  await logDuel(interaction.guild, 'Bot Duel Created', `Bot duel \`${duelId}\` created by <@${interaction.user.id}> in <#${thread.id}>.`);
-  await thread.send(
-    `<@${interaction.user.id}> started a bot Squig Duel.\n` +
-    `Wager: ${formatCharm(wagerAmount)} $CHARM. Win and receive ${formatCharm(wagerAmount * BOT_DUEL_PAYOUT_MULTIPLIER)} $CHARM. Lose and the bot keeps the wager.\n` +
-    `Each Squig can only play the bot once per day.`
-  );
-  await interaction.editReply({ content: `Bot duel thread created: <#${thread.id}>. Continue setup there.` });
-  await sendSquigSelectionPrompt(interaction.guild, duel, 'challenger');
+  await interaction.update({
+    content:
+      `<@${interaction.user.id}> started a Squig Duel\n` +
+      `Which user?`,
+    components: opponentSelectRows(duel.id),
+  });
   return true;
 }
 
@@ -1487,22 +1395,34 @@ function buildSquigPageButtons(prefix, page, pageCount) {
   ];
 }
 
-function buildSquigSelectRows(duelId, side, squigs, page = 0) {
+function buildSquigSelectRows(duelId, side, squigs, page = 0, selectedTokenId = null) {
   const safePage = clampSquigPage(squigs, page);
   const pageItems = squigPageItems(squigs, safePage);
   const options = pageItems.map((s) => ({
     label: squigOptionLabel(s),
     description: squigOptionDescription(s),
     value: String(s.tokenId),
+    default: String(s.tokenId) === String(selectedTokenId || ''),
   }));
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`sd:select:${duelId}:${side}`)
-        .setPlaceholder('Choose your Squig')
+        .setPlaceholder('Select your Squig Fighter')
         .addOptions(options)
     ),
     ...buildSquigPageButtons(`sd:select_page:${duelId}:${side}`, safePage, squigPageCount(squigs)),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`sd:fighter_ready:${duelId}:${side}`)
+        .setLabel('Battle Ready')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(!selectedTokenId),
+      new ButtonBuilder()
+        .setCustomId(`sd:cancel_fight:${duelId}:${side}`)
+        .setLabel('Cancel Fight')
+        .setStyle(ButtonStyle.Danger)
+    ),
   ];
 }
 
@@ -1525,18 +1445,29 @@ function buildViewSquigRows(userId, squigs, page = 0) {
   ];
 }
 
-function buildSquigSelectionEmbed(squigs, page = 0) {
+function buildSquigSelectionEmbed(squigs, page = 0, selectedTokenId = null) {
   const safePage = clampSquigPage(squigs, page);
   const shown = squigPageItems(squigs, safePage);
+  const selected = selectedTokenId
+    ? squigs.find((s) => String(s.tokenId) === String(selectedTokenId))
+    : shown[0];
   const lines = shown.slice(0, 12).map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
-    .setTitle('Choose Your Squig')
+    .setTitle('Choose your Squig Fighter!')
     .setColor(0xB0DEEE)
     .setDescription(lines.join('\n') || 'Select one of your owned Squigs below.')
     .setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}` });
-  if (discordImageUrl(shown[0]?.imageUrl)) {
-    embed.setImage(discordImageUrl(shown[0].imageUrl));
-    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL} | Preview: ${squigDisplayName(shown[0])}` });
+  if (selected) {
+    embed.addFields({
+      name: squigDisplayName(selected),
+      value:
+        `ID **#${selected.tokenId}** | HP **${selected.maxHp}** | Attack **${selected.attackPower}**`,
+      inline: false,
+    });
+  }
+  if (discordImageUrl(selected?.imageUrl)) {
+    embed.setImage(discordImageUrl(selected.imageUrl));
+    embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}` });
   }
   return embed;
 }
@@ -2003,12 +1934,14 @@ async function promptSquigSelection(interaction, duel, side) {
     await interaction.editReply({ content: result.reason });
     return;
   }
+  const selectedTokenId = result.squigs[0]?.tokenId || null;
   pendingSquigSelections.set(`${duel.id}:${side}:${userId}`, {
     duelId: duel.id,
     side,
     userId,
     squigsById: new Map(result.squigs.map((s) => [String(s.tokenId), s])),
     squigs: result.squigs,
+    selectedTokenId,
     page: 0,
     createdAt: Date.now(),
   });
@@ -2017,10 +1950,9 @@ async function promptSquigSelection(interaction, duel, side) {
     : '';
   await interaction.editReply({
     content:
-      `Choose your Squig.${extra}\n` +
-      `Each option shows Squig ID, UglyPoints, HP, and attack power.`,
-    embeds: [buildSquigSelectionEmbed(result.squigs, 0)],
-    components: buildSquigSelectRows(duel.id, side, result.squigs, 0),
+      `Choose your Squig Fighter!${extra}`,
+    embeds: [buildSquigSelectionEmbed(result.squigs, 0, selectedTokenId)],
+    components: buildSquigSelectRows(duel.id, side, result.squigs, 0, selectedTokenId),
   });
 }
 
@@ -2047,12 +1979,15 @@ async function handleSquigSelectionPageButton(interaction) {
   }
   const page = clampSquigPage(pending.squigs, match[3]);
   pending.page = page;
+  if (!squigPageItems(pending.squigs, page).some((s) => String(s.tokenId) === String(pending.selectedTokenId || ''))) {
+    pending.selectedTokenId = squigPageItems(pending.squigs, page)[0]?.tokenId || pending.selectedTokenId;
+  }
   await interaction.update({
     content:
-      `Choose your Squig.\n` +
-      `${squigPageLabel(pending.squigs, page)}. Each option shows Squig ID, UglyPoints, HP, and attack power.`,
-    embeds: [buildSquigSelectionEmbed(pending.squigs, page)],
-    components: buildSquigSelectRows(duel.id, side, pending.squigs, page),
+      `Choose your Squig Fighter!\n` +
+      `${squigPageLabel(pending.squigs, page)}.`,
+    embeds: [buildSquigSelectionEmbed(pending.squigs, page, pending.selectedTokenId)],
+    components: buildSquigSelectRows(duel.id, side, pending.squigs, page, pending.selectedTokenId),
   });
   return true;
 }
@@ -2328,12 +2263,11 @@ async function postChallenge(guild, duel) {
   await thread.send({
     content:
       (openChallenge
-        ? `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> is looking for a Squig Duel opponent for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
+        ? `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> opened a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
           (botFallbackAllowed
-            ? `First eligible holder to accept within ${responseTimeText} gets the duel. If nobody accepts, this switches to a bot battle.`
-            : `First eligible holder to accept within ${responseTimeText} gets the duel. Bot fallback only supports wagers up to ${formatCharm(BOT_DUEL_MAX_WAGER)} $CHARM.`)
-        : `<@${duel.challengerId}> has challenged <@${duel.opponentId}> to a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
-          `<@${duel.opponentId}> has ${responseTimeText} to accept.`),
+            ? `Accept within ${responseTimeText}, or the bot takes it.`
+            : `Accept within ${responseTimeText}.`)
+        : `<@${duel.opponentId}> <@${duel.challengerId}> challenged you for ${formatCharm(duel.wagerAmount)} $CHARM. You have ${responseTimeText}.`),
     embeds: [buildChallengeEmbed(duel)],
     components: challengeRows(duel),
   });
@@ -2417,12 +2351,75 @@ async function handleSquigSelect(interaction) {
     return true;
   }
 
+  pending.selectedTokenId = tokenId;
+  pending.page = Math.floor(pending.squigs.findIndex((s) => String(s.tokenId) === tokenId) / MAX_SELECT_OPTIONS);
+  await interaction.update({
+    content: 'Choose your Squig Fighter!',
+    embeds: [buildSquigSelectionEmbed(pending.squigs, pending.page || 0, tokenId)],
+    components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0, tokenId),
+  });
+  return true;
+}
+
+async function handleCancelFightButton(interaction) {
+  const match = interaction.customId.match(/^sd:cancel_fight:([a-f0-9]{12}):(challenger|opponent)$/i);
+  if (!match) return false;
+  assertReady();
+  const duel = getDuel(match[1]);
+  const side = match[2];
+  if (!duel || !activeStatuses().has(duel.status)) {
+    await interaction.reply({ content: 'This duel is no longer active.', flags: 64 });
+    return true;
+  }
+  const expectedUserId = side === 'challenger' ? duel.challengerId : duel.opponentId;
+  if (interaction.user.id !== expectedUserId) {
+    await interaction.reply({ content: 'This fight panel is not for you.', flags: 64 });
+    return true;
+  }
+  pendingSquigSelections.delete(`${duel.id}:${side}:${interaction.user.id}`);
   await interaction.deferUpdate();
+  await cancelDuel(interaction.guild, duel, `Fight cancelled by <@${interaction.user.id}>.`);
+  await interaction.editReply({ content: 'Fight cancelled.', embeds: [], components: [] }).catch(() => null);
+  await closeDuelThread(interaction.guild, duel, 'Squig Duel fight cancelled');
+  return true;
+}
+
+async function handleFighterReadyButton(interaction) {
+  const match = interaction.customId.match(/^sd:fighter_ready:([a-f0-9]{12}):(challenger|opponent)$/i);
+  if (!match) return false;
+  assertReady();
+  const duel = getDuel(match[1]);
+  const side = match[2];
+  if (!duel || !activeStatuses().has(duel.status)) {
+    await interaction.reply({ content: 'This duel is no longer active.', flags: 64 });
+    return true;
+  }
+  const expectedUserId = side === 'challenger' ? duel.challengerId : duel.opponentId;
+  if (interaction.user.id !== expectedUserId) {
+    await interaction.reply({ content: 'This Squig selection is not for you.', flags: 64 });
+    return true;
+  }
+
+  const pendingKey = `${duel.id}:${side}:${interaction.user.id}`;
+  const pending = pendingSquigSelections.get(pendingKey);
+  const chosen = pending?.squigsById?.get(String(pending?.selectedTokenId || ''));
+  if (!chosen) {
+    await interaction.reply({ content: 'Select a Squig first.', flags: 64 });
+    return true;
+  }
+
+  await interaction.deferUpdate();
+  await lockInSquigFighter(interaction, duel, side, pending, chosen, pendingKey);
+  return true;
+}
+
+async function lockInSquigFighter(interaction, duel, side, pending, chosen, pendingKey) {
+  const tokenId = String(chosen.tokenId || '').trim();
 
   const ownership = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
   if (!ownership.ok || !ownership.squigs.some((s) => String(s.tokenId) === tokenId)) {
     await interaction.followUp({ content: 'That Squig is no longer found in your connected wallet.', flags: 64 }).catch(() => null);
-    return true;
+    return;
   }
 
   if (side === 'challenger' && isBotDuel(duel)) {
@@ -2430,10 +2427,10 @@ async function handleSquigSelect(interaction) {
     if (!reserve.ok) {
       await interaction.editReply({
         content: `${reserve.reason || 'This Squig cannot play the bot today'} Choose another Squig to continue.`,
-        embeds: [buildSquigSelectionEmbed(pending.squigs, pending.page || 0)],
-        components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0),
+        embeds: [buildSquigSelectionEmbed(pending.squigs, pending.page || 0, pending.selectedTokenId)],
+        components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0, pending.selectedTokenId),
       }).catch(() => null);
-      return true;
+      return;
     }
     duel.botDailyUseReserved = true;
   }
@@ -2456,7 +2453,7 @@ async function handleSquigSelect(interaction) {
     await persistDuel(duel);
     await interaction.editReply({
       content:
-        `Selected ${squigDisplayName(chosen)} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
+        `${squigDisplayName(chosen)} is battle ready.\n` +
         `Collecting your ${formatCharm(duel.wagerAmount)} $CHARM wager...`,
       embeds: [],
       components: [],
@@ -2470,7 +2467,7 @@ async function handleSquigSelect(interaction) {
       }
       await cancelDuel(interaction.guild, duel, paid.reason || 'Challenger wager could not be collected.');
       await interaction.followUp({ content: paid.reason || 'Wager could not be collected.', flags: 64 }).catch(() => null);
-      return true;
+      return;
     }
     duel.challengerPaid = true;
     await persistDuel(duel);
@@ -2479,14 +2476,14 @@ async function handleSquigSelect(interaction) {
       duel.setupTimeout = null;
       await startDuel(interaction.guild, duel);
       await interaction.followUp({
-        content: `Bot duel started. Win to receive ${formatCharm(botDuelPayoutAmount(duel))} $CHARM. Lose and the bot keeps your ${formatCharm(botWagerAmount(duel))} $CHARM wager.`,
+        content: `Bot battle started. Win pays ${formatCharm(botDuelPayoutAmount(duel))} $CHARM.`,
         flags: 64,
       }).catch(() => null);
-      return true;
+      return;
     }
     await postChallenge(interaction.guild, duel);
-    await interaction.followUp({ content: 'Wager collected. Challenge posted in the duel thread.', flags: 64 }).catch(() => null);
-    return true;
+    await interaction.followUp({ content: 'Challenge posted.', flags: 64 }).catch(() => null);
+    return;
   }
 
   duel.opponentSquigTokenId = chosen.tokenId;
@@ -2497,7 +2494,7 @@ async function handleSquigSelect(interaction) {
   await persistDuel(duel);
   await interaction.editReply({
     content:
-      `Selected ${squigDisplayName(chosen)} (${chosen.uglyPoints} UglyPoints, ${chosen.maxHp} HP).\n` +
+      `${squigDisplayName(chosen)} is battle ready.\n` +
       `Collecting your ${formatCharm(duel.wagerAmount)} $CHARM wager...`,
     embeds: [],
     components: [],
@@ -2506,13 +2503,12 @@ async function handleSquigSelect(interaction) {
   if (!paid.ok) {
     await cancelDuel(interaction.guild, duel, paid.reason || 'Opponent wager could not be collected.');
     await interaction.followUp({ content: paid.reason || 'Wager could not be collected.', flags: 64 }).catch(() => null);
-    return true;
+    return;
   }
   duel.opponentPaid = true;
   await persistDuel(duel);
   await postReadyCheck(interaction.guild, duel);
-  await interaction.followUp({ content: 'Wager collected. Ready check posted in the duel thread.', flags: 64 }).catch(() => null);
-  return true;
+  await interaction.followUp({ content: 'Ready check posted.', flags: 64 }).catch(() => null);
 }
 
 function readyRows(duel, disabled = false) {
@@ -2718,7 +2714,7 @@ async function postReadyCheck(guild, duel) {
   await thread.send({
     content:
       `<@${duel.challengerId}> <@${duel.opponentId}>\n` +
-      `Both Squigs are locked in. If you are ready to duel, hit the Ready button.`,
+      `Both Squigs are locked in.`,
     embeds: readyMessage.embeds,
     ...(readyMessage.files.length ? { files: readyMessage.files } : {}),
     components: readyRows(duel),
@@ -2762,8 +2758,8 @@ async function handleReadyButton(interaction) {
     content:
       `<@${duel.challengerId}> <@${duel.opponentId}>\n` +
       (bothReady
-        ? `Both players are ready. Duel starting.`
-        : `Both Squigs are locked in. If you are ready to duel, hit the Ready button.`),
+        ? `Starting now.`
+        : `Both Squigs are locked in.`),
     embeds: readyMessage.embeds,
     ...(readyMessage.files.length ? { files: readyMessage.files } : {}),
     components: readyRows(duel, bothReady),
@@ -2832,8 +2828,8 @@ async function handleAcceptDecline(interaction) {
 
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   duel.acceptTimeout = null;
-  await interaction.update({ content: 'Duel accepted. Opponent is choosing a Squig.', components: [] });
-  await interaction.followUp({ content: 'Choose your Squig in this thread.', flags: 64 }).catch(() => null);
+  await interaction.update({ content: 'Duel accepted. Choose your Squig Fighter!', components: [] });
+  await interaction.followUp({ content: 'Choose your Squig Fighter in the thread.', flags: 64 }).catch(() => null);
   await sendSquigSelectionPrompt(interaction.guild, duel, 'opponent');
   return true;
 }
@@ -3234,12 +3230,12 @@ async function startDuel(guild, duel) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (!thread?.isTextBased()) return;
   const startDescription = isBotDuel(duel)
-    ? `Bot duel.\nWager: **${formatCharm(botWagerAmount(duel))} $CHARM**\nPlayer win pays **${formatCharm(botDuelPayoutAmount(duel))} $CHARM**. Bot win keeps the wager.`
-    : `Pot: **${formatCharm(duel.wagerAmount * 2)} $CHARM**\nActions are selected privately and revealed after both players choose.`;
+    ? `Wager **${formatCharm(botWagerAmount(duel))} $CHARM** | Win pays **${formatCharm(botDuelPayoutAmount(duel))} $CHARM**`
+    : `Pot **${formatCharm(duel.wagerAmount * 2)} $CHARM**`;
   await thread.send({
     embeds: [buildStatusEmbed(
       duel,
-      'Squig Duel Started',
+      'Duel Started',
       startDescription,
       { imageUrl: SQUIG_DUEL_MENU_IMAGE }
     )],
@@ -3258,12 +3254,9 @@ async function beginRound(guild, duel) {
   const suddenDamage = suddenDeathDamage(duel);
   const sudden = suddenDamage > 0;
   const roundPrompt =
-    `Choose within **${Math.round(ROUND_TIMEOUT_MS / 1000)}s**.\n` +
-    (isBotDuel(duel)
-      ? `The bot answers after you lock in.`
-      : `Actions reveal after both players choose.`) +
+    `Choose within **${Math.round(ROUND_TIMEOUT_MS / 1000)}s**.` +
     (sudden
-      ? `\nSudden Death: **${suddenDamage} HP burn** this round, then +${SUDDEN_DEATH_DAMAGE_STEP} HP each round.`
+      ? ` Sudden Death: **${suddenDamage} HP burn**.`
       : '');
   let roundImage = { imageUrl: roundImageUrl(duel), files: [] };
   try {
@@ -3319,7 +3312,7 @@ async function handleActionButton(interaction) {
   if (isBotDuel(duel) && side === 'challenger') {
     duel.currentActions.opponent = randomBotAction();
   }
-  await interaction.reply({ content: 'Action received. It will be revealed after both players choose.', flags: 64 });
+  await interaction.reply({ content: 'Locked in.', flags: 64 });
   if (duel.currentActions.challenger && duel.currentActions.opponent) {
     if (duel.roundTimeout) clearTimeout(duel.roundTimeout);
     await delay(ROUND_RESOLVE_DELAY_MS);
@@ -3567,14 +3560,14 @@ async function resolveRound(guild, duel, timedOut) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (thread?.isTextBased()) {
     const actionText =
-      `${playerLabel(duel, 'challenger')}: **${actionLabel(result.actions.challenger)}**\n` +
-      `${playerLabel(duel, 'opponent')}: **${actionLabel(result.actions.opponent)}**`;
+      `${playerLabel(duel, 'challenger')} **${actionLabel(result.actions.challenger)}** | ` +
+      `${playerLabel(duel, 'opponent')} **${actionLabel(result.actions.opponent)}**`;
     const resultLines = result.lines.length ? result.lines.join('\n') : 'No effects resolved.';
     await thread.send(
-      `Selected Actions:\n${actionText}\n\n` +
-      `Results:\n${resultLines}\n` +
-      `Stats: Challenger ${squigNameForSide(duel, 'challenger')} HP: ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp}, ` +
-      `Opponent ${squigNameForSide(duel, 'opponent')} HP: ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
+      `Round ${duel.currentRound}: ${actionText}\n` +
+      `${resultLines}\n` +
+      `HP: ${squigNameForSide(duel, 'challenger')} ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp} | ` +
+      `${squigNameForSide(duel, 'opponent')} ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
     );
   }
 
@@ -3583,9 +3576,6 @@ async function resolveRound(guild, duel, timedOut) {
     return;
   }
   duel.processingRound = false;
-  if (thread?.isTextBased()) {
-    await thread.send(`Next round starts in ${Math.round(NEXT_ROUND_DELAY_MS / 1000)} seconds.`);
-  }
   await delay(NEXT_ROUND_DELAY_MS);
   await beginRound(guild, duel);
 }
@@ -3711,13 +3701,15 @@ async function handleButton(interaction) {
   if (await handleMySquigRemoveNameButton(interaction)) return true;
   if (await handleMySquigFavoriteButton(interaction)) return true;
   if (await handleMySquigSaveButton(interaction)) return true;
-  if (await handleBotDuelButton(interaction)) return true;
   if (await handleStartButton(interaction)) return true;
+  if (await handleChooseOpponentButton(interaction)) return true;
   if (await handleOpenChallengeButton(interaction)) return true;
   if (await handleCancelChallengeButton(interaction)) return true;
   if (await handleAcceptDecline(interaction)) return true;
   if (await handleReadyButton(interaction)) return true;
   if (await handleSquigSelectionPageButton(interaction)) return true;
+  if (await handleFighterReadyButton(interaction)) return true;
+  if (await handleCancelFightButton(interaction)) return true;
   if (await handleActionButton(interaction)) return true;
   return false;
 }
@@ -3734,7 +3726,6 @@ async function handleSelectMenu(interaction) {
 async function handleModalSubmit(interaction) {
   const customId = String(interaction.customId || '');
   if (customId.startsWith('sd:my_squig_name_modal:')) return handleMySquigNameModal(interaction);
-  if (customId.startsWith('sd:bot_setup:')) return handleBotDuelSetupModal(interaction);
   if (customId.startsWith('sd:setup:')) return handleSetupModal(interaction);
   return false;
 }
