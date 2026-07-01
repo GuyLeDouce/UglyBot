@@ -542,12 +542,14 @@ async function postOpenChallengeAnnouncement(guild, duel) {
   if (!duel?.openChallenge || duel.openChallengeAnnouncementSent) return;
   const channel = await fetchOpenChallengeAnnounceChannel(guild);
   if (!channel) return;
-  const threadUrl = `https://discord.com/channels/${duel.guildId}/${duel.threadId}`;
+  const deadlineUnix = Math.floor((Date.now() + acceptTimeoutMs(duel)) / 1000);
+  const image = buildOpenChallengeAnnouncementImage(duel);
   await channel.send({
     content:
       `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> opened a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
-      `Join here: [Squig Duel thread](${threadUrl})`,
-    embeds: [buildChallengeEmbed(duel)],
+      `Accept within <t:${deadlineUnix}:R>, or the bot takes it.`,
+    ...(image.embeds.length ? { embeds: image.embeds } : {}),
+    ...(image.files.length ? { files: image.files } : {}),
     allowedMentions: {
       roles: [OPEN_CHALLENGE_ROLE_ID],
       users: [duel.challengerId],
@@ -559,6 +561,27 @@ async function postOpenChallengeAnnouncement(guild, duel) {
   }).catch((err) => {
     console.warn('[SquigDuels] open challenge announcement failed:', String(err?.message || err || ''));
   });
+}
+
+function buildOpenChallengeAnnouncementImage(duel) {
+  const tokenId = String(duel?.challengerSquigTokenId || '').trim();
+  const imageSource = squigImageUrl(tokenId);
+  const imageUrl = discordImageUrl(imageSource);
+  if (imageUrl) {
+    return {
+      embeds: [new EmbedBuilder().setColor(0xd4a43b).setImage(imageUrl)],
+      files: [],
+    };
+  }
+  if (imageSource && fs.existsSync(imageSource)) {
+    const safeTokenId = tokenId.replace(/[^\w-]/g, '') || 'challenger';
+    const name = `open-squig-duel-${safeTokenId}.png`;
+    return {
+      embeds: [new EmbedBuilder().setColor(0xd4a43b).setImage(`attachment://${name}`)],
+      files: [new AttachmentBuilder(imageSource, { name })],
+    };
+  }
+  return { embeds: [], files: [] };
 }
 
 async function deleteOpenChallengeAnnouncement(guild, duel) {
@@ -3580,6 +3603,11 @@ function duelCompletionReason(duel, winnerId, result = null) {
   return 'Duel completed.';
 }
 
+function roundResultFooter(duel) {
+  return `HP: ${squigNameForSide(duel, 'challenger')} ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp} | ` +
+    `${squigNameForSide(duel, 'opponent')} ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`;
+}
+
 async function resolveRound(guild, duel, timedOut) {
   if (!duel || duel.status !== 'active' || duel.processingRound) return;
   if (!guild) {
@@ -3596,15 +3624,19 @@ async function resolveRound(guild, duel, timedOut) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (thread?.isTextBased()) {
     const actionText =
-      `${playerLabel(duel, 'challenger')} **${actionLabel(result.actions.challenger)}** | ` +
-      `${playerLabel(duel, 'opponent')} **${actionLabel(result.actions.opponent)}**`;
+      `${playerLabel(duel, 'challenger')} -> ${actionLabel(result.actions.challenger)}\n` +
+      `${playerLabel(duel, 'opponent')} -> ${actionLabel(result.actions.opponent)}`;
     const resultLines = result.lines.length ? result.lines.join('\n') : 'No effects resolved.';
-    await thread.send(
-      `Round ${duel.currentRound}: ${actionText}\n` +
-      `${resultLines}\n` +
-      `HP: ${squigNameForSide(duel, 'challenger')} ${Math.max(0, duel.challengerCurrentHp)}/${duel.challengerMaxHp} | ` +
-      `${squigNameForSide(duel, 'opponent')} ${Math.max(0, duel.opponentCurrentHp)}/${duel.opponentMaxHp}`
-    );
+    await thread.send({
+      embeds: [new EmbedBuilder()
+        .setColor(0x7ADDC0)
+        .setDescription(
+          `Round ${duel.currentRound}:\n` +
+          `${actionText}\n\n` +
+          resultLines
+        )
+        .setFooter({ text: roundResultFooter(duel) })],
+    });
   }
 
   if (winnerId) {
