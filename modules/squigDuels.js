@@ -1452,12 +1452,29 @@ function buildViewSquigRows(userId, squigs, page = 0) {
   ];
 }
 
-function buildSquigSelectionEmbed(squigs, page = 0, selectedTokenId = null) {
+function selectedSquigForPage(squigs, page = 0, selectedTokenId = null) {
   const safePage = clampSquigPage(squigs, page);
   const shown = squigPageItems(squigs, safePage);
-  const selected = selectedTokenId
+  return selectedTokenId
     ? squigs.find((s) => String(s.tokenId) === String(selectedTokenId))
     : shown[0];
+}
+
+function selectedSquigImageAttachment(selected) {
+  const source = String(selected?.imageUrl || '').trim();
+  if (!source || discordImageUrl(source) || !fs.existsSync(source)) return { imageUrl: discordImageUrl(source), files: [] };
+  const tokenId = String(selected?.tokenId || 'selected').replace(/[^\w-]/g, '');
+  const name = `squig-fighter-${tokenId}.png`;
+  return {
+    imageUrl: `attachment://${name}`,
+    files: [new AttachmentBuilder(source, { name })],
+  };
+}
+
+function buildSquigSelectionEmbed(squigs, page = 0, selectedTokenId = null, imageUrlOverride = null) {
+  const safePage = clampSquigPage(squigs, page);
+  const shown = squigPageItems(squigs, safePage);
+  const selected = selectedSquigForPage(squigs, safePage, selectedTokenId);
   const lines = shown.slice(0, 12).map((s) => squigListLine(s));
   const embed = new EmbedBuilder()
     .setTitle('Choose your Squig Fighter!')
@@ -1472,11 +1489,23 @@ function buildSquigSelectionEmbed(squigs, page = 0, selectedTokenId = null) {
       inline: false,
     });
   }
-  if (discordImageUrl(selected?.imageUrl)) {
-    embed.setImage(discordImageUrl(selected.imageUrl));
+  const imageUrl = imageUrlOverride || discordImageUrl(selected?.imageUrl);
+  if (imageUrl) {
+    embed.setImage(imageUrl);
     embed.setFooter({ text: `${squigPageLabel(squigs, safePage)} sorted by ${SQUIG_SORT_LABEL}` });
   }
   return embed;
+}
+
+function buildSquigSelectionMessage(squigs, page = 0, selectedTokenId = null, options = {}) {
+  const safePage = clampSquigPage(squigs, page);
+  const selected = selectedSquigForPage(squigs, safePage, selectedTokenId);
+  const image = selectedSquigImageAttachment(selected);
+  return {
+    embeds: [buildSquigSelectionEmbed(squigs, safePage, selectedTokenId, image.imageUrl)],
+    ...(options.replaceAttachments ? { attachments: [] } : {}),
+    ...(image.files.length ? { files: image.files } : {}),
+  };
 }
 
 function buildOwnedSquigsEmbed(user, squigs, selectedTokenId = null, page = 0) {
@@ -1958,7 +1987,7 @@ async function promptSquigSelection(interaction, duel, side) {
   await interaction.editReply({
     content:
       `Choose your Squig Fighter!${extra}`,
-    embeds: [buildSquigSelectionEmbed(result.squigs, 0, selectedTokenId)],
+    ...buildSquigSelectionMessage(result.squigs, 0, selectedTokenId),
     components: buildSquigSelectRows(duel.id, side, result.squigs, 0, selectedTokenId),
   });
 }
@@ -1993,7 +2022,7 @@ async function handleSquigSelectionPageButton(interaction) {
     content:
       `Choose your Squig Fighter!\n` +
       `${squigPageLabel(pending.squigs, page)}.`,
-    embeds: [buildSquigSelectionEmbed(pending.squigs, page, pending.selectedTokenId)],
+    ...buildSquigSelectionMessage(pending.squigs, page, pending.selectedTokenId, { replaceAttachments: true }),
     components: buildSquigSelectRows(duel.id, side, pending.squigs, page, pending.selectedTokenId),
   });
   return true;
@@ -2362,7 +2391,7 @@ async function handleSquigSelect(interaction) {
   pending.page = Math.floor(pending.squigs.findIndex((s) => String(s.tokenId) === tokenId) / MAX_SELECT_OPTIONS);
   await interaction.update({
     content: 'Choose your Squig Fighter!',
-    embeds: [buildSquigSelectionEmbed(pending.squigs, pending.page || 0, tokenId)],
+    ...buildSquigSelectionMessage(pending.squigs, pending.page || 0, tokenId, { replaceAttachments: true }),
     components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0, tokenId),
   });
   return true;
@@ -2434,7 +2463,7 @@ async function lockInSquigFighter(interaction, duel, side, pending, chosen, pend
     if (!reserve.ok) {
       await interaction.editReply({
         content: `${reserve.reason || 'This Squig cannot play the bot today'} Choose another Squig to continue.`,
-        embeds: [buildSquigSelectionEmbed(pending.squigs, pending.page || 0, pending.selectedTokenId)],
+        ...buildSquigSelectionMessage(pending.squigs, pending.page || 0, pending.selectedTokenId, { replaceAttachments: true }),
         components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0, pending.selectedTokenId),
       }).catch(() => null);
       return;
