@@ -29,7 +29,7 @@ const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
   path.join(__dirname, '..', 'images'),
   path.join(__dirname, '..', '..', 'images'),
 ];
-const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/KPAnMG3.png';
+const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/UPSglKC.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
 ).trim();
@@ -77,6 +77,7 @@ const ROUND_TIMEOUT_MS = Number(process.env.SQUIG_DUEL_ROUND_TIMEOUT_MS || 20 * 
 const ROUND_RESOLVE_DELAY_MS = Number(process.env.SQUIG_DUEL_ROUND_RESOLVE_DELAY_MS || 750);
 const NEXT_ROUND_DELAY_MS = Number(process.env.SQUIG_DUEL_NEXT_ROUND_DELAY_MS || 1500);
 const THREAD_DELETE_DELAY_MS = 2 * 60 * 1000;
+const THREAD_CREATED_MESSAGE_TYPE = 18;
 const MISSED_TURN_HP_PENALTY_PERCENT = Number(process.env.SQUIG_DUEL_MISSED_TURN_HP_PENALTY_PERCENT || 0.10);
 const SUDDEN_DEATH_AFTER_ROUND = 5;
 const SUDDEN_DEATH_BASE_DAMAGE = 20;
@@ -469,6 +470,69 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
 
+function isThreadCreatedMessageForThread(message, thread) {
+  const threadId = String(thread?.id || '').trim();
+  if (!threadId) return false;
+
+  const attachedThreadId = String(message?.thread?.id || message?.threadId || '').trim();
+  if (attachedThreadId === threadId) return true;
+
+  const isThreadCreatedType =
+    message?.type === THREAD_CREATED_MESSAGE_TYPE ||
+    String(message?.type) === String(THREAD_CREATED_MESSAGE_TYPE) ||
+    String(message?.type) === 'ThreadCreated';
+  if (!isThreadCreatedType) return false;
+
+  const threadName = String(thread?.name || '').trim();
+  const content = String(message?.content || '');
+  return String(message?.id || '') === threadId || Boolean(threadName && content.includes(threadName));
+}
+
+async function findThreadCreatedMessage(parentChannel, thread) {
+  if (!parentChannel?.messages?.fetch || !thread?.id) return null;
+  const fetchMatch = async () => {
+    const messages = await parentChannel.messages.fetch({ limit: 20 }).catch(() => null);
+    return messages?.find?.((message) => isThreadCreatedMessageForThread(message, thread)) || null;
+  };
+
+  return await fetchMatch() || (await delay(750), await fetchMatch());
+}
+
+async function captureDuelThreadCreatedMessage(parentChannel, thread, duel) {
+  if (!duel || duel.threadCreatedMessageId) return;
+  const message = await findThreadCreatedMessage(parentChannel, thread);
+  if (!message) return;
+  duel.threadCreatedMessageChannelId = message.channelId || parentChannel?.id || duel.channelId || null;
+  duel.threadCreatedMessageId = message.id || null;
+}
+
+async function deleteDuelThreadCreatedMessage(guild, duel) {
+  if (!duel || duel.threadCreatedMessageDeleted) return;
+  const channelId = String(duel.threadCreatedMessageChannelId || duel.channelId || '').trim();
+  if (!channelId) return;
+
+  const channel = guild?.channels?.fetch
+    ? await guild.channels.fetch(channelId).catch(() => null)
+    : null;
+  if (!channel?.messages?.fetch) return;
+
+  const messageId = String(duel.threadCreatedMessageId || '').trim();
+  let message = messageId
+    ? await channel.messages.fetch(messageId).catch(() => null)
+    : null;
+
+  if (!message && duel.threadId) {
+    message = await findThreadCreatedMessage(channel, { id: duel.threadId, name: duel.threadName });
+  }
+
+  if (!message?.delete) return;
+  await message.delete().then(() => {
+    duel.threadCreatedMessageDeleted = true;
+  }).catch((err) => {
+    console.warn('[SquigDuels] thread created message delete failed:', String(err?.message || err || ''));
+  });
+}
+
 function actionLabel(action) {
   const labels = {
     attack: 'Attack',
@@ -650,10 +714,12 @@ function scheduleDuelThreadDeletion(guild, duel) {
   const threadId = duel.threadId;
   duel.threadDeleteTimeout = setTimeout(async () => {
     const thread = await guild.channels.fetch(threadId).catch(() => null);
-    if (!thread?.delete) return;
-    await thread.delete('Squig Duel ended; deleting thread after cleanup delay').catch((err) => {
-      console.warn('[SquigDuels] failed to delete ended duel thread:', String(err?.message || err || ''));
-    });
+    if (thread?.delete) {
+      await thread.delete('Squig Duel ended; deleting thread after cleanup delay').catch((err) => {
+        console.warn('[SquigDuels] failed to delete ended duel thread:', String(err?.message || err || ''));
+      });
+    }
+    await deleteDuelThreadCreatedMessage(guild, duel);
   }, THREAD_DELETE_DELAY_MS);
   if (typeof duel.threadDeleteTimeout.unref === 'function') {
     duel.threadDeleteTimeout.unref();
@@ -1073,6 +1139,10 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     guildId: interaction.guild.id,
     channelId: interaction.channel.id,
     threadId: thread.id,
+    threadName: thread.name,
+    threadCreatedMessageChannelId: null,
+    threadCreatedMessageId: null,
+    threadCreatedMessageDeleted: false,
     challengerId: interaction.user.id,
     opponentId,
     wagerAmount,
@@ -1150,6 +1220,7 @@ async function handleStartButton(interaction) {
   await ensureHolderThreadViewAccess(interaction.guild, thread);
 
   const duel = createBaseDuel({ interaction, duelId, thread });
+  await captureDuelThreadCreatedMessage(interaction.channel, thread, duel);
   duels.set(duelId, duel);
   registerActiveUser(interaction.user.id, duelId);
   armSetupTimeout(interaction.guild, duel);
