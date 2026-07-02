@@ -544,10 +544,12 @@ async function postOpenChallengeAnnouncement(guild, duel) {
   if (!channel) return;
   const deadlineUnix = Math.floor((Date.now() + acceptTimeoutMs(duel)) / 1000);
   const image = buildOpenChallengeAnnouncementImage(duel);
+  const threadUrl = `https://discord.com/channels/${duel.guildId}/${duel.threadId}`;
   await channel.send({
     content:
       `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> opened a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
-      `Accept within <t:${deadlineUnix}:R>, or the bot takes it.`,
+      `Accept within <t:${deadlineUnix}:R>, or the bot takes it.\n` +
+      `[JOIN HERE](${threadUrl})`,
     ...(image.embeds.length ? { embeds: image.embeds } : {}),
     ...(image.files.length ? { files: image.files } : {}),
     allowedMentions: {
@@ -560,6 +562,31 @@ async function postOpenChallengeAnnouncement(guild, duel) {
     duel.openChallengeAnnouncementMessageId = message?.id || null;
   }).catch((err) => {
     console.warn('[SquigDuels] open challenge announcement failed:', String(err?.message || err || ''));
+  });
+}
+
+async function postOpenChallengeAcceptedAnnouncement(guild, duel, acceptedByName = 'A holder') {
+  if (!duel?.opponentId || duel.openChallengeAcceptedAnnouncementSent) return;
+  const channel = await fetchOpenChallengeAnnounceChannel(guild);
+  if (!channel) return;
+  const threadUrl = `https://discord.com/channels/${duel.guildId}/${duel.threadId}`;
+  const acceptedBy = String(acceptedByName || 'A holder')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/@/g, '')
+    .trim() || 'A holder';
+  await channel.send({
+    content:
+      `${acceptedBy} has accepted the Squig Duel challenge.\n` +
+      `[Watch the Uglyness here](${threadUrl})`,
+    allowedMentions: {
+      parse: [],
+    },
+  }).then((message) => {
+    duel.openChallengeAcceptedAnnouncementSent = true;
+    duel.openChallengeAcceptedAnnouncementChannelId = message?.channelId || channel.id;
+    duel.openChallengeAcceptedAnnouncementMessageId = message?.id || null;
+  }).catch((err) => {
+    console.warn('[SquigDuels] open challenge accepted announcement failed:', String(err?.message || err || ''));
   });
 }
 
@@ -584,10 +611,10 @@ function buildOpenChallengeAnnouncementImage(duel) {
   return { embeds: [], files: [] };
 }
 
-async function deleteOpenChallengeAnnouncement(guild, duel) {
-  const channelId = String(duel?.openChallengeAnnouncementChannelId || OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID || '').trim();
-  const messageId = String(duel?.openChallengeAnnouncementMessageId || '').trim();
-  if (!channelId || !messageId || duel.openChallengeAnnouncementDeleted) return;
+async function deleteOpenChallengeAnnouncementMessage(guild, duel, fields) {
+  const channelId = String(duel?.[fields.channelId] || OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID || '').trim();
+  const messageId = String(duel?.[fields.messageId] || '').trim();
+  if (!channelId || !messageId || duel?.[fields.deleted]) return;
 
   const channel = guild?.channels?.fetch
     ? await guild.channels.fetch(channelId).catch(() => null)
@@ -597,9 +624,24 @@ async function deleteOpenChallengeAnnouncement(guild, duel) {
   if (!message?.delete) return;
 
   await message.delete().then(() => {
-    duel.openChallengeAnnouncementDeleted = true;
+    duel[fields.deleted] = true;
   }).catch((err) => {
-    console.warn('[SquigDuels] open challenge announcement delete failed:', String(err?.message || err || ''));
+    console.warn(`[SquigDuels] ${fields.logLabel} delete failed:`, String(err?.message || err || ''));
+  });
+}
+
+async function deleteOpenChallengeAnnouncement(guild, duel) {
+  await deleteOpenChallengeAnnouncementMessage(guild, duel, {
+    channelId: 'openChallengeAnnouncementChannelId',
+    messageId: 'openChallengeAnnouncementMessageId',
+    deleted: 'openChallengeAnnouncementDeleted',
+    logLabel: 'open challenge announcement',
+  });
+  await deleteOpenChallengeAnnouncementMessage(guild, duel, {
+    channelId: 'openChallengeAcceptedAnnouncementChannelId',
+    messageId: 'openChallengeAcceptedAnnouncementMessageId',
+    deleted: 'openChallengeAcceptedAnnouncementDeleted',
+    logLabel: 'open challenge accepted announcement',
   });
 }
 
@@ -1057,6 +1099,10 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     openChallengeAnnouncementChannelId: null,
     openChallengeAnnouncementMessageId: null,
     openChallengeAnnouncementDeleted: false,
+    openChallengeAcceptedAnnouncementSent: false,
+    openChallengeAcceptedAnnouncementChannelId: null,
+    openChallengeAcceptedAnnouncementMessageId: null,
+    openChallengeAcceptedAnnouncementDeleted: false,
     acceptTimeoutMs: DEFAULT_ACCEPT_TIMEOUT_MS,
     createdAt: Date.now(),
     setupTimeout: null,
@@ -2883,6 +2929,8 @@ async function handleAcceptDecline(interaction) {
     await persistDuel(duel);
     const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
     await thread?.members?.add(interaction.user.id).catch(() => null);
+    const acceptedByName = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
+    await postOpenChallengeAcceptedAnnouncement(interaction.guild, duel, acceptedByName);
   }
 
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
