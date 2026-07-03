@@ -2247,6 +2247,16 @@ function getPrizeDraftKey(guildId, discordId) {
 
 const DEFAULT_PRIZE_THUMBNAIL_URL = 'https://i.imgur.com/C8TdWo8.png';
 
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function getDefaultPrizeRaffleEndDate() {
+  const date = new Date(Date.now() + (24 * 60 * 60 * 1000));
+  date.setSeconds(0, 0);
+  return date;
+}
+
 function createEmptyPrizeDraft(guildId, discordId) {
   return {
     guildId,
@@ -2261,6 +2271,7 @@ function createEmptyPrizeDraft(guildId, discordId) {
     totalStock: '',
     allowedRoleIds: [],
     raffleDurationMinutes: '',
+    raffleEndsAtIso: '',
     selectedChannelId: '',
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -2311,6 +2322,77 @@ function normalizeMarketplaceItemType(value) {
   return String(value || '').trim().toLowerCase() === 'raffle' ? 'raffle' : 'buy';
 }
 
+function getPrizeRaffleEndDate(draft) {
+  const iso = String(draft?.raffleEndsAtIso || '').trim();
+  if (iso) {
+    const date = new Date(iso);
+    if (Number.isFinite(date.getTime())) return date;
+  }
+  const durationMinutes = Number(draft?.raffleDurationMinutes);
+  if (Number.isFinite(durationMinutes) && durationMinutes > 0) {
+    return new Date(Date.now() + (durationMinutes * 60 * 1000));
+  }
+  return null;
+}
+
+function getPrizeRaffleEndsAtIso(draft) {
+  const date = getPrizeRaffleEndDate(draft);
+  return date ? date.toISOString() : null;
+}
+
+function getPrizeRaffleTimeParts(draft) {
+  const date = getPrizeRaffleEndDate(draft) || getDefaultPrizeRaffleEndDate();
+  const hour24 = date.getHours();
+  const ampm = hour24 >= 12 ? 'PM' : 'AM';
+  const hour12 = hour24 % 12 || 12;
+  return {
+    day: date.getDate(),
+    month: date.getMonth() + 1,
+    year: date.getFullYear(),
+    hour: hour12,
+    minute: date.getMinutes(),
+    ampm,
+  };
+}
+
+function getLastDayOfMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+function buildPrizeRaffleEndDateFromParts(parts) {
+  const year = Number(parts.year);
+  const month = Number(parts.month);
+  const day = Math.min(Number(parts.day), getLastDayOfMonth(year, month));
+  const hour12 = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const ampm = String(parts.ampm || 'AM').toUpperCase() === 'PM' ? 'PM' : 'AM';
+  const hour24 = (hour12 % 12) + (ampm === 'PM' ? 12 : 0);
+  const date = new Date(year, month - 1, day, hour24, minute, 0, 0);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function formatPrizeRaffleEndDate(draft) {
+  const date = getPrizeRaffleEndDate(draft);
+  if (!date) return '`not set`';
+  const parts = getPrizeRaffleTimeParts(draft);
+  return `**${pad2(parts.day)}/${pad2(parts.month)}/${parts.year} ${pad2(parts.hour)}:${pad2(parts.minute)} ${parts.ampm}**`;
+}
+
+function buildPrizeRaffleTimePatch(draft, part, value) {
+  const parts = getPrizeRaffleTimeParts(draft);
+  if (part === 'day') parts.day = Number(value);
+  if (part === 'month') parts.month = Number(value);
+  if (part === 'year') parts.year = Number(value);
+  if (part === 'hour') parts.hour = Number(value);
+  if (part === 'minute') parts.minute = Number(value);
+  if (part === 'ampm') parts.ampm = String(value || 'AM').toUpperCase() === 'PM' ? 'PM' : 'AM';
+  const endDate = buildPrizeRaffleEndDateFromParts(parts) || getDefaultPrizeRaffleEndDate();
+  return {
+    raffleEndsAtIso: endDate.toISOString(),
+    raffleDurationMinutes: '',
+  };
+}
+
 function formatMarketplaceTimeLeft(item) {
   if (normalizeMarketplaceItemType(item?.item_type || item?.itemType) !== 'raffle') return 'n/a';
   const endAt = item?.raffle_ends_at ? new Date(item.raffle_ends_at) : null;
@@ -2344,8 +2426,8 @@ function buildPrizeEditorEmbed(draft) {
       `${stockLabel}: ${draft?.totalStock ? `**${draft.totalStock}**` : (type === 'raffle' ? '`not set`' : 'Unlimited')}\n` +
       `Allowed roles: ${formatRoleMentions(draft?.allowedRoleIds)}\n` +
       `Publish channel: ${draft?.selectedChannelId ? `<#${draft.selectedChannelId}>` : '`not set`'}\n` +
-      `Raffle timer: ${type === 'raffle'
-        ? (draft?.raffleDurationMinutes ? `**${draft.raffleDurationMinutes} minute(s)**` : '`not set`')
+      `Raffle closes: ${type === 'raffle'
+        ? formatPrizeRaffleEndDate(draft)
         : 'Not used for buy items'}`
     );
 }
@@ -2382,6 +2464,134 @@ function buildPrizeEditorRows(draft) {
         .setMaxValues(10)
     ),
   ];
+}
+
+function buildPrizeSelectMenu(customId, placeholder, options, selectedValue) {
+  const selected = String(selectedValue);
+  return new StringSelectMenuBuilder()
+    .setCustomId(customId)
+    .setPlaceholder(placeholder)
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(options.map((option) => ({
+      ...option,
+      default: String(option.value) === selected,
+    })));
+}
+
+function buildPrizeRaffleDateRows(draft) {
+  const parts = getPrizeRaffleTimeParts(draft);
+  const currentYear = new Date().getFullYear();
+  const yearValues = new Set([parts.year]);
+  for (let year = currentYear; year <= currentYear + 4; year += 1) yearValues.add(year);
+  const dayOptions = (start, end) => Array.from({ length: end - start + 1 }, (_, i) => {
+    const day = start + i;
+    return { label: pad2(day), value: String(day) };
+  });
+  return [
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu('prize_raffle_day_early', `DD: ${pad2(parts.day)}`, dayOptions(1, 16), parts.day)
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu('prize_raffle_day_late', `DD: ${pad2(parts.day)}`, dayOptions(17, 31), parts.day)
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu(
+        'prize_raffle_month',
+        `MM: ${pad2(parts.month)}`,
+        Array.from({ length: 12 }, (_, i) => {
+          const month = i + 1;
+          return { label: pad2(month), value: String(month) };
+        }),
+        parts.month
+      )
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu(
+        'prize_raffle_year',
+        `YYYY: ${parts.year}`,
+        [...yearValues].sort((a, b) => a - b).map((year) => ({ label: String(year), value: String(year) })),
+        parts.year
+      )
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_raffle_picker_cancel').setLabel('Back').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_raffle_picker_time').setLabel('Next: Time').setStyle(ButtonStyle.Primary),
+    ),
+  ];
+}
+
+function buildPrizeRaffleTimeRows(draft) {
+  const parts = getPrizeRaffleTimeParts(draft);
+  return [
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu(
+        'prize_raffle_hour',
+        `HH: ${pad2(parts.hour)}`,
+        Array.from({ length: 12 }, (_, i) => {
+          const hour = i + 1;
+          return { label: pad2(hour), value: String(hour) };
+        }),
+        parts.hour
+      )
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu(
+        'prize_raffle_ampm',
+        `AM/PM: ${parts.ampm}`,
+        ['AM', 'PM'].map((value) => ({ label: value, value })),
+        parts.ampm
+      )
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_raffle_picker_date').setLabel('Back: Date').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_raffle_picker_minute').setLabel('Next: Minute').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('prize_raffle_picker_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+function buildPrizeRaffleMinuteRows(draft) {
+  const parts = getPrizeRaffleTimeParts(draft);
+  const minuteOptions = (start, end) => Array.from({ length: end - start + 1 }, (_, i) => {
+    const minute = start + i;
+    return { label: pad2(minute), value: String(minute) };
+  });
+  return [
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu('prize_raffle_minute_early', `MM: ${pad2(parts.minute)}`, minuteOptions(0, 24), parts.minute)
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu('prize_raffle_minute_mid', `MM: ${pad2(parts.minute)}`, minuteOptions(25, 49), parts.minute)
+    ),
+    new ActionRowBuilder().addComponents(
+      buildPrizeSelectMenu('prize_raffle_minute_late', `MM: ${pad2(parts.minute)}`, minuteOptions(50, 59), parts.minute)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prize_raffle_picker_time').setLabel('Back: Time').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prize_raffle_picker_save').setLabel('Save').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prize_raffle_picker_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+function buildPrizeRafflePickerPayload(draft, screen = 'date', note = '') {
+  const selectedText = formatPrizeRaffleEndDate(draft);
+  const content = [
+    'Select the raffle close time.',
+    `Selected: ${selectedText}`,
+    note ? `\n${note}` : '',
+  ].filter(Boolean).join('\n');
+  const components = screen === 'minute'
+    ? buildPrizeRaffleMinuteRows(draft)
+    : screen === 'time'
+      ? buildPrizeRaffleTimeRows(draft)
+      : buildPrizeRaffleDateRows(draft);
+  return { content, embeds: [], components };
+}
+
+async function updatePrizeRafflePicker(interaction, draft, screen = 'date', note = '') {
+  await interaction.update(buildPrizeRafflePickerPayload(draft, screen, note));
 }
 
 async function updatePrizeEditorPanel(interaction, draft) {
@@ -2443,8 +2653,8 @@ function validatePrizeDraft(draft) {
   if (draft?.thumbnailUrl && !normalizeImageUrl(draft.thumbnailUrl)) problems.push('Thumbnail URL');
   if (draft?.imageUrl && !normalizeImageUrl(draft.imageUrl)) problems.push('Image URL');
   if (itemType === 'raffle') {
-    const duration = Number(draft?.raffleDurationMinutes);
-    if (!Number.isInteger(duration) || duration < 1) problems.push('Raffle time');
+    const endsAt = getPrizeRaffleEndDate(draft);
+    if (!endsAt || endsAt.getTime() <= Date.now()) problems.push('Raffle close time');
     if (!perUserLimit) problems.push('Tickets available');
     if (!totalStock) problems.push('Winner count');
   }
@@ -2664,9 +2874,7 @@ function buildMarketplaceItemButtons(item, stats = {}, extras = {}) {
 
 async function createMarketplaceItemFromDraft(guildId, actorDiscordId, draft) {
   const itemType = normalizeMarketplaceItemType(draft?.itemType);
-  const raffleEndsAt = itemType === 'raffle'
-    ? new Date(Date.now() + (Number(draft?.raffleDurationMinutes || 0) * 60 * 1000))
-    : null;
+  const raffleEndsAt = itemType === 'raffle' ? getPrizeRaffleEndDate(draft) : null;
   const { rows } = await prizesPool.query(
     `INSERT INTO marketplace_items (
        guild_id, item_type, name, description, thumbnail_url, image_url, price, per_user_limit, total_stock,
@@ -7870,6 +8078,64 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.customId === 'prize_set_raffle_time') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const existing = getPrizeDraft(interaction.guild.id, interaction.user.id) || upsertPrizeDraft(interaction.guild.id, interaction.user.id, {});
+        if (normalizeMarketplaceItemType(existing.itemType) !== 'raffle') {
+          await interaction.reply({ content: 'Switch the prize type to raffle first.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeRaffleEndDate(existing)
+          ? existing
+          : upsertPrizeDraft(interaction.guild.id, interaction.user.id, { raffleEndsAtIso: getDefaultPrizeRaffleEndDate().toISOString() });
+        await updatePrizeRafflePicker(interaction, draft, 'date');
+        return;
+      }
+
+      if ([
+        'prize_raffle_picker_date',
+        'prize_raffle_picker_time',
+        'prize_raffle_picker_minute',
+        'prize_raffle_picker_save',
+        'prize_raffle_picker_cancel',
+      ].includes(interaction.customId)) {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        const draft = getPrizeDraft(interaction.guild.id, interaction.user.id);
+        if (!draft) {
+          await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
+          return;
+        }
+        if (interaction.customId === 'prize_raffle_picker_cancel') {
+          await updatePrizeEditorPanel(interaction, draft);
+          return;
+        }
+        if (interaction.customId === 'prize_raffle_picker_date') {
+          await updatePrizeRafflePicker(interaction, draft, 'date');
+          return;
+        }
+        if (interaction.customId === 'prize_raffle_picker_time') {
+          await updatePrizeRafflePicker(interaction, draft, 'time');
+          return;
+        }
+        if (interaction.customId === 'prize_raffle_picker_minute') {
+          await updatePrizeRafflePicker(interaction, draft, 'minute');
+          return;
+        }
+        const endsAt = getPrizeRaffleEndDate(draft);
+        if (!endsAt || endsAt.getTime() <= Date.now()) {
+          await updatePrizeRafflePicker(interaction, draft, 'minute', 'Selected time must be in the future.');
+          return;
+        }
+        await updatePrizeEditorPanel(interaction, draft);
+        return;
+      }
+
       if ([
         'prize_set_name',
         'prize_set_description',
@@ -7878,7 +8144,6 @@ client.on('interactionCreate', async (interaction) => {
         'prize_set_image',
         'prize_set_limit',
         'prize_set_stock',
-        'prize_set_raffle_time',
       ].includes(interaction.customId)) {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -7908,7 +8173,6 @@ client.on('interactionCreate', async (interaction) => {
             normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle',
             normalizeMarketplaceItemType(getPrizeDraft(interaction.guild.id, interaction.user.id)?.itemType) === 'raffle' ? '3' : '25'
           ],
-          prize_set_raffle_time: ['prize_set_raffle_time_modal', 'Raffle Time', 'prize_value', 'Minutes until raffle draw', TextInputStyle.Short, true, '1440'],
         };
         const [modalId, title, inputId, label, style, required, placeholder] = modalConfig[interaction.customId];
         const modal = new ModalBuilder().setCustomId(modalId).setTitle(title);
@@ -7969,7 +8233,7 @@ client.on('interactionCreate', async (interaction) => {
           total_stock: draft.totalStock || null,
           allowed_role_ids: (draft.allowedRoleIds || []).join(','),
           raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
-            ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+            ? getPrizeRaffleEndsAtIso(draft)
             : null,
           status: 'published',
         };
@@ -7999,7 +8263,7 @@ client.on('interactionCreate', async (interaction) => {
           total_stock: draft.totalStock || null,
           allowed_role_ids: (draft.allowedRoleIds || []).join(','),
           raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
-            ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+            ? getPrizeRaffleEndsAtIso(draft)
             : null,
           status: 'published',
         };
@@ -8865,6 +9129,55 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && [
+      'prize_raffle_day_early',
+      'prize_raffle_day_late',
+      'prize_raffle_month',
+      'prize_raffle_year',
+      'prize_raffle_hour',
+      'prize_raffle_minute_early',
+      'prize_raffle_minute_mid',
+      'prize_raffle_minute_late',
+      'prize_raffle_ampm',
+    ].includes(interaction.customId)) {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: 'Admin only.', flags: 64 });
+        return;
+      }
+      const existing = getPrizeDraft(interaction.guild.id, interaction.user.id);
+      if (!existing) {
+        await interaction.reply({ content: 'No pending prize draft found. Run `/prize` again.', flags: 64 });
+        return;
+      }
+      const partByCustomId = {
+        prize_raffle_day_early: 'day',
+        prize_raffle_day_late: 'day',
+        prize_raffle_month: 'month',
+        prize_raffle_year: 'year',
+        prize_raffle_hour: 'hour',
+        prize_raffle_minute_early: 'minute',
+        prize_raffle_minute_mid: 'minute',
+        prize_raffle_minute_late: 'minute',
+        prize_raffle_ampm: 'ampm',
+      };
+      const screenByPart = {
+        day: 'date',
+        month: 'date',
+        year: 'date',
+        hour: 'time',
+        ampm: 'time',
+        minute: 'minute',
+      };
+      const part = partByCustomId[interaction.customId];
+      const draft = upsertPrizeDraft(
+        interaction.guild.id,
+        interaction.user.id,
+        buildPrizeRaffleTimePatch(existing, part, interaction.values?.[0])
+      );
+      await updatePrizeRafflePicker(interaction, draft, screenByPart[part]);
+      return;
+    }
+
     if (interaction.isRoleSelectMenu() && interaction.customId === 'prize_roles_select') {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -8900,7 +9213,7 @@ client.on('interactionCreate', async (interaction) => {
         total_stock: draft.totalStock || null,
         allowed_role_ids: (draft.allowedRoleIds || []).join(','),
         raffle_ends_at: normalizeMarketplaceItemType(draft.itemType) === 'raffle'
-          ? new Date(Date.now() + (Number(draft.raffleDurationMinutes || 0) * 60 * 1000)).toISOString()
+          ? getPrizeRaffleEndsAtIso(draft)
           : null,
         status: 'published',
       };
@@ -9240,7 +9553,6 @@ client.on('interactionCreate', async (interaction) => {
         'prize_set_image_modal',
         'prize_set_limit_modal',
         'prize_set_stock_modal',
-        'prize_set_raffle_time_modal',
       ].includes(interaction.customId)) {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
@@ -9255,7 +9567,6 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.customId === 'prize_set_image_modal') patch.imageUrl = value;
         if (interaction.customId === 'prize_set_limit_modal') patch.perUserLimit = value;
         if (interaction.customId === 'prize_set_stock_modal') patch.totalStock = value;
-        if (interaction.customId === 'prize_set_raffle_time_modal') patch.raffleDurationMinutes = value;
         const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, patch);
         await updatePrizeEditorPanel(interaction, draft);
         return;
