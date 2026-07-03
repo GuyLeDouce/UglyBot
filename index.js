@@ -2245,6 +2245,8 @@ function getPrizeDraftKey(guildId, discordId) {
   return `${guildId}:${discordId}`;
 }
 
+const DEFAULT_PRIZE_THUMBNAIL_URL = 'https://i.imgur.com/C8TdWo8.png';
+
 function createEmptyPrizeDraft(guildId, discordId) {
   return {
     guildId,
@@ -2252,7 +2254,7 @@ function createEmptyPrizeDraft(guildId, discordId) {
     itemType: 'buy',
     name: '',
     description: '',
-    thumbnailUrl: '',
+    thumbnailUrl: DEFAULT_PRIZE_THUMBNAIL_URL,
     imageUrl: '',
     price: '',
     perUserLimit: '',
@@ -2269,6 +2271,7 @@ function upsertPrizeDraft(guildId, discordId, patch = {}) {
   const key = getPrizeDraftKey(guildId, discordId);
   const existing = globalThis.__PENDING_PRIZE_DRAFTS.get(key) || createEmptyPrizeDraft(guildId, discordId);
   const next = { ...existing, ...patch, updatedAt: Date.now() };
+  if (!String(next.thumbnailUrl || '').trim()) next.thumbnailUrl = DEFAULT_PRIZE_THUMBNAIL_URL;
   globalThis.__PENDING_PRIZE_DRAFTS.set(key, next);
   return next;
 }
@@ -2379,6 +2382,28 @@ function buildPrizeEditorRows(draft) {
         .setMaxValues(10)
     ),
   ];
+}
+
+async function updatePrizeEditorPanel(interaction, draft) {
+  const payload = {
+    content: '',
+    embeds: [buildPrizeEditorEmbed(draft)],
+    components: buildPrizeEditorRows(draft),
+  };
+
+  if (typeof interaction.update === 'function') {
+    try {
+      await interaction.update(payload);
+      return;
+    } catch (err) {
+      console.warn('Prize editor message update failed; falling back to ephemeral reply:', err?.message || err);
+    }
+  }
+
+  await interaction.reply({
+    ...payload,
+    flags: 64
+  });
 }
 
 function buildPrizePreviewRows(draft = null) {
@@ -2654,7 +2679,7 @@ async function createMarketplaceItemFromDraft(guildId, actorDiscordId, draft) {
       itemType,
       String(draft?.name || '').trim(),
       String(draft?.description || '').trim(),
-      normalizeImageUrl(draft?.thumbnailUrl) || null,
+      normalizeImageUrl(draft?.thumbnailUrl || DEFAULT_PRIZE_THUMBNAIL_URL) || null,
       normalizeImageUrl(draft?.imageUrl) || null,
       Math.floor(Number(draft?.price || 0)),
       Number(draft?.perUserLimit) > 0 ? Math.floor(Number(draft.perUserLimit)) : null,
@@ -7937,7 +7962,7 @@ client.on('interactionCreate', async (interaction) => {
           item_type: draft.itemType,
           name: draft.name,
           description: draft.description,
-          thumbnail_url: draft.thumbnailUrl || null,
+          thumbnail_url: draft.thumbnailUrl || DEFAULT_PRIZE_THUMBNAIL_URL,
           image_url: draft.imageUrl || null,
           price: draft.price,
           per_user_limit: draft.perUserLimit || null,
@@ -7967,7 +7992,7 @@ client.on('interactionCreate', async (interaction) => {
           item_type: draft.itemType,
           name: draft.name,
           description: draft.description,
-          thumbnail_url: draft.thumbnailUrl || null,
+          thumbnail_url: draft.thumbnailUrl || DEFAULT_PRIZE_THUMBNAIL_URL,
           image_url: draft.imageUrl || null,
           price: draft.price,
           per_user_limit: draft.perUserLimit || null,
@@ -8868,7 +8893,7 @@ client.on('interactionCreate', async (interaction) => {
         item_type: draft.itemType,
         name: draft.name,
         description: draft.description,
-        thumbnail_url: draft.thumbnailUrl || null,
+        thumbnail_url: draft.thumbnailUrl || DEFAULT_PRIZE_THUMBNAIL_URL,
         image_url: draft.imageUrl || null,
         price: draft.price,
         per_user_limit: draft.perUserLimit || null,
@@ -9226,17 +9251,13 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.customId === 'prize_set_name_modal') patch.name = value;
         if (interaction.customId === 'prize_set_description_modal') patch.description = value;
         if (interaction.customId === 'prize_set_price_modal') patch.price = value;
-        if (interaction.customId === 'prize_set_thumbnail_modal') patch.thumbnailUrl = value;
+        if (interaction.customId === 'prize_set_thumbnail_modal') patch.thumbnailUrl = value || DEFAULT_PRIZE_THUMBNAIL_URL;
         if (interaction.customId === 'prize_set_image_modal') patch.imageUrl = value;
         if (interaction.customId === 'prize_set_limit_modal') patch.perUserLimit = value;
         if (interaction.customId === 'prize_set_stock_modal') patch.totalStock = value;
         if (interaction.customId === 'prize_set_raffle_time_modal') patch.raffleDurationMinutes = value;
         const draft = upsertPrizeDraft(interaction.guild.id, interaction.user.id, patch);
-        await interaction.reply({
-          embeds: [buildPrizeEditorEmbed(draft)],
-          components: buildPrizeEditorRows(draft),
-          flags: 64
-        });
+        await updatePrizeEditorPanel(interaction, draft);
         return;
       }
 
