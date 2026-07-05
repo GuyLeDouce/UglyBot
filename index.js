@@ -745,6 +745,7 @@ ensureTeamSchema().catch(e => console.error('Team schema error:', e.message));
 ensurePointsSchema().catch(e => console.error('Points schema error:', e.message));
 ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message));
 ensureMarketplaceSchema().catch(e => console.error('Marketplace schema error:', e.message));
+marketplaceCommand.ensureMarketplaceTables({ marketplacePool: prizesPool }).catch(e => console.error('Malformed marketplace schema error:', e.message));
 squigDuels.ensureSquigDuelSchema(teamPool).catch(e => console.error('Squig duel schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
@@ -7030,6 +7031,19 @@ squigDuels.initSquigDuels({
   isAdmin,
 });
 
+function getMarketplaceCommandDeps() {
+  return {
+    clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
+    marketplacePool: prizesPool,
+    getWalletLinks,
+    getMarketplaceSpendableBalance,
+    getDripMemberCurrencyBalance,
+    extractDripCurrencyAmountFromPayload,
+    awardDripPoints,
+    postAdminSystemLog,
+  };
+}
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -7954,7 +7968,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (interaction.commandName === 'marketplace') {
-        await marketplaceCommand.handleMarketplaceCommand(interaction);
+        await marketplaceCommand.handleMarketplaceCommand(interaction, getMarketplaceCommandDeps());
         return;
       }
       return;
@@ -7965,15 +7979,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (await marketplaceCommand.handleMarketplaceButton(interaction, {
-        clientUserId: client.user?.id || null,
-        getWalletLinks,
-        getMarketplaceSpendableBalance,
-        getDripMemberCurrencyBalance,
-        extractDripCurrencyAmountFromPayload,
-        awardDripPoints,
-        postAdminSystemLog,
-      })) {
+      if (await marketplaceCommand.handleMarketplaceButton(interaction, getMarketplaceCommandDeps())) {
         return;
       }
 
@@ -9521,15 +9527,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (await marketplaceCommand.handleMarketplaceSelectMenu(interaction, {
-        clientUserId: client.user?.id || null,
-        getWalletLinks,
-        getMarketplaceSpendableBalance,
-        getDripMemberCurrencyBalance,
-        extractDripCurrencyAmountFromPayload,
-        awardDripPoints,
-        postAdminSystemLog,
-      })) {
+      if (await marketplaceCommand.handleMarketplaceSelectMenu(interaction, getMarketplaceCommandDeps())) {
         return;
       }
     }
@@ -9542,6 +9540,10 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isModalSubmit()) {
       if (await squigDuels.handleModalSubmit(interaction)) {
+        return;
+      }
+
+      if (await marketplaceCommand.handleMarketplaceModalSubmit(interaction, getMarketplaceCommandDeps())) {
         return;
       }
 
