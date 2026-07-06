@@ -580,11 +580,24 @@ function buildMarketplaceItemRows() {
   ];
 }
 
-function buildMarketplaceSelectRows(stockSummaries = []) {
+function buildMarketplaceSelectCustomId(panelMessageId = null) {
+  const messageId = String(panelMessageId || '').trim();
+  return messageId ? `marketplace_select_item:${messageId}` : 'marketplace_select_item';
+}
+
+function parseMarketplaceSelectCustomId(customId) {
+  const match = String(customId || '').match(/^marketplace_select_item(?::(\d+))?$/);
+  if (!match) return null;
+  return {
+    panelMessageId: match[1] || null,
+  };
+}
+
+function buildMarketplaceSelectRows(stockSummaries = [], { panelMessageId = null } = {}) {
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId('marketplace_select_item')
+        .setCustomId(buildMarketplaceSelectCustomId(panelMessageId))
         .setPlaceholder('Choose a reward')
         .addOptions(
           MARKETPLACE_ITEMS.map((item) => {
@@ -748,12 +761,15 @@ function buildMarketplaceAdminReadyPayload(purchase) {
   };
 }
 
-function createConfirmation(interaction, item) {
+function createConfirmation(interaction, item, { panelChannelId = null, panelMessageId = null } = {}) {
+  const resolvedPanelMessageId = panelMessageId ? String(panelMessageId) : null;
   const token = crypto.randomBytes(6).toString('hex');
   pendingConfirmations.set(token, {
     token,
     guildId: interaction.guildId,
     channelId: interaction.channelId,
+    panelChannelId: resolvedPanelMessageId ? String(panelChannelId || interaction.channelId) : null,
+    panelMessageId: resolvedPanelMessageId,
     userId: interaction.user.id,
     itemKey: item.key,
     expiresAt: Date.now() + CONFIRMATION_TTL_MS,
@@ -1060,7 +1076,7 @@ function insufficientBalanceMessage(item, balance) {
   );
 }
 
-async function beginMarketplaceCheckout(interaction, deps, item) {
+async function beginMarketplaceCheckout(interaction, deps, item, sourcePanel = {}) {
   await interaction.deferReply({ flags: 64 });
 
   const lockKey = getPurchaseLockKey(interaction.guildId, interaction.user.id);
@@ -1107,10 +1123,29 @@ async function beginMarketplaceCheckout(interaction, deps, item) {
     return true;
   }
 
-  const token = createConfirmation(interaction, item);
+  const token = createConfirmation(interaction, item, sourcePanel);
   await interaction.editReply({
     embeds: [buildConfirmationEmbed(item, { walletAddress: wallet.walletAddress, stock })],
     components: buildConfirmationRows(token),
+  });
+  return true;
+}
+
+async function refreshMarketplacePanelMessage(interaction, deps, state) {
+  const panelMessageId = state?.panelMessageId ? String(state.panelMessageId) : null;
+  const panelChannelId = state?.panelChannelId ? String(state.panelChannelId) : null;
+  if (!panelMessageId || !panelChannelId) return false;
+
+  const channel = await interaction.client.channels.fetch(panelChannelId).catch(() => null);
+  if (!channel?.isTextBased?.()) return false;
+
+  const message = await channel.messages.fetch(panelMessageId).catch(() => null);
+  if (!message) return false;
+
+  const stockSummaries = await getMarketplaceStockSummaries(deps, state.guildId || interaction.guildId);
+  await message.edit({
+    embeds: [buildMarketplacePanelEmbed(stockSummaries)],
+    components: buildMarketplaceItemRows(),
   });
   return true;
 }
@@ -1140,7 +1175,9 @@ async function handleMarketplaceOpen(interaction, deps) {
   const stockSummaries = await getMarketplaceStockSummaries(deps, interaction.guildId);
   await interaction.editReply({
     content: 'Select the reward you want to purchase.',
-    components: buildMarketplaceSelectRows(stockSummaries),
+    components: buildMarketplaceSelectRows(stockSummaries, {
+      panelMessageId: interaction.message?.id,
+    }),
   });
   return true;
 }
@@ -1384,6 +1421,17 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
     }
     reservedPurchase = paidPurchase;
 
+    await refreshMarketplacePanelMessage(interaction, deps, state).catch((panelUpdateError) => {
+      postMarketplaceLog(deps, {
+        guild: interaction.guild,
+        category: 'Marketplace Panel Update Failure',
+        purchase: reservedPurchase,
+        item: selectedItem,
+        status: reservedPurchase?.status || 'paid_pending_delivery',
+        error: panelUpdateError,
+      }).catch(() => null);
+    });
+
     try {
       const deliveryMessage = await deliveryThread.send({
         embeds: [buildDeliveryEmbed(reservedPurchase, {
@@ -1514,7 +1562,10 @@ async function handleMarketplaceButton(interaction, deps) {
       return await handleMarketplaceOpen(interaction, deps);
     }
     if (item) {
-      return await beginMarketplaceCheckout(interaction, deps, item);
+      return await beginMarketplaceCheckout(interaction, deps, item, {
+        panelChannelId: interaction.channelId,
+        panelMessageId: interaction.message?.id,
+      });
     }
     if (confirmMatch) {
       return await handleMarketplaceConfirmation(
@@ -1546,7 +1597,8 @@ async function handleMarketplaceButton(interaction, deps) {
 }
 
 async function handleMarketplaceSelectMenu(interaction, deps) {
-  if (interaction.customId !== 'marketplace_select_item') return false;
+  const selectState = parseMarketplaceSelectCustomId(interaction.customId);
+  if (!selectState) return false;
 
   try {
     const selectedKey = String(interaction.values?.[0] || '').trim();
@@ -1558,7 +1610,10 @@ async function handleMarketplaceSelectMenu(interaction, deps) {
       });
       return true;
     }
-    return await beginMarketplaceCheckout(interaction, deps, item);
+    return await beginMarketplaceCheckout(interaction, deps, item, {
+      panelChannelId: interaction.channelId,
+      panelMessageId: selectState.panelMessageId,
+    });
   } catch (error) {
     await postMarketplaceLog(deps, {
       guild: interaction.guild,
@@ -1713,6 +1768,8 @@ module.exports = {
   getMarketplaceMonthKey,
   getMarketplaceCap,
   getMarketplaceStockState,
+  buildMarketplaceSelectCustomId,
+  parseMarketplaceSelectCustomId,
   isHttpUrl,
   isDirectImageUrl,
   ensureMarketplaceTables,

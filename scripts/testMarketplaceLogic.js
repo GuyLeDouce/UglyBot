@@ -27,6 +27,8 @@ const {
   getMarketplaceMonthKey,
   getMarketplaceCap,
   getMarketplaceStockState,
+  buildMarketplaceSelectCustomId,
+  parseMarketplaceSelectCustomId,
   isHttpUrl,
   isDirectImageUrl,
 } = require('../modules/marketplaceCommand');
@@ -65,6 +67,14 @@ assert.deepStrictEqual(
   getMarketplaceStockState('epic', 99),
   { itemKey: 'epic', cap: 1, sold: 99, remaining: 0, soldOut: true }
 );
+
+assert.strictEqual(buildMarketplaceSelectCustomId(), 'marketplace_select_item');
+assert.strictEqual(buildMarketplaceSelectCustomId('123456789012345678'), 'marketplace_select_item:123456789012345678');
+assert.deepStrictEqual(parseMarketplaceSelectCustomId('marketplace_select_item'), { panelMessageId: null });
+assert.deepStrictEqual(parseMarketplaceSelectCustomId('marketplace_select_item:123456789012345678'), {
+  panelMessageId: '123456789012345678',
+});
+assert.strictEqual(parseMarketplaceSelectCustomId('marketplace_select_other'), null);
 
 assert.strictEqual(isHttpUrl('https://opensea.io/assets/example'), true);
 assert.strictEqual(isHttpUrl('http://example.com/reward'), true);
