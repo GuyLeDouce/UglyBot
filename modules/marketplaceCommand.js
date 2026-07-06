@@ -977,7 +977,7 @@ function sanitizeThreadName(value) {
     .slice(0, 100) || 'marketplace-delivery';
 }
 
-async function createMarketplaceDeliveryThread(interaction, purchase) {
+async function createMarketplaceDeliveryThread(interaction, purchase, deps = {}) {
   let thread = null;
   try {
     const parent = await resolveMarketplaceThreadParent(interaction);
@@ -990,6 +990,16 @@ async function createMarketplaceDeliveryThread(interaction, purchase) {
     });
 
     await thread.members.add(purchase.user_id);
+    await thread.send(buildPurchaseThreadIntroPayload(purchase)).catch((introMessageError) => {
+      postMarketplaceLog(deps, {
+        guild: interaction.guild,
+        category: 'Marketplace Thread Intro Failure',
+        purchase,
+        status: purchase.status,
+        error: introMessageError,
+        extra: `Thread: <#${thread.id}>`,
+      }).catch(() => null);
+    });
 
     const adminResolution = await resolveMarketplaceAdminUserIds(interaction.guild);
     const adminAddFailures = [];
@@ -1263,18 +1273,7 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
 
     let threadResult;
     try {
-      threadResult = await createMarketplaceDeliveryThread(interaction, reservedPurchase);
-      await threadResult.thread.send(buildPurchaseThreadIntroPayload(reservedPurchase)).catch((introMessageError) => {
-        postMarketplaceLog(deps, {
-          guild: interaction.guild,
-          category: 'Marketplace Thread Intro Failure',
-          purchase: reservedPurchase,
-          item: selectedItem,
-          status: reservedPurchase.status,
-          error: introMessageError,
-          extra: threadResult.thread ? `Thread: <#${threadResult.thread.id}>` : '',
-        }).catch(() => null);
-      });
+      threadResult = await createMarketplaceDeliveryThread(interaction, reservedPurchase, deps);
       deliveryThread = threadResult.thread;
       reservedPurchase = await updatePurchaseThread(deps, reservedPurchase.id, deliveryThread.id) || {
         ...reservedPurchase,
