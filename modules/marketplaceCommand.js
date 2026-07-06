@@ -1265,10 +1265,6 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
     try {
       threadResult = await createMarketplaceDeliveryThread(interaction, reservedPurchase);
       deliveryThread = threadResult.thread;
-      reservedPurchase = await updatePurchaseThread(deps, reservedPurchase.id, deliveryThread.id) || {
-        ...reservedPurchase,
-        thread_id: deliveryThread.id,
-      };
       await deliveryThread.send(buildPurchaseThreadIntroPayload(reservedPurchase)).catch((introMessageError) => {
         postMarketplaceLog(deps, {
           guild: interaction.guild,
@@ -1280,6 +1276,10 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
           extra: deliveryThread ? `Thread: <#${deliveryThread.id}>` : '',
         }).catch(() => null);
       });
+      reservedPurchase = await updatePurchaseThread(deps, reservedPurchase.id, deliveryThread.id) || {
+        ...reservedPurchase,
+        thread_id: deliveryThread.id,
+      };
     } catch (threadError) {
       await markPurchaseFailed(deps, reservedPurchase.id, 'failed_thread').catch(() => null);
       await archiveFailedThread(threadError.thread, 'Marketplace purchase cancelled: the buyer could not be added to this private delivery thread.');
