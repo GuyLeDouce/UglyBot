@@ -528,7 +528,7 @@ function buildMarketplacePanelEmbed(stockSummaries = []) {
     .setDescription(
       'Spend $CHARM on limited monthly rewards. Pick an item, confirm privately, and a private delivery thread will open automatically for you and the admins.'
     )
-    .setImage('https://i.imgur.com/9l6QB0o.jpeg')
+    .setImage('https://i.imgur.com/WS0O1AA.jpeg')
     .addFields(
       {
         name: 'How it works',
