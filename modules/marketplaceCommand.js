@@ -19,6 +19,10 @@ const MARKETPLACE_ADMIN_USER_IDS = process.env.MARKETPLACE_ADMIN_USER_IDS || '';
 const MARKETPLACE_ADMIN_ROLE_IDS = process.env.MARKETPLACE_ADMIN_ROLE_IDS || '';
 const MARKETPLACE_TIME_ZONE = process.env.MARKETPLACE_TIME_ZONE || 'America/Toronto';
 const MARKETPLACE_RECEIPT_CHANNEL_ID = MARKETPLACE_NOTICE_CHANNEL_ID;
+const DEFAULT_MARKETPLACE_ADMIN_USER_IDS = Object.freeze([
+  '1288107772248064044',
+  '826581856400179210',
+]);
 
 const MARKETPLACE_PURCHASE_TABLE = 'malformed_marketplace_purchases';
 const CONFIRMATION_TTL_MS = 5 * 60 * 1000;
@@ -119,6 +123,15 @@ function parseConfiguredIds(value) {
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
+}
+
+function getMarketplaceAdminUserIds() {
+  return [
+    ...new Set([
+      ...DEFAULT_MARKETPLACE_ADMIN_USER_IDS,
+      ...parseConfiguredIds(MARKETPLACE_ADMIN_USER_IDS),
+    ]),
+  ];
 }
 
 function truncateText(value, maxLength = 1024) {
@@ -882,7 +895,7 @@ function memberHasConfiguredMarketplaceRole(member) {
 }
 
 function isMarketplaceAdminInteraction(interaction) {
-  const explicitUserIds = new Set(parseConfiguredIds(MARKETPLACE_ADMIN_USER_IDS));
+  const explicitUserIds = new Set(getMarketplaceAdminUserIds());
   if (explicitUserIds.has(String(interaction.user?.id || ''))) return true;
   if (
     interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
@@ -892,7 +905,7 @@ function isMarketplaceAdminInteraction(interaction) {
 }
 
 async function resolveMarketplaceAdminUserIds(guild) {
-  const explicitUserIds = new Set(parseConfiguredIds(MARKETPLACE_ADMIN_USER_IDS));
+  const explicitUserIds = new Set(getMarketplaceAdminUserIds());
   const result = new Set(explicitUserIds);
 
   let fetchedAllMembers = false;
