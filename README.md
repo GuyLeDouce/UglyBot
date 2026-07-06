@@ -4,6 +4,8 @@
 
 - `PASSIVE_REWARD_START_AT`: optional ISO timestamp for the earliest passive $CHARM accrual start. If unset, each collection starts accruing when its first enabled holder rule was created. Alias: `CHARM_PASSIVE_REWARD_START_AT`.
 
+Reward accrual is tracked per NFT. If an NFT sells or transfers before it is claimed, the accrued $CHARM follows that NFT to the new owner.
+
 ## Marketplace environment variables
 
 - `MARKETPLACE_NOTICE_CHANNEL_ID`: channel for delivered purchase notices. Defaults to `1321864977270706257`.

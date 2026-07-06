@@ -4865,6 +4865,7 @@ function rewardsMenuEmbed(guildName, pointsLabel = 'UglyPoints') {
     .setDescription(
       `Welcome to **${guildName}** rewards.\n\n` +
       `Use the buttons below:\n` +
+      `Accrued $CHARM follows each NFT when it sells or transfers.\n` +
       `• **Claim Rewards**: collect holder rewards accrued by each NFT.\n` +
       `• **Check NFT Status**: view a Squig token's ${pointsLabel} breakdown.\n` +
       `• **View Holdings**: see holdings by collection, ${pointsLabel}, or full summary.`
@@ -5043,7 +5044,8 @@ function infoEmbeds(guildName, settings = null) {
             `Rewards are based on the configured payout type.\n` +
             `Per NFT = eligible NFT count x payout amount.\n` +
             `Per ${pointsLabel} = total ${pointsLabel} x payout amount.\n` +
-            `Each NFT accrues over time and resets its own timer when claimed.`
+            `Each NFT accrues over time and resets its own timer when claimed.\n` +
+            `If an NFT sells or transfers before it is claimed, the accrued $CHARM follows that NFT to the new owner.`
         },
         {
           name: 'Support Flow',
@@ -5076,7 +5078,8 @@ function infoUserEmbeds(guildName, settings = null) {
           name: 'Passive Claim',
           value:
             `You can claim whenever you want from the rewards menu.\n` +
-            `The bot calculates accrued rewards based on each eligible NFT and/or total ${pointsLabel}, depending on server settings.`
+            `The bot calculates accrued rewards based on each eligible NFT and/or total ${pointsLabel}, depending on server settings.\n` +
+            `If an NFT sells or transfers before it is claimed, the accrued $CHARM follows that NFT to the new owner.`
         },
         {
           name: 'Verified vs Unverified Wallets',
@@ -6825,8 +6828,8 @@ async function handleClaimCalculation(interaction) {
     : `DRIP verification adjustment: **0 $CHARM**`;
   const resultLine = `Claim now: **${rewardQuote.claimableAmount} $CHARM**`;
   const simpleExplain = rewardQuote.payoutType === 'per_nft'
-    ? `Simple formula: each eligible NFT earns over time until that NFT is claimed.`
-    : `Simple formula: each NFT earns based on its ${pointsLabel}, over time, until that NFT is claimed.`;
+    ? `Simple formula: each eligible NFT earns over time until that NFT is claimed. If it sells or transfers first, its accrued $CHARM follows it to the new owner.`
+    : `Simple formula: each NFT earns based on its ${pointsLabel}, over time, until that NFT is claimed. If it sells or transfers first, its accrued $CHARM follows it to the new owner.`;
 
   await respondInteraction(interaction, {
     content:
@@ -8642,7 +8645,7 @@ client.on('interactionCreate', async (interaction) => {
           .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
           .setDescription(
             `Collections connected to this server across all linked wallets:\n${collectionLines}\n\n` +
-            `Use **Claim Rewards** to calculate current accrued earnings.\n` +
+            `Use **Claim Rewards** to calculate current accrued earnings. Accrued $CHARM follows each NFT when it sells or transfers.\n` +
             `DRIP $CHARM held: **${dripBalanceText}**`
           );
 
