@@ -4216,6 +4216,9 @@ async function getRewardHealthSummary(guildId, settings = null) {
 }
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const PASSIVE_REWARD_START_AT = parsePassiveRewardStartAt(
+  process.env.PASSIVE_REWARD_START_AT || process.env.CHARM_PASSIVE_REWARD_START_AT
+);
 
 function nftClaimKey(chain, contractAddress, tokenId) {
   if (tokenId == null) {
@@ -4224,6 +4227,30 @@ function nftClaimKey(chain, contractAddress, tokenId) {
     chain = DEFAULT_NFT_CHAIN;
   }
   return `${normalizeNftChain(chain) || DEFAULT_NFT_CHAIN}:${String(contractAddress || '').toLowerCase()}:${String(tokenId || '')}`;
+}
+
+function parsePassiveRewardStartAt(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) {
+    console.warn(`Invalid PASSIVE_REWARD_START_AT ignored: ${raw}`);
+    return null;
+  }
+  return parsed;
+}
+
+function validRewardBaselineDate(value, now = new Date()) {
+  if (value == null || String(value).trim() === '') return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.getTime() > now.getTime() ? now : parsed;
+}
+
+function passiveRewardStartDate(ruleStartAt = null, now = new Date()) {
+  return validRewardBaselineDate(PASSIVE_REWARD_START_AT, now)
+    || validRewardBaselineDate(ruleStartAt, now)
+    || now;
 }
 
 function formatNumber(value, digits = 2) {
@@ -4422,10 +4449,22 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   const contractMap = new Map();
   for (const r of rules) {
     const key = collectionKey(r.chain, r.contract_address);
-    if (!key || contractMap.has(key)) continue;
+    if (!key) continue;
+    const existing = contractMap.get(key);
+    const rewardStartAt = validRewardBaselineDate(r.created_at) || null;
+    if (existing) {
+      if (
+        rewardStartAt &&
+        (!existing.rewardStartAt || rewardStartAt.getTime() < existing.rewardStartAt.getTime())
+      ) {
+        existing.rewardStartAt = rewardStartAt;
+      }
+      continue;
+    }
     contractMap.set(key, {
       chain: normalizeNftChain(r.chain) || DEFAULT_NFT_CHAIN,
       contractAddress: String(r.contract_address || '').toLowerCase(),
+      rewardStartAt,
     });
   }
   const contracts = [...contractMap.values()];
@@ -4447,7 +4486,7 @@ async function getPassiveClaimQuote(guildId, links, settings) {
   const nftEntries = [];
   const seenNfts = new Set();
   await mapLimit(normalizedLinks, 3, async (link) => {
-    await mapLimit(contracts, 3, async ({ chain, contractAddress }) => {
+    await mapLimit(contracts, 3, async ({ chain, contractAddress, rewardStartAt }) => {
       const tokenIds = await getOwnedTokenIdsForContract(link.wallet_address, contractAddress, chain);
       for (const tokenId of tokenIds) {
         const key = nftClaimKey(chain, contractAddress, tokenId);
@@ -4459,6 +4498,7 @@ async function getPassiveClaimQuote(guildId, links, settings) {
           tokenId: String(tokenId),
           walletAddress: link.wallet_address,
           verified: Boolean(link.verified),
+          rewardStartAt: passiveRewardStartDate(rewardStartAt),
           unitValue: payoutType === 'per_nft' ? 1 : 0,
         });
       }
@@ -4527,7 +4567,7 @@ async function getPassiveClaimQuote(guildId, links, settings) {
     const state = stateByNft.get(nftClaimKey(entry.chain, entry.contractAddress, entry.tokenId));
     let lastClaimedAt = state?.last_claimed_at ? new Date(state.last_claimed_at) : null;
     if (!lastClaimedAt || !Number.isFinite(lastClaimedAt.getTime())) {
-      lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
+      lastClaimedAt = passiveRewardStartDate(entry.rewardStartAt, now);
     }
     const elapsedMs = Math.max(0, now.getTime() - lastClaimedAt.getTime());
     entry.elapsedMs = elapsedMs;
@@ -4597,6 +4637,21 @@ async function recordPassiveClaim(guildId, discordId, rewardQuote, receiptChanne
   );
 }
 
+async function getPassiveRewardStartDateForContract(guildId, chain, contractAddress) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = String(contractAddress || '').toLowerCase();
+  const { rows } = await teamPool.query(
+    `SELECT MIN(created_at) AS reward_start_at
+     FROM holder_rules
+     WHERE guild_id = $1
+       AND COALESCE(NULLIF(chain, ''), 'ethereum') = $2
+       AND contract_address = $3
+       AND enabled = TRUE`,
+    [guildId, normalizedChain, normalizedContract]
+  );
+  return passiveRewardStartDate(rows[0]?.reward_start_at || null);
+}
+
 async function getClaimableAmountForNft(guildId, contractAddress, tokenId, settings, unitValueOverride = null, chain = DEFAULT_NFT_CHAIN) {
   const payoutType = settings?.payout_type === 'per_nft' ? 'per_nft' : 'per_up';
   const payoutAmount = Number(settings?.payout_amount || 0);
@@ -4622,7 +4677,7 @@ async function getClaimableAmountForNft(guildId, contractAddress, tokenId, setti
   const now = new Date();
   let lastClaimedAt = rows[0]?.last_claimed_at ? new Date(rows[0].last_claimed_at) : null;
   if (!lastClaimedAt || !Number.isFinite(lastClaimedAt.getTime())) {
-    lastClaimedAt = new Date(now.getTime() - DAY_IN_MS);
+    lastClaimedAt = await getPassiveRewardStartDateForContract(guildId, normalizedChain, normalizedContract);
   }
 
   const elapsedMs = Math.max(0, now.getTime() - lastClaimedAt.getTime());
