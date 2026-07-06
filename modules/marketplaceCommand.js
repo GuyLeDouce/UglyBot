@@ -724,6 +724,30 @@ function buildMarketplaceNoticePayload(purchase, adminId) {
   };
 }
 
+function buildPurchaseThreadIntroPayload(purchase) {
+  const buyerId = String(purchase.user_id);
+  return {
+    content:
+      `Congrats <@${buyerId}> on your new purchase. ` +
+      'The system is double checking all credentials to ensure you are Ugly enough to make this purchase. ' +
+      'A receipt will pop up in here shortly and the team will get your item over to you ASAP.',
+    allowedMentions: { users: [buyerId] },
+  };
+}
+
+function buildMarketplaceAdminReadyPayload(purchase) {
+  const buyerId = String(purchase.user_id);
+  const adminIds = getMarketplaceAdminUserIds()
+    .map((userId) => String(userId))
+    .filter((userId) => userId && userId !== buyerId);
+  const uniqueAdminIds = [...new Set(adminIds)];
+  const mentions = uniqueAdminIds.map((userId) => `<@${userId}>`).join(' ');
+  return {
+    content: `${mentions} everything is cleared and good to go.`.trim(),
+    allowedMentions: { users: uniqueAdminIds },
+  };
+}
+
 function createConfirmation(interaction, item) {
   const token = crypto.randomBytes(6).toString('hex');
   pendingConfirmations.set(token, {
@@ -1245,6 +1269,17 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
         ...reservedPurchase,
         thread_id: deliveryThread.id,
       };
+      await deliveryThread.send(buildPurchaseThreadIntroPayload(reservedPurchase)).catch((introMessageError) => {
+        postMarketplaceLog(deps, {
+          guild: interaction.guild,
+          category: 'Marketplace Thread Intro Failure',
+          purchase: reservedPurchase,
+          item: selectedItem,
+          status: reservedPurchase.status,
+          error: introMessageError,
+          extra: deliveryThread ? `Thread: <#${deliveryThread.id}>` : '',
+        }).catch(() => null);
+      });
     } catch (threadError) {
       await markPurchaseFailed(deps, reservedPurchase.id, 'failed_thread').catch(() => null);
       await archiveFailedThread(threadError.thread, 'Marketplace purchase cancelled: the buyer could not be added to this private delivery thread.');
@@ -1359,6 +1394,17 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
         components: [buildDeliveryButtonRow(reservedPurchase, false)],
       });
       reservedPurchase = await updatePurchaseDeliveryMessage(deps, reservedPurchase.id, deliveryMessage.id) || reservedPurchase;
+      await deliveryThread.send(buildMarketplaceAdminReadyPayload(reservedPurchase)).catch((adminReadyError) => {
+        postMarketplaceLog(deps, {
+          guild: interaction.guild,
+          category: 'Marketplace Admin Ready Message Failure',
+          purchase: reservedPurchase,
+          item: selectedItem,
+          status: reservedPurchase.status,
+          error: adminReadyError,
+          extra: deliveryThread ? `Thread: <#${deliveryThread.id}>` : '',
+        }).catch(() => null);
+      });
     } catch (deliveryMessageError) {
       await postMarketplaceLog(deps, {
         guild: interaction.guild,
