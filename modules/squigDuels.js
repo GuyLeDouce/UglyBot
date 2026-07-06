@@ -64,7 +64,7 @@ const OPEN_CHALLENGE_ANNOUNCE_CHANNEL_ID = '1321864977270706257';
 const ADDITIONAL_DUEL_PLAYER_ROLE_IDS = new Set(['1517233987175710850']);
 const BOT_DUEL_WAGER = 50;
 const BOT_DUEL_MAX_WAGER = 5000;
-const BOT_DUEL_PAYOUT_MULTIPLIER = 3;
+const BOT_DUEL_WIN_BONUS = 100;
 const MAX_DUEL_WAGER = 10000;
 const MAX_SELECT_OPTIONS = 25;
 const MAX_FAVORITE_SQUIGS = 10;
@@ -450,7 +450,7 @@ function botWagerAmount(duel) {
 }
 
 function botDuelPayoutAmount(duel) {
-  return Math.floor(botWagerAmount(duel) * BOT_DUEL_PAYOUT_MULTIPLIER);
+  return Math.floor(botWagerAmount(duel) + BOT_DUEL_WIN_BONUS);
 }
 
 function randomBotAction() {
