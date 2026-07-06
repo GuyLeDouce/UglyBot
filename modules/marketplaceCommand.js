@@ -1264,8 +1264,7 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
     let threadResult;
     try {
       threadResult = await createMarketplaceDeliveryThread(interaction, reservedPurchase);
-      deliveryThread = threadResult.thread;
-      await deliveryThread.send(buildPurchaseThreadIntroPayload(reservedPurchase)).catch((introMessageError) => {
+      await threadResult.thread.send(buildPurchaseThreadIntroPayload(reservedPurchase)).catch((introMessageError) => {
         postMarketplaceLog(deps, {
           guild: interaction.guild,
           category: 'Marketplace Thread Intro Failure',
@@ -1273,9 +1272,10 @@ async function handleMarketplaceConfirmation(interaction, deps, action, token) {
           item: selectedItem,
           status: reservedPurchase.status,
           error: introMessageError,
-          extra: deliveryThread ? `Thread: <#${deliveryThread.id}>` : '',
+          extra: threadResult.thread ? `Thread: <#${threadResult.thread.id}>` : '',
         }).catch(() => null);
       });
+      deliveryThread = threadResult.thread;
       reservedPurchase = await updatePurchaseThread(deps, reservedPurchase.id, deliveryThread.id) || {
         ...reservedPurchase,
         thread_id: deliveryThread.id,
