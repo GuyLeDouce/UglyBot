@@ -38,6 +38,7 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { renderSquigCardExact } = require('./card_renderer');
 const portalEvent = require('./modules/portalEvent');
 const marketplaceCommand = require('./modules/marketplaceCommand');
+const mawEvent = require('./modules/mawEvent');
 const squigDuels = require('./modules/squigDuels');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
@@ -746,6 +747,7 @@ ensurePointsSchema().catch(e => console.error('Points schema error:', e.message)
 ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message));
 ensureMarketplaceSchema().catch(e => console.error('Marketplace schema error:', e.message));
 marketplaceCommand.ensureMarketplaceTables({ marketplacePool: prizesPool }).catch(e => console.error('Malformed marketplace schema error:', e.message));
+mawEvent.ensureMawTables({ mawPool: prizesPool }).catch(e => console.error('Maw schema error:', e.message));
 squigDuels.ensureSquigDuelSchema(teamPool).catch(e => console.error('Squig duel schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
@@ -1148,6 +1150,8 @@ function buildSlashCommands() {
       .setDescription('Generate a doctor note with your Discord display name')
       .toJSON(),
     marketplaceCommand.buildMarketplaceSlashCommand().toJSON(),
+    mawEvent.buildMawSlashCommand().toJSON(),
+    mawEvent.buildSquigPrizeSlashCommand().toJSON(),
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
   ];
 }
@@ -1184,6 +1188,12 @@ client.once(Events.ClientReady, async (c) => {
     console.error('Slash register error:', e.message);
   }
   startMarketplaceRaffleProcessor();
+  try {
+    mawEvent.startMawWatchers();
+    console.log('✅ Maw watchers started.');
+  } catch (err) {
+    console.warn('⚠️ Maw watchers not started:', err.message);
+  }
   startDailyHolderVerificationRefresh();
   if (String(process.env.PORTAL_AUTO_START || '').toLowerCase() === 'true') {
     try {
@@ -7089,6 +7099,21 @@ squigDuels.initSquigDuels({
   isAdmin,
 });
 
+mawEvent.initMawEvent({
+  client,
+  clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
+  mawPool: prizesPool,
+  getWalletLinks,
+  getOwnedTokenIdsForContractMany,
+  getOwnedSquigsReloadedTokenIds,
+  getMarketplaceSpendableBalance,
+  getDripMemberCurrencyBalance,
+  extractDripCurrencyAmountFromPayload,
+  awardDripPoints,
+  postAdminSystemLog,
+  isAdmin,
+});
+
 function getMarketplaceCommandDeps() {
   return {
     clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
@@ -7106,6 +7131,10 @@ client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       if (await squigDuels.handleCommand(interaction)) {
+        return;
+      }
+
+      if (await mawEvent.handleCommand(interaction)) {
         return;
       }
 
@@ -8038,6 +8067,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await marketplaceCommand.handleMarketplaceButton(interaction, getMarketplaceCommandDeps())) {
+        return;
+      }
+
+      if (await mawEvent.handleComponent(interaction)) {
         return;
       }
 
@@ -9286,6 +9319,10 @@ client.on('interactionCreate', async (interaction) => {
         embeds: [buildMarketplaceItemEmbed(previewItem, { totalPurchased: 0 })],
         components: buildPrizePreviewRows(draft),
       });
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && await mawEvent.handleComponent(interaction)) {
       return;
     }
 

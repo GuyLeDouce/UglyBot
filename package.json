@@ -8,7 +8,8 @@
     "start": "node index.js",
     "build:traits": "node scripts/buildTraitCounts.js",
     "test:rewards": "node scripts/testRewardLogic.js",
-    "test:marketplace": "node scripts/testMarketplaceLogic.js"
+    "test:marketplace": "node scripts/testMarketplaceLogic.js",
+    "test:maw": "node scripts/testMawLogic.js"
   },
   "engines": {
     "node": "20.x"
