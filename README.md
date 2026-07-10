@@ -18,9 +18,9 @@ Reward accrual is tracked per NFT. If an NFT sells or transfers before it is cla
 
 - `MAW_WALLET_ADDRESS`: required. Official wallet that receives returned Squigs.
 - `MAW_SQUIG_CONTRACT`: Squigs Reloaded contract. Defaults to `0x8c9a02c0585200c4c65608df6b8def543d33792a`.
-- `MAW_GOAL_COUNT`: default `40`.
+- `MAW_GOAL_COUNT`: default `20`.
 - `MAW_RETURN_REWARD_CHARM`: default `12500`.
-- `MAW_JACKPOT_CHARM`: default `50000`.
+- `MAW_JACKPOT_CHARM`: default `35000`.
 - `MAW_SESSION_TTL_MINUTES`: default `20`.
 - `MAW_PRIZE_CASHOUT_CHARM`: default `8000`.
 - `MAW_REROLL_COST_CHARM`: default `4000`.

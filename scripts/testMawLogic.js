@@ -81,9 +81,9 @@ const savedEnv = {
 };
 for (const key of Object.keys(savedEnv)) delete process.env[key];
 const defaults = getMawConfig();
-assert.strictEqual(defaults.goalCount, 40);
+assert.strictEqual(defaults.goalCount, 20);
 assert.strictEqual(defaults.returnRewardCharm, 12500);
-assert.strictEqual(defaults.jackpotCharm, 50000);
+assert.strictEqual(defaults.jackpotCharm, 35000);
 assert.strictEqual(defaults.sessionTtlMinutes, 20);
 assert.strictEqual(defaults.prizeCashoutCharm, 8000);
 assert.strictEqual(defaults.rerollCostCharm, 4000);

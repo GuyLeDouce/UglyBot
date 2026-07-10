@@ -23,6 +23,7 @@ const CLAIM_TTL_HOURS = 24;
 const DEFAULT_LOOKBACK_BLOCKS = 7200;
 const DEFAULT_BLOCK_CHUNK_SIZE = 2000;
 const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
+const MAW_PANEL_IMAGE_URL = 'https://i.imgur.com/tjahRQz.png';
 const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
   path.join(__dirname, '..', 'images'),
   path.join(__dirname, '..', '..', 'images'),
@@ -97,9 +98,9 @@ function getMawConfig() {
     mawWalletAddress: normalizeAddress(process.env.MAW_WALLET_ADDRESS),
     rawMawWalletAddress: String(process.env.MAW_WALLET_ADDRESS || '').trim(),
     squigContract: normalizeAddress(process.env.MAW_SQUIG_CONTRACT || DEFAULT_SQUIG_CONTRACT) || DEFAULT_SQUIG_CONTRACT,
-    goalCount: intEnv('MAW_GOAL_COUNT', 40, 1),
+    goalCount: intEnv('MAW_GOAL_COUNT', 20, 1),
     returnRewardCharm: intEnv('MAW_RETURN_REWARD_CHARM', 12500, 0),
-    jackpotCharm: intEnv('MAW_JACKPOT_CHARM', 50000, 0),
+    jackpotCharm: intEnv('MAW_JACKPOT_CHARM', 35000, 0),
     sessionTtlMinutes: intEnv('MAW_SESSION_TTL_MINUTES', 20, 1),
     prizeCashoutCharm: intEnv('MAW_PRIZE_CASHOUT_CHARM', 8000, 0),
     rerollCostCharm: intEnv('MAW_REROLL_COST_CHARM', 4000, 0),
@@ -337,9 +338,9 @@ async function ensureMawTables(poolOrDeps = null) {
   await addColumns(pool, 'maw_events', [
     ['guild_id', 'TEXT'],
     ['status', "TEXT NOT NULL DEFAULT 'draft'"],
-    ['goal_count', 'INT NOT NULL DEFAULT 40'],
+    ['goal_count', 'INT NOT NULL DEFAULT 20'],
     ['return_reward_charm', 'NUMERIC NOT NULL DEFAULT 12500'],
-    ['jackpot_charm', 'NUMERIC NOT NULL DEFAULT 50000'],
+    ['jackpot_charm', 'NUMERIC NOT NULL DEFAULT 35000'],
     ['session_ttl_minutes', 'INT NOT NULL DEFAULT 20'],
     ['received_count', 'INT NOT NULL DEFAULT 0'],
     ['panel_channel_id', 'TEXT'],
@@ -935,8 +936,8 @@ async function handleMawStatus(interaction) {
     .setColor(0x8b1e3f)
     .addFields(
       { name: 'Progress', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
-      { name: 'Open slots', value: String(summary.openSlots), inline: true },
-      { name: 'Active transfer windows', value: String(summary.activeTransferWindows), inline: true },
+      { name: 'Open spots', value: String(summary.openSlots), inline: true },
+      { name: 'Active transfers', value: String(summary.activeTransferWindows), inline: true },
       { name: 'Your Maw Tickets', value: ticketText, inline: false },
       { name: 'Your active session', value: activeText, inline: false },
       { name: 'Maw Ticket Draw', value: event.draw_completed ? 'Complete.' : `${formatCharm(event.jackpot_charm)} $CHARM unlocks at goal.`, inline: false }
@@ -1028,19 +1029,22 @@ function buildMawPanelPayload(summary = null) {
     .setTitle('THE MAW IS HUNGRY')
     .setColor(event.draw_completed ? 0x2f9e44 : 0x8b1e3f)
     .setDescription(
-      `Return an eligible Squig to the Malformed Marketplace and receive ${reward} $CHARM. ` +
-      `Every accepted Squig earns 1 Maw Ticket. If the Maw reaches ${event.goal_count} Squigs, ` +
-      `one Maw Ticket wins ${jackpot} $CHARM.`
+      `Feed an eligible Squig to the Maw.\n\n` +
+      `Once the transfer is received and verified, you earn:\n` +
+      `\u2022 ${reward} $CHARM\n` +
+      `\u2022 1 Maw Ticket\n\n` +
+      `When the Maw consumes ${event.goal_count} Squigs, one Maw Ticket will be drawn to win the ${jackpot} $CHARM jackpot.`
     )
     .addFields(
-      { name: 'Progress', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
-      { name: 'Active transfer windows', value: String(summary.activeTransferWindows), inline: true },
-      { name: 'Open slots', value: String(summary.openSlots), inline: true },
-      { name: 'Return payout', value: `${reward} $CHARM`, inline: true },
-      { name: 'Jackpot', value: `${jackpot} $CHARM Maw Ticket Draw`, inline: true },
-      { name: 'Timer warning', value: `The transfer window is ${formatDurationMinutes(event.session_ttl_minutes)} after final confirmation.`, inline: false },
-      { name: 'Returned Squigs become Maw Pool inventory', value: 'They may crawl out later through future prizes, games, store rewards, onboarding, draws, or other malformed mechanics.', inline: false }
-    );
+      { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
+      { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
+      { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
+      { name: 'REWARD', value: `${reward} $CHARM per accepted Squig`, inline: true },
+      { name: 'JACKPOT', value: `${jackpot} $CHARM\n1 ticket earned per accepted Squig`, inline: true },
+      { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
+      { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
+    )
+    .setImage(MAW_PANEL_IMAGE_URL);
   if (event.draw_completed) {
     embed.setTitle('THE MAW IS FULL');
     embed.setDescription(`${event.goal_count} / ${event.goal_count} Squigs consumed. The ${jackpot} $CHARM Maw Ticket Draw is complete.`);
@@ -1073,6 +1077,48 @@ async function updateMawPanel(eventId) {
   return true;
 }
 
+async function deleteMawPanelMessage(event, replacementMessage = null) {
+  if (!event?.panel_channel_id || !event?.panel_message_id || !deps?.client) return false;
+  const oldChannelId = String(event.panel_channel_id);
+  const oldMessageId = String(event.panel_message_id);
+  const replacementChannelId = String(replacementMessage?.channelId || replacementMessage?.channel?.id || '');
+  if (replacementChannelId === oldChannelId && String(replacementMessage?.id || '') === oldMessageId) return false;
+
+  const channel = replacementChannelId === oldChannelId
+    ? replacementMessage.channel
+    : await deps.client.channels.fetch(oldChannelId).catch(() => null);
+  if (!channel?.messages?.fetch) return false;
+  const message = await channel.messages.fetch(oldMessageId).catch(() => null);
+  if (!message?.delete) return false;
+  await message.delete().catch(() => null);
+  return true;
+}
+
+async function moveMawPanelBelowMessage(event, anchorMessage) {
+  if (!event?.id || !anchorMessage?.channel?.send) return false;
+  const latestEvent = await getMawEventById(event.id);
+  if (!latestEvent) return false;
+  const summary = latestEvent.status === 'open' || latestEvent.draw_completed
+    ? await getMawEventSummary(latestEvent)
+    : null;
+  const newPanel = await anchorMessage.channel.send(buildMawPanelPayload(summary));
+  try {
+    await resolvePool().query(
+      `UPDATE maw_events
+       SET panel_channel_id = $2,
+           panel_message_id = $3,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(latestEvent.id), String(anchorMessage.channel.id), String(newPanel.id)]
+    );
+  } catch (err) {
+    await newPanel.delete?.().catch(() => null);
+    throw err;
+  }
+  await deleteMawPanelMessage(latestEvent, newPanel).catch(() => null);
+  return true;
+}
+
 async function handleMawFeedStart(interaction) {
   const eventId = String(interaction.customId || '').split(':')[1] || '';
   const config = getMawConfig();
@@ -1100,7 +1146,7 @@ async function handleMawFeedStart(interaction) {
 
   const summary = await getMawEventSummary(event);
   if (summary.openSlots <= 0) {
-    await interaction.editReply({ content: 'The Maw is full or all remaining slots are temporarily reserved by active transfer windows.' });
+    await interaction.editReply({ content: 'The Maw is full or all remaining spots are temporarily reserved by active transfers.' });
     return true;
   }
 
@@ -1243,7 +1289,7 @@ async function handleMawSquigSelect(interaction) {
   }
   const summary = await getMawEventSummary(event);
   if (summary.openSlots <= 0) {
-    await interaction.update({ content: 'The Maw is full or all remaining slots are temporarily reserved by active transfer windows.', components: [] });
+    await interaction.update({ content: 'The Maw is full or all remaining spots are temporarily reserved by active transfers.', components: [] });
     return;
   }
   const active = await getActiveUserSession(interaction.guildId, interaction.user.id);
@@ -1290,13 +1336,13 @@ function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null) {
   const embed = new EmbedBuilder()
     .setTitle('Review Maw Return')
     .setColor(0x8b1e3f)
-    .setDescription('Returned Squigs become Malformed Marketplace inventory. They may be reused for future prizes, games, store rewards, onboarding, draws, or other malformed mechanics.')
+    .setDescription('Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.')
     .addFields(
       { name: 'Squig', value: formatToken(tokenId), inline: true },
       { name: 'Payout', value: `${formatCharm(event.return_reward_charm)} $CHARM`, inline: true },
       { name: 'Ticket', value: '1 Maw Ticket', inline: true },
       { name: 'Current progress', value: `${event.received_count} / ${event.goal_count}`, inline: true },
-      { name: 'Remaining open slots', value: String(summary.openSlots), inline: true }
+      { name: 'Remaining open spots', value: String(summary.openSlots), inline: true }
     );
   if (imageUrl) embed.setImage(imageUrl);
   return embed;
@@ -1440,7 +1486,7 @@ async function createMawReturnSession(pending) {
     if (openSlots <= 0) {
       await db.query('ROLLBACK');
       done = true;
-      return { ok: false, reason: 'The Maw is full or all remaining slots are temporarily reserved by active transfer windows.' };
+      return { ok: false, reason: 'The Maw is full or all remaining spots are temporarily reserved by active transfers.' };
     }
     const existingPool = await db.query(
       `SELECT id FROM maw_squig_pool WHERE contract_address = $1 AND token_id = $2 AND status <> 'retired' LIMIT 1 FOR UPDATE`,
@@ -1716,8 +1762,9 @@ async function insertPrizeHistory(db, claimId, poolSquigId, action, charmDelta =
   );
 }
 
-function buildPrizeOfferPayload(claim, squig, disabled = false) {
+function buildPrizeOfferPayload(claim, squig, disabled = false, options = {}) {
   const config = getMawConfig();
+  const image = mawSquigImageAttachment(squig?.token_id);
   const embed = new EmbedBuilder()
     .setTitle('A Squig has crawled out of the Maw')
     .setColor(0x5f3dc4)
@@ -1737,9 +1784,12 @@ function buildPrizeOfferPayload(claim, squig, disabled = false) {
   if (claim.expires_at && !disabled) {
     embed.addFields({ name: 'Expires', value: `<t:${Math.floor(new Date(claim.expires_at).getTime() / 1000)}:R>`, inline: true });
   }
+  if (image.imageUrl) embed.setImage(image.imageUrl);
   return {
     embeds: [embed],
     components: [buildPrizeOfferRow(claim, disabled)],
+    ...(options.replaceAttachments ? { attachments: [] } : {}),
+    ...(image.files.length ? { files: image.files } : {}),
   };
 }
 
@@ -2339,7 +2389,7 @@ async function updatePrizeOfferMessage(claimId, disabled = false) {
     token_id: claim.token_id,
     contract_address: claim.contract_address,
   };
-  await message.edit(buildPrizeOfferPayload(claim, squig, disabled || String(claim.status) !== 'offered'));
+  await message.edit(buildPrizeOfferPayload(claim, squig, disabled || String(claim.status) !== 'offered', { replaceAttachments: true }));
   return true;
 }
 
@@ -2663,12 +2713,17 @@ async function processMawTransferLog(guildId, config, transfer) {
       await postAdminLogByGuildId(guildId, 'Maw Payout Failure', `Return session ${sessionForPayout}: ${String(err?.message || err).slice(0, 800)}`);
       return null;
     });
-    await updateMawPanel(eventIdForPanel).catch(() => null);
     if (paid?.ok) {
-      await postMawReceiptMessages(paid).catch(() => null);
+      const receiptResult = await postMawReceiptMessages(paid).catch(async (err) => {
+        await postAdminLogByGuildId(guildId, 'Maw Receipt Failure', String(err?.message || err).slice(0, 800));
+        return null;
+      });
+      if (!receiptResult?.panelMoved) await updateMawPanel(eventIdForPanel).catch(() => null);
       await maybeCompleteMawGoal(eventIdForPanel).catch(async (err) => {
         await postAdminLogByGuildId(guildId, 'Maw Draw Failure', String(err?.message || err).slice(0, 800));
       });
+    } else {
+      await updateMawPanel(eventIdForPanel).catch(() => null);
     }
   }
   return result;
@@ -2793,7 +2848,14 @@ async function postMawReceiptMessages({ session, event, ticket }) {
     `Maw Ticket: #${ticket?.ticket_number || session.ticket_id}\n` +
     `Progress: ${event.received_count} / ${event.goal_count}\n` +
     `The Maw keeps what it chews.`;
-  await postMawFeed(event, { content }).catch(() => null);
+  const receiptMessage = await postMawFeed(event, { content }).catch(() => null);
+  const panelMoved = receiptMessage
+    ? await moveMawPanelBelowMessage(event, receiptMessage).catch(async (err) => {
+      await postAdminLogByGuildId(event.guild_id, 'Maw Panel Move Failure', String(err?.message || err).slice(0, 800));
+      return false;
+    })
+    : false;
+  return { receiptPosted: Boolean(receiptMessage), panelMoved };
 }
 
 async function maybeCompleteMawGoal(eventId) {
@@ -2966,8 +3028,11 @@ async function payPendingMawReturnSessions(limit = 10) {
     });
     if (result?.ok) {
       paid += 1;
-      await updateMawPanel(result.event.id).catch(() => null);
-      await postMawReceiptMessages(result).catch(() => null);
+      const receiptResult = await postMawReceiptMessages(result).catch(async (err) => {
+        await postAdminLogByGuildId(result.event?.guild_id || null, 'Maw Receipt Failure', String(err?.message || err).slice(0, 800));
+        return null;
+      });
+      if (!receiptResult?.panelMoved) await updateMawPanel(result.event.id).catch(() => null);
       await maybeCompleteMawGoal(result.event.id).catch(() => null);
     }
   }
@@ -3077,9 +3142,8 @@ async function notifyUnmatchedTransfer(guildId, transfer) {
 
 async function postMawFeed(event, payload) {
   const channel = await resolveFeedChannel(event);
-  if (!channel?.isTextBased?.()) return false;
-  await channel.send(payload);
-  return true;
+  if (!channel?.isTextBased?.()) return null;
+  return channel.send(payload);
 }
 
 async function resolveFeedChannel(event) {
