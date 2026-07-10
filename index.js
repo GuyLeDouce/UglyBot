@@ -7106,6 +7106,7 @@ mawEvent.initMawEvent({
   getWalletLinks,
   getOwnedTokenIdsForContractMany,
   getOwnedSquigsReloadedTokenIds,
+  localSquigImagePath,
   getMarketplaceSpendableBalance,
   getDripMemberCurrencyBalance,
   extractDripCurrencyAmountFromPayload,

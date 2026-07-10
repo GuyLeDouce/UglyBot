@@ -25,11 +25,13 @@ Module._load = function loadWithStubs(request, parent, isMain) {
       setDescription() { return this; }
       addFields() { return this; }
       addComponents() { return this; }
+      setImage() { return this; }
       toJSON() { return {}; }
     }
     return {
       SlashCommandBuilder: ChainableStub,
       EmbedBuilder: ChainableStub,
+      AttachmentBuilder: ChainableStub,
       ActionRowBuilder: ChainableStub,
       ButtonBuilder: ChainableStub,
       StringSelectMenuBuilder: ChainableStub,
@@ -52,6 +54,9 @@ const {
   filterEligiblePrizeSquigsForUser,
   normalizeAddress,
   getMawConfig,
+  sortMawSquigsForDisplay,
+  mawSquigPageCount,
+  mawSquigPageItems,
 } = require('../modules/mawEvent');
 
 assert.strictEqual(calculateMawOpenSlots({ goalCount: 40, receivedCount: 18, activeTransferWindows: 3 }), 19);
@@ -127,5 +132,25 @@ assert.deepStrictEqual(
   filterEligiblePrizeSquigsForUser(rerollPool, targetUser, targetWallets).map((row) => row.id),
   ['10']
 );
+
+assert.deepStrictEqual(
+  sortMawSquigsForDisplay([
+    { tokenId: '1' },
+    { tokenId: '26' },
+    { tokenId: '25' },
+    { tokenId: '4444' },
+    { tokenId: '100' },
+  ]).map((row) => row.tokenId),
+  ['4444', '100', '26', '25', '1']
+);
+
+const allSquigs = Array.from({ length: 4444 }, (_, i) => ({ tokenId: String(i + 1) }));
+const sortedSquigs = sortMawSquigsForDisplay(allSquigs);
+assert.strictEqual(sortedSquigs[0].tokenId, '4444');
+assert.strictEqual(sortedSquigs[sortedSquigs.length - 1].tokenId, '1');
+assert.strictEqual(mawSquigPageCount(sortedSquigs), 178);
+assert.strictEqual(mawSquigPageItems(sortedSquigs, 0)[0].tokenId, '4444');
+assert.strictEqual(mawSquigPageItems(sortedSquigs, 0).length, 25);
+assert.strictEqual(mawSquigPageItems(sortedSquigs, 177).at(-1).tokenId, '1');
 
 console.log('Maw logic tests passed.');

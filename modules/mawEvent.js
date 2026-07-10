@@ -1,8 +1,11 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { ethers } = require('ethers');
 const {
   SlashCommandBuilder,
   EmbedBuilder,
+  AttachmentBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -19,6 +22,11 @@ const PENDING_TTL_MS = 10 * 60 * 1000;
 const CLAIM_TTL_HOURS = 24;
 const DEFAULT_LOOKBACK_BLOCKS = 7200;
 const DEFAULT_BLOCK_CHUNK_SIZE = 2000;
+const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
+const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
+  path.join(__dirname, '..', 'images'),
+  path.join(__dirname, '..', '..', 'images'),
+];
 
 let deps = null;
 let mawProvider = null;
@@ -29,6 +37,7 @@ let receiptScanRunning = false;
 let expirationRunning = false;
 
 const pendingMawReviews = new Map();
+const pendingMawSelections = new Map();
 const activePrizeLocks = new Set();
 
 function initMawEvent(injectedDeps = {}) {
@@ -144,6 +153,151 @@ function advisoryLockKey(value) {
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function sortMawSquigsForDisplay(squigs = []) {
+  return [...(Array.isArray(squigs) ? squigs : [])].sort((a, b) => {
+    const tokenDiff =
+      safeNumber(b?.tokenId, Number.MIN_SAFE_INTEGER) -
+      safeNumber(a?.tokenId, Number.MIN_SAFE_INTEGER);
+    if (tokenDiff) return tokenDiff;
+    return String(b?.tokenId || '').localeCompare(String(a?.tokenId || ''), undefined, { numeric: true });
+  });
+}
+
+function mawSquigPageCount(squigs) {
+  return Math.max(1, Math.ceil((Array.isArray(squigs) ? squigs.length : 0) / MAX_SELECT_OPTIONS));
+}
+
+function clampMawSquigPage(squigs, page = 0) {
+  const maxPage = mawSquigPageCount(squigs) - 1;
+  return Math.max(0, Math.min(maxPage, Math.floor(Number(page) || 0)));
+}
+
+function mawSquigPageItems(squigs, page = 0) {
+  const safePage = clampMawSquigPage(squigs, page);
+  const start = safePage * MAX_SELECT_OPTIONS;
+  return (Array.isArray(squigs) ? squigs : []).slice(start, start + MAX_SELECT_OPTIONS);
+}
+
+function mawSquigPageLabel(squigs, page = 0) {
+  const safePage = clampMawSquigPage(squigs, page);
+  const total = Array.isArray(squigs) ? squigs.length : 0;
+  const start = total ? (safePage * MAX_SELECT_OPTIONS) + 1 : 0;
+  const end = Math.min(total, (safePage + 1) * MAX_SELECT_OPTIONS);
+  return `Showing ${start}-${end} of ${total}`;
+}
+
+function mawSelectionKey(guildId, userId, eventId) {
+  return `${String(guildId || '')}:${String(userId || '')}:${String(eventId || '')}`;
+}
+
+function cleanupPendingMawSelections(now = Date.now()) {
+  for (const [key, state] of pendingMawSelections.entries()) {
+    if (!state?.expiresAt || state.expiresAt < now) pendingMawSelections.delete(key);
+  }
+}
+
+function setPendingMawSelection({ guildId, userId, eventId, squigs, page = 0 }) {
+  cleanupPendingMawSelections();
+  const sorted = sortMawSquigsForDisplay(squigs);
+  const safePage = clampMawSquigPage(sorted, page);
+  pendingMawSelections.set(mawSelectionKey(guildId, userId, eventId), {
+    guildId: String(guildId),
+    userId: String(userId),
+    eventId: String(eventId),
+    squigs: sorted,
+    page: safePage,
+    expiresAt: Date.now() + PENDING_TTL_MS,
+  });
+  return { squigs: sorted, page: safePage };
+}
+
+function getPendingMawSelection(guildId, userId, eventId) {
+  const key = mawSelectionKey(guildId, userId, eventId);
+  const state = pendingMawSelections.get(key);
+  if (!state) return null;
+  if (state.expiresAt < Date.now()) {
+    pendingMawSelections.delete(key);
+    return null;
+  }
+  return state;
+}
+
+function buildMawSquigSelectContent(squigs, page = 0) {
+  const total = Array.isArray(squigs) ? squigs.length : 0;
+  const sortedNote = 'Highest token IDs appear first.';
+  if (total > MAX_SELECT_OPTIONS) {
+    return `Select a Squig to feed the Maw.\n${mawSquigPageLabel(squigs, page)} eligible Squigs. ${sortedNote}`;
+  }
+  return `Select a Squig to feed the Maw.\n${total} eligible Squig${total === 1 ? '' : 's'}. ${sortedNote}`;
+}
+
+function buildMawSquigPageButtons(eventId, userId, squigs, page = 0) {
+  const pageCount = mawSquigPageCount(squigs);
+  if (pageCount <= 1) return [];
+  const safePage = clampMawSquigPage(squigs, page);
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`maw_select_page:${eventId}:${userId}:${Math.max(0, safePage - 1)}`)
+        .setLabel('Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage <= 0),
+      new ButtonBuilder()
+        .setCustomId(`maw_select_page:${eventId}:${userId}:${Math.min(pageCount - 1, safePage + 1)}`)
+        .setLabel('Next')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage >= pageCount - 1)
+    ),
+  ];
+}
+
+function buildMawSquigSelectRows(eventId, userId, squigs, page = 0) {
+  const safePage = clampMawSquigPage(squigs, page);
+  const options = mawSquigPageItems(squigs, safePage).map((entry) => ({
+    label: `Squig ${formatToken(entry.tokenId)}`.slice(0, 100),
+    description: `Wallet ${shortAddress(entry.wallet)}`.slice(0, 100),
+    value: `${entry.wallet}:${entry.tokenId}`,
+  }));
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`maw_select_squig:${eventId}:${userId}`)
+        .setPlaceholder('Pick a Squig for the Maw')
+        .addOptions(options)
+    ),
+    ...buildMawSquigPageButtons(eventId, userId, squigs, safePage),
+  ];
+}
+
+function localMawSquigImagePath(tokenId) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return null;
+  if (typeof deps?.localSquigImagePath === 'function') {
+    const injectedPath = deps.localSquigImagePath(tid);
+    if (injectedPath) return injectedPath;
+  }
+  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
+    const candidate = path.join(imageDir, `${tid}.png`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function mawSquigImageAttachment(tokenId) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return { imageUrl: null, files: [] };
+  const imagePath = localMawSquigImagePath(tid);
+  if (imagePath) {
+    const name = `maw-squig-${tid}${path.extname(imagePath) || '.png'}`;
+    return {
+      imageUrl: `attachment://${name}`,
+      files: [new AttachmentBuilder(imagePath, { name })],
+    };
+  }
+  if (SQUIG_IMAGE_BASE_URL) return { imageUrl: `${SQUIG_IMAGE_BASE_URL}/${tid}`, files: [] };
+  return { imageUrl: null, files: [] };
 }
 
 function isAdmin(interaction) {
@@ -532,6 +686,7 @@ async function handleComponent(interaction) {
   if (!interaction.isButton?.()) return false;
 
   if (id.startsWith('maw_feed_start:')) return handleMawFeedStart(interaction);
+  if (id.startsWith('maw_select_page:')) return handleMawSquigPageButton(interaction);
   if (id.startsWith('maw_review_continue:')) return handleMawReviewContinue(interaction);
   if (id.startsWith('maw_confirm_start_timer:')) return handleMawConfirmStartTimer(interaction);
   if (id.startsWith('maw_cancel_session:')) return handleMawCancelSession(interaction);
@@ -970,21 +1125,16 @@ async function handleMawFeedStart(interaction) {
     return true;
   }
 
-  const options = eligible.slice(0, MAX_SELECT_OPTIONS).map((entry) => ({
-    label: `Squig ${formatToken(entry.tokenId)}`,
-    description: `Wallet ${shortAddress(entry.wallet)}`,
-    value: `${entry.wallet}:${entry.tokenId}`,
-  }));
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`maw_select_squig:${event.id}`)
-    .setPlaceholder('Pick a Squig for the Maw')
-    .addOptions(options);
-  const extra = eligible.length > MAX_SELECT_OPTIONS
-    ? `\nShowing ${MAX_SELECT_OPTIONS} of ${eligible.length} eligible Squigs.`
-    : '';
+  const selection = setPendingMawSelection({
+    guildId: interaction.guildId,
+    userId: interaction.user.id,
+    eventId: event.id,
+    squigs: eligible,
+    page: 0,
+  });
   await interaction.editReply({
-    content: `Select a Squig to feed the Maw.${extra}`,
-    components: [new ActionRowBuilder().addComponents(menu)],
+    content: buildMawSquigSelectContent(selection.squigs, selection.page),
+    components: buildMawSquigSelectRows(event.id, interaction.user.id, selection.squigs, selection.page),
   });
   return true;
 }
@@ -1032,22 +1182,56 @@ async function getEligibleMawSquigsForUser(guildId, userId, wallets, contractAdd
     ...sessionRows.rows.map((row) => String(row.token_id)),
   ]);
   const seen = new Set();
-  return owned
+  return sortMawSquigsForDisplay(owned
     .filter((entry) => {
       const token = String(entry.tokenId);
       if (excluded.has(token) || seen.has(token)) return false;
       seen.add(token);
       return true;
-    })
-    .sort((a, b) => safeNumber(a.tokenId, Number.MAX_SAFE_INTEGER) - safeNumber(b.tokenId, Number.MAX_SAFE_INTEGER));
+    }));
+}
+
+async function handleMawSquigPageButton(interaction) {
+  const match = String(interaction.customId || '').match(/^maw_select_page:([^:]+):(\d{16,22}):(\d+)$/);
+  if (!match) return false;
+  const [, eventId, ownerId, rawPage] = match;
+  if (String(interaction.user.id) !== ownerId) {
+    await interaction.reply({ content: 'This Maw Squig selector is not for you.', flags: EPHEMERAL });
+    return true;
+  }
+  const state = getPendingMawSelection(interaction.guildId, interaction.user.id, eventId);
+  if (!state?.squigs?.length) {
+    await interaction.update({ content: 'This Maw Squig selector expired. Press Feed the Maw again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  const event = await getOpenMawEvent(interaction.guildId);
+  if (!event || String(event.id) !== String(eventId)) {
+    pendingMawSelections.delete(mawSelectionKey(interaction.guildId, interaction.user.id, eventId));
+    await interaction.update({ content: 'The Maw is closed or this panel is stale.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  state.page = clampMawSquigPage(state.squigs, rawPage);
+  await interaction.update({
+    content: buildMawSquigSelectContent(state.squigs, state.page),
+    embeds: [],
+    components: buildMawSquigSelectRows(eventId, interaction.user.id, state.squigs, state.page),
+    attachments: [],
+  });
+  return true;
 }
 
 async function handleMawSquigSelect(interaction) {
-  const eventId = String(interaction.customId || '').split(':')[1] || '';
+  const idParts = String(interaction.customId || '').split(':');
+  const eventId = idParts[1] || '';
+  const ownerId = idParts[2] || '';
+  if (ownerId && String(interaction.user.id) !== ownerId) {
+    await interaction.reply({ content: 'This Maw Squig selector is not for you.', flags: EPHEMERAL });
+    return;
+  }
   const selected = String(interaction.values?.[0] || '');
   const match = selected.match(/^(0x[a-fA-F0-9]{40}):(.+)$/);
   if (!match) {
-    await interaction.update({ content: 'That Squig selection came out sideways. Try again.', components: [] });
+    await interaction.update({ content: 'That Squig selection came out sideways. Try again.', components: [], attachments: [] });
     return;
   }
   const sourceWallet = normalizeAddress(match[1]);
@@ -1076,6 +1260,7 @@ async function handleMawSquigSelect(interaction) {
   }
 
   const token = randomToken();
+  pendingMawSelections.delete(mawSelectionKey(interaction.guildId, interaction.user.id, event.id));
   pendingMawReviews.set(token, {
     guildId: String(interaction.guildId),
     userId: String(interaction.user.id),
@@ -1086,9 +1271,7 @@ async function handleMawSquigSelect(interaction) {
   });
 
   await interaction.update({
-    content: '',
-    embeds: [buildMawReviewEmbed(event, summary, tokenId)],
-    components: [buildMawReviewRow(token)],
+    ...buildMawReviewPayload(event, summary, tokenId, token),
   });
 }
 
@@ -1103,8 +1286,8 @@ function getPendingMawReview(token, userId) {
   return pending;
 }
 
-function buildMawReviewEmbed(event, summary, tokenId) {
-  return new EmbedBuilder()
+function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null) {
+  const embed = new EmbedBuilder()
     .setTitle('Review Maw Return')
     .setColor(0x8b1e3f)
     .setDescription('Returned Squigs become Malformed Marketplace inventory. They may be reused for future prizes, games, store rewards, onboarding, draws, or other malformed mechanics.')
@@ -1115,6 +1298,19 @@ function buildMawReviewEmbed(event, summary, tokenId) {
       { name: 'Current progress', value: `${event.received_count} / ${event.goal_count}`, inline: true },
       { name: 'Remaining open slots', value: String(summary.openSlots), inline: true }
     );
+  if (imageUrl) embed.setImage(imageUrl);
+  return embed;
+}
+
+function buildMawReviewPayload(event, summary, tokenId, token) {
+  const image = mawSquigImageAttachment(tokenId);
+  return {
+    content: '',
+    embeds: [buildMawReviewEmbed(event, summary, tokenId, image.imageUrl)],
+    components: [buildMawReviewRow(token)],
+    attachments: [],
+    ...(image.files.length ? { files: image.files } : {}),
+  };
 }
 
 function buildMawReviewRow(token) {
@@ -1134,12 +1330,12 @@ async function handleMawReviewContinue(interaction) {
   const token = String(interaction.customId || '').split(':')[1] || '';
   const pending = getPendingMawReview(token, interaction.user.id);
   if (!pending) {
-    await interaction.update({ content: 'This Maw review expired. Start again if the Maw is still hungry.', embeds: [], components: [] });
+    await interaction.update({ content: 'This Maw review expired. Start again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
     return true;
   }
   const event = await getMawEventById(pending.eventId);
   if (!event || event.status !== 'open') {
-    await interaction.update({ content: 'The Maw closed before the timer started.', embeds: [], components: [] });
+    await interaction.update({ content: 'The Maw closed before the timer started.', embeds: [], components: [], attachments: [] });
     return true;
   }
   const embed = new EmbedBuilder()
@@ -1165,14 +1361,14 @@ async function handleMawReviewContinue(interaction) {
       .setLabel('Cancel')
       .setStyle(ButtonStyle.Secondary)
   );
-  await interaction.update({ embeds: [embed], components: [row] });
+  await interaction.update({ embeds: [embed], components: [row], attachments: [] });
   return true;
 }
 
 async function handleMawPendingCancel(interaction) {
   const token = String(interaction.customId || '').split(':')[1] || '';
   pendingMawReviews.delete(token);
-  await interaction.update({ content: 'Cancelled. The Maw stopped drooling for now.', embeds: [], components: [] });
+  await interaction.update({ content: 'Cancelled. The Maw stopped drooling for now.', embeds: [], components: [], attachments: [] });
   return true;
 }
 
@@ -1180,13 +1376,13 @@ async function handleMawConfirmStartTimer(interaction) {
   const token = String(interaction.customId || '').split(':')[1] || '';
   const pending = getPendingMawReview(token, interaction.user.id);
   if (!pending) {
-    await interaction.update({ content: 'This Maw confirmation expired. Start again if the Maw is still hungry.', embeds: [], components: [] });
+    await interaction.update({ content: 'This Maw confirmation expired. Start again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
     return true;
   }
   await interaction.deferUpdate();
   const result = await createMawReturnSession(pending);
   if (!result.ok) {
-    await interaction.editReply({ content: result.reason || 'The Maw could not start that transfer window.', embeds: [], components: [] });
+    await interaction.editReply({ content: result.reason || 'The Maw could not start that transfer window.', embeds: [], components: [], attachments: [] });
     return true;
   }
   pendingMawReviews.delete(token);
@@ -1195,6 +1391,7 @@ async function handleMawConfirmStartTimer(interaction) {
     content: '',
     embeds: [buildMawSessionEmbed(result.event, result.session, getMawConfig())],
     components: [buildSessionActionRow(result.session)],
+    attachments: [],
   });
   return true;
 }
@@ -2933,6 +3130,9 @@ module.exports = {
   expirePrizeClaims,
   calculateMawOpenSlots,
   filterEligiblePrizeSquigsForUser,
+  sortMawSquigsForDisplay,
+  mawSquigPageCount,
+  mawSquigPageItems,
   normalizeAddress,
   getMawConfig,
   formatCharm,
