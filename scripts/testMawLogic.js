@@ -141,7 +141,7 @@ assert.deepStrictEqual(
     { tokenId: '9', quote: { averageRank: 20 } },
     { tokenId: '5', quote: { averageRank: 20 } },
   ]).map((row) => row.tokenId),
-  ['7', '9', '5']
+  ['9', '5', '7']
 );
 
 assert.deepStrictEqual(

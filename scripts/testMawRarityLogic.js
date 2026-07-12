@@ -148,10 +148,10 @@ const sorted = [
   { tokenId: '4', quote: { averageRank: 10 } },
   { tokenId: '9', quote: { averageRank: 200 } },
 ].sort((a, b) => {
-  const rankDiff = a.quote.averageRank - b.quote.averageRank;
+  const rankDiff = b.quote.averageRank - a.quote.averageRank;
   if (rankDiff) return rankDiff;
   return Number(b.tokenId) - Number(a.tokenId);
 });
-assert.deepStrictEqual(sorted.map((row) => row.tokenId), ['4', '9', '5']);
+assert.deepStrictEqual(sorted.map((row) => row.tokenId), ['9', '5', '4']);
 
 console.log('Maw rarity logic tests passed.');

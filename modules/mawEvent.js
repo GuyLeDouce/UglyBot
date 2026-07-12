@@ -291,7 +291,7 @@ function sortMawSquigsForDisplay(squigs = []) {
   return [...(Array.isArray(squigs) ? squigs : [])].sort((a, b) => {
     const rankA = safeNumber(a?.quote?.averageRank ?? a?.averageRank, Number.POSITIVE_INFINITY);
     const rankB = safeNumber(b?.quote?.averageRank ?? b?.averageRank, Number.POSITIVE_INFINITY);
-    if (rankA !== rankB) return rankA - rankB;
+    if (rankA !== rankB) return rankB - rankA;
     const tokenDiff =
       safeNumber(b?.tokenId, Number.MIN_SAFE_INTEGER) -
       safeNumber(a?.tokenId, Number.MIN_SAFE_INTEGER);
@@ -361,11 +361,74 @@ function getPendingMawSelection(guildId, userId, eventId) {
 
 function buildMawSquigSelectContent(squigs, page = 0) {
   const total = Array.isArray(squigs) ? squigs.length : 0;
-  const sortedNote = (Array.isArray(squigs) && squigs.some((entry) => entry?.quote)) ? 'Rarest eligible Squigs appear first.' : 'Highest token IDs appear first.';
+  const sortedNote = (Array.isArray(squigs) && squigs.some((entry) => entry?.quote))
+    ? 'Common eligible Squigs appear first; Legendary Squigs appear last.'
+    : 'Highest token IDs appear first.';
   if (total > MAX_SELECT_OPTIONS) {
     return `Select a Squig to feed the Maw.\n${mawSquigPageLabel(squigs, page)} eligible Squigs. ${sortedNote}`;
   }
   return `Select a Squig to feed the Maw.\n${total} eligible Squig${total === 1 ? '' : 's'}. ${sortedNote}`;
+}
+
+async function handleMawExplain(interaction) {
+  const eventId = String(interaction.customId || '').split(':')[1] || '';
+  let event = null;
+  if (eventId && eventId !== 'closed') {
+    event = await getMawEventById(eventId).catch(() => null);
+  }
+  const ttl = formatDurationMinutes(event?.session_ttl_minutes || getMawConfig().sessionTtlMinutes);
+  const embed = new EmbedBuilder()
+    .setTitle('WTF is Feed the Maw?')
+    .setColor(0x8b1e3f)
+    .setDescription(
+      `It’s a Squig return event.\n\n` +
+      `Pick an eligible Squig, review its exact reward, choose its fate, then confirm. Only after that do you get a ${ttl} timer to send that Squig to the official Maw wallet.`
+    )
+    .addFields(
+      {
+        name: 'What you get',
+        value:
+          `Your Squig’s Maw Rank determines:\n` +
+          `• Immediate $CHARM payout\n` +
+          `• Maw Ticket count\n` +
+          `• Jackpot contribution`,
+        inline: false,
+      },
+      {
+        name: 'Maw Rank',
+        value: 'Average of Overall Rank and Collection Rank. Higher number = more common.',
+        inline: false,
+      },
+      {
+        name: 'Rarity rewards',
+        value: buildMawRulesText(),
+        inline: false,
+      },
+      {
+        name: 'Choose its fate',
+        value:
+          `**Swallowed**: enters the digestion queue and will be permanently burned by an admin.\n` +
+          `**Regurgitated**: joins the Maw Pool for future prizes, games, giveaways, incentives, and rewards.\n\n` +
+          `Both choices get the same payout, tickets, jackpot contribution, and event progress.`,
+        inline: false,
+      },
+      {
+        name: 'Important',
+        value: `Do not send anything until the final confirmation screen starts your ${ttl} transfer window.`,
+        inline: false,
+      }
+    );
+  if (event) {
+    embed.addFields({
+      name: 'Current event',
+      value:
+        `${event.received_count} / ${event.goal_count} Squigs fed\n` +
+        `Current jackpot: ${formatCharm(event.jackpot_charm)} $CHARM`,
+      inline: false,
+    });
+  }
+  await interaction.reply({ embeds: [embed], flags: EPHEMERAL });
+  return true;
 }
 
 function buildMawSquigPageButtons(eventId, userId, squigs, page = 0) {
@@ -388,10 +451,34 @@ function buildMawSquigPageButtons(eventId, userId, squigs, page = 0) {
   ];
 }
 
-function buildMawSquigSelectRows(eventId, userId, squigs, page = 0) {
+function buildMawReviewSquigPageButtons(token, squigs, page = 0) {
+  const pageCount = mawSquigPageCount(squigs);
+  if (pageCount <= 1) return [];
   const safePage = clampMawSquigPage(squigs, page);
-  const options = mawSquigPageItems(squigs, safePage).map((entry) => {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`maw_review_select_page:${token}:${Math.max(0, safePage - 1)}`)
+        .setLabel('Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage <= 0),
+      new ButtonBuilder()
+        .setCustomId(`maw_review_select_page:${token}:${Math.min(pageCount - 1, safePage + 1)}`)
+        .setLabel('Next')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage >= pageCount - 1)
+    ),
+  ];
+}
+
+function buildMawSquigSelectRows(eventId, userId, squigs, page = 0, selectOptions = {}) {
+  const safePage = clampMawSquigPage(squigs, page);
+  const selectedTokenId = String(selectOptions.selectedTokenId || '').trim();
+  const selectedWallet = normalizeAddress(selectOptions.selectedWallet || '');
+  const menuOptions = mawSquigPageItems(squigs, safePage).map((entry) => {
     const quote = entry.quote || null;
+    const entryWallet = normalizeAddress(entry.wallet || '');
+    const isSelected = selectedTokenId && selectedWallet && String(entry.tokenId) === selectedTokenId && entryWallet === selectedWallet;
     return {
       label: quote
         ? `${formatToken(entry.tokenId)} • ${quote.rarityLabel}`.slice(0, 100)
@@ -400,16 +487,20 @@ function buildMawSquigSelectRows(eventId, userId, squigs, page = 0) {
         ? `Rank ${formatMawAverageRank(quote.averageRank)} • ${formatCharm(quote.payoutCharm)} CHARM • ${pluralizeMawTickets(quote.ticketCount)}`.slice(0, 100)
         : `Wallet ${shortAddress(entry.wallet)}`.slice(0, 100),
       value: `${entry.wallet}:${entry.tokenId}`,
+      default: Boolean(isSelected),
     };
   });
+  const pageRows = selectOptions.reviewToken
+    ? buildMawReviewSquigPageButtons(selectOptions.reviewToken, squigs, safePage)
+    : buildMawSquigPageButtons(eventId, userId, squigs, safePage);
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`maw_select_squig:${eventId}:${userId}`)
-        .setPlaceholder('Pick a Squig for the Maw')
-        .addOptions(options)
+        .setPlaceholder(selectOptions.placeholder || 'Pick a Squig for the Maw')
+        .addOptions(menuOptions)
     ),
-    ...buildMawSquigPageButtons(eventId, userId, squigs, safePage),
+    ...pageRows,
   ];
 }
 
@@ -959,8 +1050,10 @@ async function handleComponent(interaction) {
   }
   if (!interaction.isButton?.()) return false;
 
+  if (id.startsWith('maw_explain:')) return handleMawExplain(interaction);
   if (id.startsWith('maw_feed_start:')) return handleMawFeedStart(interaction);
   if (id.startsWith('maw_select_page:')) return handleMawSquigPageButton(interaction);
+  if (id.startsWith('maw_review_select_page:')) return handleMawReviewSquigPageButton(interaction);
   if (id.startsWith('maw_review_continue:')) return handleMawReviewContinue(interaction);
   if (id.startsWith('maw_fate_select:')) return handleMawFateSelect(interaction);
   if (id.startsWith('maw_confirm_start_timer:')) return handleMawConfirmStartTimer(interaction);
@@ -1539,13 +1632,18 @@ function buildMawPanelPayload(summary = null) {
             .setCustomId('maw_feed_start:closed')
             .setLabel('Feed the Maw')
             .setStyle(ButtonStyle.Danger)
-            .setDisabled(true)
+            .setDisabled(true),
+          new ButtonBuilder()
+            .setCustomId('maw_explain:closed')
+            .setLabel('WTF is this?')
+            .setStyle(ButtonStyle.Secondary)
         ),
       ],
     };
   }
 
   const jackpot = formatCharm(event.jackpot_charm);
+  const transferWindow = formatDurationMinutes(event.session_ttl_minutes);
   const embed = new EmbedBuilder()
     .setTitle('THE MAW IS HUNGRY')
     .setColor(event.draw_completed ? 0x2f9e44 : 0x8b1e3f)
@@ -1553,48 +1651,26 @@ function buildMawPanelPayload(summary = null) {
   if (isRarityMawEvent(event)) {
     embed
       .setDescription(
-        `Feed an eligible Squig to the Maw.\n\n` +
-        `A Squig’s Maw Rank determines:\n` +
-        `• Your immediate $CHARM payout\n` +
-        `• The number of Maw Tickets you receive\n` +
-        `• How much $CHARM is added to the jackpot\n\n` +
-        `Maw Rank = average of Overall Rank and Collection Rank`
+        `Feed an eligible Squig.\n\n` +
+        `Its Maw Rank sets your $CHARM payout, Maw Tickets, and jackpot boost.\n` +
+        `You’ll choose **Swallowed** or **Regurgitated** before the ${transferWindow} transfer timer starts.`
       )
       .addFields(
-        { name: 'RARITY REWARDS', value: buildMawRulesText(), inline: false },
-        {
-          name: 'CHOOSE ITS FATE',
-          value:
-            `**Swallowed**\nThe Squig enters the Maw’s digestion queue and will be permanently burned by an admin.\n\n` +
-            `**Regurgitated**\nThe Squig joins the Maw Pool for future games, prizes, giveaways, incentives, and community rewards.\n\n` +
-            `Both choices receive the same rarity-based $CHARM payout, Maw Tickets, and jackpot contribution.`,
-          inline: false,
-        },
-        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
-        { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
-        { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
-        { name: 'CURRENT JACKPOT', value: `${jackpot} $CHARM`, inline: true },
-        { name: 'STARTING JACKPOT', value: `${formatCharm(event.jackpot_base_charm)} $CHARM`, inline: true },
-        { name: 'CONTRIBUTIONS RECEIVED', value: `${formatCharm(event.jackpot_contributed_charm)} $CHARM`, inline: true },
-        { name: 'TOTAL TICKETS ISSUED', value: String(summary.totalTicketCount || event.total_ticket_count || 0), inline: true },
-        { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
-        { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
+        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} fed\n${summary.openSlots} open spots`, inline: true },
+        { name: 'JACKPOT', value: `${jackpot} $CHARM\n+${formatCharm(event.jackpot_contributed_charm)} contributed`, inline: true },
+        { name: 'TICKETS ISSUED', value: String(summary.totalTicketCount || event.total_ticket_count || 0), inline: true }
       );
   } else {
     const reward = formatCharm(event.return_reward_charm);
     embed
       .setDescription(
-        `Feed an eligible Squig to the Maw.\n\n` +
-        `This is a legacy flat-reward Maw event. Once the transfer is received and verified, you earn ${reward} $CHARM and 1 Maw Ticket.`
+        `Feed an eligible Squig.\n\n` +
+        `This legacy Maw event pays ${reward} $CHARM and 1 Maw Ticket after the transfer is received and verified.`
       )
       .addFields(
-        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
-        { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
-        { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
-        { name: 'REWARD', value: `${reward} $CHARM per accepted Squig`, inline: true },
-        { name: 'JACKPOT', value: `${jackpot} $CHARM\n1 ticket earned per accepted Squig`, inline: true },
-        { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
-        { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
+        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} fed\n${summary.openSlots} open spots`, inline: true },
+        { name: 'JACKPOT', value: `${jackpot} $CHARM`, inline: true },
+        { name: 'TICKETS ISSUED', value: String(summary.totalTicketCount || event.total_ticket_count || 0), inline: true }
       );
   }
   if (event.draw_completed) {
@@ -1609,7 +1685,11 @@ function buildMawPanelPayload(summary = null) {
           .setCustomId(`maw_feed_start:${event.id}`)
           .setLabel('Feed the Maw')
           .setStyle(ButtonStyle.Danger)
-          .setDisabled(Boolean(event.draw_completed) || summary.openSlots <= 0)
+          .setDisabled(Boolean(event.draw_completed) || summary.openSlots <= 0),
+        new ButtonBuilder()
+          .setCustomId(`maw_explain:${event.id}`)
+          .setLabel('WTF is this?')
+          .setStyle(ButtonStyle.Secondary)
       ),
     ],
   };
@@ -1847,6 +1927,33 @@ async function handleMawSquigPageButton(interaction) {
   return true;
 }
 
+async function handleMawReviewSquigPageButton(interaction) {
+  const match = String(interaction.customId || '').match(/^maw_review_select_page:([^:]+):(\d+)$/);
+  if (!match) return false;
+  const [, token, rawPage] = match;
+  const pending = getPendingMawReview(token, interaction.user.id);
+  if (!pending) {
+    await interaction.update({ content: 'This Maw review expired. Start again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  const event = await getMawEventById(pending.eventId);
+  if (!event || event.status !== 'open') {
+    await interaction.update({ content: 'The Maw closed before the timer started.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  const selectionState = getPendingMawSelection(interaction.guildId, interaction.user.id, event.id);
+  if (!selectionState?.squigs?.length) {
+    await interaction.update({ content: 'This Maw Squig selector expired. Press Feed the Maw again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  selectionState.page = clampMawSquigPage(selectionState.squigs, rawPage);
+  const summary = await getMawEventSummary(event);
+  await interaction.update({
+    ...buildMawReviewPayload(event, summary, pending.tokenId, token, pending.quote, selectionState, interaction.user.id, pending.sourceWallet),
+  });
+  return true;
+}
+
 async function handleMawSquigSelect(interaction) {
   const idParts = String(interaction.customId || '').split(':');
   const eventId = idParts[1] || '';
@@ -1909,7 +2016,6 @@ async function handleMawSquigSelect(interaction) {
   }
 
   const token = randomToken();
-  pendingMawSelections.delete(mawSelectionKey(interaction.guildId, interaction.user.id, event.id));
   pendingMawReviews.set(token, {
     guildId: String(interaction.guildId),
     userId: String(interaction.user.id),
@@ -1921,7 +2027,7 @@ async function handleMawSquigSelect(interaction) {
   });
 
   await interaction.update({
-    ...buildMawReviewPayload(event, summary, tokenId, token, quote),
+    ...buildMawReviewPayload(event, summary, tokenId, token, quote, selectionState, interaction.user.id, sourceWallet),
   });
 }
 
@@ -1968,12 +2074,20 @@ function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null, quote = n
   return embed;
 }
 
-function buildMawReviewPayload(event, summary, tokenId, token, quote = null) {
+function buildMawReviewPayload(event, summary, tokenId, token, quote = null, selectionState = null, userId = null, sourceWallet = null) {
   const image = mawSquigImageAttachment(tokenId);
+  const selectRows = selectionState?.squigs?.length > 1
+    ? buildMawSquigSelectRows(event.id, userId || selectionState.userId, selectionState.squigs, selectionState.page, {
+        placeholder: 'Choose a different Squig',
+        selectedTokenId: tokenId,
+        selectedWallet: sourceWallet,
+        reviewToken: token,
+      })
+    : [];
   return {
     content: '',
     embeds: [buildMawReviewEmbed(event, summary, tokenId, image.imageUrl, quote)],
-    components: [buildMawReviewRow(token)],
+    components: [...selectRows, buildMawReviewRow(token)],
     attachments: [],
     ...(image.files.length ? { files: image.files } : {}),
   };
@@ -2010,6 +2124,7 @@ async function handleMawReviewContinue(interaction) {
     return true;
   }
   pending.reviewToken = token;
+  pendingMawSelections.delete(mawSelectionKey(interaction.guildId, interaction.user.id, event.id));
   await interaction.update(buildMawFateSelectionPayload(event, pending, token));
   return true;
 }
