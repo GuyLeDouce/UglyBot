@@ -786,6 +786,60 @@ async function getWalletLinks(guildId, discordId) {
   return rows;
 }
 
+async function getUserDripIdForDisplay(guildId, discordId) {
+  const links = await getWalletLinks(guildId, discordId);
+  const storedIds = collectUniqueDripMemberIds(links.map((x) => x?.drip_member_id));
+  if (storedIds.length) {
+    return {
+      dripMemberId: storedIds[0],
+      additionalDripMemberIds: storedIds.slice(1),
+      source: 'stored',
+      reason: null,
+    };
+  }
+
+  const settings = await getGuildSettings(guildId);
+  if (!settings?.drip_api_key || !settings?.drip_realm_id) {
+    return {
+      dripMemberId: null,
+      additionalDripMemberIds: [],
+      source: null,
+      reason: 'No DRIP ID is stored for your account yet, and DRIP lookup is not configured for this server.',
+    };
+  }
+
+  try {
+    const resolved = await resolveDripMemberForDiscordUser(
+      settings.drip_realm_id,
+      discordId,
+      null,
+      settings
+    );
+    const resolvedIds = collectDripMemberIdCandidates(resolved?.member || null);
+    if (resolvedIds.length) {
+      return {
+        dripMemberId: resolvedIds[0],
+        additionalDripMemberIds: resolvedIds.slice(1),
+        source: resolved?.source || 'drip',
+        reason: null,
+      };
+    }
+    return {
+      dripMemberId: null,
+      additionalDripMemberIds: [],
+      source: null,
+      reason: 'I could not find a DRIP ID for your Discord account in this server\'s DRIP realm.',
+    };
+  } catch (err) {
+    return {
+      dripMemberId: null,
+      additionalDripMemberIds: [],
+      source: null,
+      reason: `DRIP lookup is temporarily unavailable: ${String(err?.message || err || '').slice(0, 180)}`,
+    };
+  }
+}
+
 async function getWalletScanRows(guildId) {
   const { rows } = await holdersPool.query(
     `SELECT discord_id, wallet_address, verified, drip_member_id, created_at, updated_at
@@ -913,6 +967,10 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('launch-rewards')
       .setDescription('Post the public holder rewards menu in this channel')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('dripid')
+      .setDescription('Privately show your DRIP member ID for easy copy/paste')
       .toJSON(),
     new SlashCommandBuilder()
       .setName('setup-verification')
@@ -7168,6 +7226,36 @@ client.on('interactionCreate', async (interaction) => {
           components: [rewardsButtons()],
         });
         await interaction.reply({ content: 'Rewards menu launched.', flags: 64 });
+        return;
+      }
+
+      if (interaction.commandName === 'dripid') {
+        await interaction.deferReply({ flags: 64 });
+        const result = await getUserDripIdForDisplay(interaction.guild.id, interaction.user.id);
+
+        if (!result.dripMemberId) {
+          await interaction.editReply({
+            content:
+              `${result.reason || 'No DRIP ID was found for your account.'}\n\n` +
+              `If you expected one, connect or verify your wallet through DRIP and then try \`/dripid\` again.`
+          });
+          return;
+        }
+
+        const extraLine = result.additionalDripMemberIds?.length
+          ? `\nAdditional stored DRIP IDs found:\n${result.additionalDripMemberIds.map((id) => `\`${id}\``).join('\n')}`
+          : '';
+        const sourceLine = result.source === 'stored'
+          ? 'Source: stored wallet link.'
+          : 'Source: DRIP lookup for your Discord account.';
+
+        await interaction.editReply({
+          content:
+            `Your DRIP ID:\n` +
+            `\`\`\`\n${result.dripMemberId}\n\`\`\`\n` +
+            `Copy this value exactly when asked for your DRIP ID.\n` +
+            `${sourceLine}${extraLine}`
+        });
         return;
       }
 
