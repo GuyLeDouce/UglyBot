@@ -9,7 +9,10 @@
     "build:traits": "node scripts/buildTraitCounts.js",
     "test:rewards": "node scripts/testRewardLogic.js",
     "test:marketplace": "node scripts/testMarketplaceLogic.js",
-    "test:maw": "node scripts/testMawLogic.js"
+    "test:maw": "node scripts/testMawLogic.js",
+    "test:maw-rarity": "node scripts/testMawRarityLogic.js",
+    "test:maw-disposition": "node scripts/testMawDispositionLogic.js",
+    "sync:maw-ranks": "node scripts/syncMawRankings.js"
   },
   "engines": {
     "node": "20.x"

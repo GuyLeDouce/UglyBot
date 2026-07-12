@@ -10,18 +10,53 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   PermissionFlagsBits,
 } = require('discord.js');
 const marketplaceCommand = require('./marketplaceCommand');
+const {
+  MAW_REWARD_RULES_VERSION,
+  MAW_RARITY_RULES,
+  loadMawRankingIndex,
+  getMawRewardQuote,
+  formatMawAverageRank,
+  formatMawRarityLabel,
+  snapshotMawRewardQuote,
+  resolveMawSessionRewardSnapshot,
+  pluralizeMawTickets,
+  formatMawTicketRange,
+  summarizeMawTicketRows,
+} = require('./mawRarity');
+const {
+  MAW_DISPOSITIONS,
+  MAW_DIGESTION_STATUS,
+  MAW_INVENTORY_STATUS,
+  DEFAULT_DIGESTION_ADMIN_CHANNEL_ID,
+  DEFAULT_DIGESTION_RECEIPT_CHANNEL_ID,
+  ZERO_ADDRESS,
+  normalizeDisposition,
+  isValidMawDisposition,
+  formatMawDispositionLabel,
+  mawDispositionInventoryStatus,
+  mawDispositionDigestionStatus,
+  isRegurgitatedAvailableInventory,
+  parseBurnTransactionInput,
+  parseAcceptedBurnAddresses,
+  digestionStatusText,
+} = require('./mawDisposition');
 
 const DEFAULT_SQUIG_CONTRACT = '0x8c9a02c0585200c4c65608df6b8def543d33792a';
 const MAW_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const ERC721_OWNER_ABI = ['function ownerOf(uint256 tokenId) view returns (address)'];
 const EPHEMERAL = 64;
 const MAX_SELECT_OPTIONS = 25;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const CLAIM_TTL_HOURS = 24;
 const DEFAULT_LOOKBACK_BLOCKS = 7200;
 const DEFAULT_BLOCK_CHUNK_SIZE = 2000;
+const MAW_RANKING_FAILURE_MESSAGE = 'The Maw could not determine the value of that Squig. Nothing has been transferred and no timer was started. An admin has been notified.';
 const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const MAW_PANEL_IMAGE_URL = 'https://i.imgur.com/tjahRQz.png';
 const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
@@ -63,6 +98,10 @@ function intEnv(name, fallback, min = 0) {
   return Math.max(min, Math.floor(parsed));
 }
 
+function hasEnvValue(name) {
+  return String(process.env[name] ?? '').trim() !== '';
+}
+
 function normalizeAddress(value) {
   const text = String(value || '').trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(text)) return null;
@@ -94,12 +133,16 @@ function formatDurationMinutes(minutes) {
 }
 
 function getMawConfig() {
+  const jackpotBaseCharm = hasEnvValue('MAW_JACKPOT_BASE_CHARM')
+    ? intEnv('MAW_JACKPOT_BASE_CHARM', 0, 0)
+    : (hasEnvValue('MAW_JACKPOT_CHARM') ? intEnv('MAW_JACKPOT_CHARM', 0, 0) : 0);
   return {
     mawWalletAddress: normalizeAddress(process.env.MAW_WALLET_ADDRESS),
     rawMawWalletAddress: String(process.env.MAW_WALLET_ADDRESS || '').trim(),
     squigContract: normalizeAddress(process.env.MAW_SQUIG_CONTRACT || DEFAULT_SQUIG_CONTRACT) || DEFAULT_SQUIG_CONTRACT,
     goalCount: intEnv('MAW_GOAL_COUNT', 20, 1),
     returnRewardCharm: intEnv('MAW_RETURN_REWARD_CHARM', 12500, 0),
+    jackpotBaseCharm,
     jackpotCharm: intEnv('MAW_JACKPOT_CHARM', 35000, 0),
     sessionTtlMinutes: intEnv('MAW_SESSION_TTL_MINUTES', 20, 1),
     prizeCashoutCharm: intEnv('MAW_PRIZE_CASHOUT_CHARM', 8000, 0),
@@ -109,6 +152,12 @@ function getMawConfig() {
     minConfirmations: intEnv('MAW_MIN_CONFIRMATIONS', 2, 0),
     feedChannelId: String(process.env.MAW_FEED_CHANNEL_ID || '').trim() || null,
     adminChannelId: String(process.env.MAW_ADMIN_CHANNEL_ID || '').trim() || null,
+    digestionAdminChannelId: String(process.env.MAW_DIGESTION_ADMIN_CHANNEL_ID || DEFAULT_DIGESTION_ADMIN_CHANNEL_ID).trim(),
+    digestionReceiptChannelId: String(process.env.MAW_DIGESTION_RECEIPT_CHANNEL_ID || DEFAULT_DIGESTION_RECEIPT_CHANNEL_ID).trim(),
+    digestedImageUrl: String(process.env.MAW_DIGESTED_IMAGE_URL || '').trim() || null,
+    digestedImagePath: String(process.env.MAW_DIGESTED_IMAGE_PATH || '').trim() || null,
+    acceptedBurnAddresses: parseAcceptedBurnAddresses(process.env.MAW_ACCEPTED_BURN_ADDRESSES, normalizeAddress),
+    explorerBaseUrl: String(process.env.ETH_EXPLORER_BASE_URL || process.env.ETHERSCAN_BASE_URL || 'https://etherscan.io').replace(/\/+$/, ''),
   };
 }
 
@@ -129,7 +178,7 @@ function filterEligiblePrizeSquigsForUser(poolRows = [], targetUserId, targetWal
   const targetId = String(targetUserId || '');
   return (Array.isArray(poolRows) ? poolRows : []).filter((row) => {
     if (!row) return false;
-    if (String(row.status || 'available') !== 'available') return false;
+    if (!isRegurgitatedAvailableInventory(row)) return false;
     if (excludedIds.has(String(row.id))) return false;
     if (String(row.original_sender_discord_id || '') === targetId) return false;
     const originalWallet = normalizeAddress(row.original_sender_wallet);
@@ -156,8 +205,93 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function isRarityMawEvent(event) {
+  return String(event?.reward_model || '') === MAW_REWARD_RULES_VERSION;
+}
+
+function shortHash(value) {
+  const text = String(value || '');
+  if (!text) return 'unavailable';
+  if (text.startsWith('sha256:') && text.length > 22) return `${text.slice(0, 19)}...${text.slice(-8)}`;
+  return text.length > 28 ? `${text.slice(0, 20)}...${text.slice(-8)}` : text;
+}
+
+function formatSignedCharm(amount) {
+  const value = Math.floor(Number(amount) || 0);
+  return `${value >= 0 ? '+' : '-'}${formatCharm(Math.abs(value))}`;
+}
+
+function truncateField(value, limit = 1024) {
+  const text = String(value || '');
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 12))}\n...truncated`;
+}
+
+function getSessionRarityLabel(session) {
+  return session?.rarity_tier ? formatMawRarityLabel(session.rarity_tier) : 'Legacy';
+}
+
+function getSessionDisposition(session) {
+  return normalizeDisposition(session?.squig_disposition || session?.disposition);
+}
+
+function getSessionDispositionLabel(session) {
+  return formatMawDispositionLabel(getSessionDisposition(session));
+}
+
+function formatSessionMawRank(session) {
+  if (session?.average_rank == null) return 'Legacy flat event';
+  const rank = formatMawAverageRank(session.average_rank);
+  if (session.overall_rank != null && session.collection_rank != null) {
+    return `${rank}\nOverall ${formatMawAverageRank(session.overall_rank)} • Collection ${formatMawAverageRank(session.collection_rank)}`;
+  }
+  return rank;
+}
+
+function buildExplorerTxUrl(txHash, config = getMawConfig()) {
+  const parsed = parseBurnTransactionInput(txHash, config.explorerBaseUrl);
+  return parsed.url;
+}
+
+function inboundTxUrl(sessionOrTransfer, config = getMawConfig()) {
+  const hash = sessionOrTransfer?.received_tx_hash || sessionOrTransfer?.txHash || sessionOrTransfer?.tx_hash;
+  if (!hash) return null;
+  try {
+    return buildExplorerTxUrl(hash, config);
+  } catch {
+    return null;
+  }
+}
+
+function poolEligibilityWhere(alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  return `COALESCE(${prefix}disposition, 'regurgitated') = 'regurgitated' AND COALESCE(${prefix}inventory_status, ${prefix}status, 'available') = 'available'`;
+}
+
+function formatAdminMessageLink(guildId, channelId, messageId) {
+  if (!guildId || !channelId || !messageId) return 'Not posted';
+  return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
+}
+
+function createDigestionLogPrefix(session) {
+  return `Squig ${formatToken(session?.token_id)} session ${session?.id || 'unknown'}`;
+}
+
+function buildMawRulesText() {
+  return [
+    'Legendary: Better than Rank 32 • 800,000 • 20 tickets • +100,000 jackpot',
+    'Epic: Rank 32–443 • 187,500 • 10 tickets • +25,000 jackpot',
+    'Rare: Rank 444–1110 • 67,500 • 5 tickets • +5,000 jackpot',
+    'Uncommon: Rank 1111–2276 • 22,500 • 2 tickets • +2,000 jackpot',
+    'Common: Rank 2277+ • 15,000 • 1 ticket • +1,000 jackpot',
+  ].join('\n');
+}
+
 function sortMawSquigsForDisplay(squigs = []) {
   return [...(Array.isArray(squigs) ? squigs : [])].sort((a, b) => {
+    const rankA = safeNumber(a?.quote?.averageRank ?? a?.averageRank, Number.POSITIVE_INFINITY);
+    const rankB = safeNumber(b?.quote?.averageRank ?? b?.averageRank, Number.POSITIVE_INFINITY);
+    if (rankA !== rankB) return rankA - rankB;
     const tokenDiff =
       safeNumber(b?.tokenId, Number.MIN_SAFE_INTEGER) -
       safeNumber(a?.tokenId, Number.MIN_SAFE_INTEGER);
@@ -227,7 +361,7 @@ function getPendingMawSelection(guildId, userId, eventId) {
 
 function buildMawSquigSelectContent(squigs, page = 0) {
   const total = Array.isArray(squigs) ? squigs.length : 0;
-  const sortedNote = 'Highest token IDs appear first.';
+  const sortedNote = (Array.isArray(squigs) && squigs.some((entry) => entry?.quote)) ? 'Rarest eligible Squigs appear first.' : 'Highest token IDs appear first.';
   if (total > MAX_SELECT_OPTIONS) {
     return `Select a Squig to feed the Maw.\n${mawSquigPageLabel(squigs, page)} eligible Squigs. ${sortedNote}`;
   }
@@ -256,11 +390,18 @@ function buildMawSquigPageButtons(eventId, userId, squigs, page = 0) {
 
 function buildMawSquigSelectRows(eventId, userId, squigs, page = 0) {
   const safePage = clampMawSquigPage(squigs, page);
-  const options = mawSquigPageItems(squigs, safePage).map((entry) => ({
-    label: `Squig ${formatToken(entry.tokenId)}`.slice(0, 100),
-    description: `Wallet ${shortAddress(entry.wallet)}`.slice(0, 100),
-    value: `${entry.wallet}:${entry.tokenId}`,
-  }));
+  const options = mawSquigPageItems(squigs, safePage).map((entry) => {
+    const quote = entry.quote || null;
+    return {
+      label: quote
+        ? `${formatToken(entry.tokenId)} • ${quote.rarityLabel}`.slice(0, 100)
+        : `Squig ${formatToken(entry.tokenId)}`.slice(0, 100),
+      description: quote
+        ? `Rank ${formatMawAverageRank(quote.averageRank)} • ${formatCharm(quote.payoutCharm)} CHARM • ${pluralizeMawTickets(quote.ticketCount)}`.slice(0, 100)
+        : `Wallet ${shortAddress(entry.wallet)}`.slice(0, 100),
+      value: `${entry.wallet}:${entry.tokenId}`,
+    };
+  });
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
@@ -317,6 +458,13 @@ async function ensureMawTables(poolOrDeps = null) {
       goal_count INT NOT NULL,
       return_reward_charm NUMERIC NOT NULL,
       jackpot_charm NUMERIC NOT NULL,
+      reward_model TEXT NOT NULL DEFAULT 'flat_v1',
+      reward_rules_version TEXT,
+      reward_rules_json JSONB,
+      ranking_source_hash TEXT,
+      jackpot_base_charm NUMERIC NOT NULL DEFAULT 0,
+      jackpot_contributed_charm NUMERIC NOT NULL DEFAULT 0,
+      total_ticket_count INT NOT NULL DEFAULT 0,
       session_ttl_minutes INT NOT NULL DEFAULT 20,
       received_count INT NOT NULL DEFAULT 0,
       panel_channel_id TEXT,
@@ -340,7 +488,14 @@ async function ensureMawTables(poolOrDeps = null) {
     ['status', "TEXT NOT NULL DEFAULT 'draft'"],
     ['goal_count', 'INT NOT NULL DEFAULT 20'],
     ['return_reward_charm', 'NUMERIC NOT NULL DEFAULT 12500'],
-    ['jackpot_charm', 'NUMERIC NOT NULL DEFAULT 35000'],
+    ['jackpot_charm', 'NUMERIC NOT NULL DEFAULT 0'],
+    ['reward_model', "TEXT NOT NULL DEFAULT 'flat_v1'"],
+    ['reward_rules_version', 'TEXT'],
+    ['reward_rules_json', 'JSONB'],
+    ['ranking_source_hash', 'TEXT'],
+    ['jackpot_base_charm', 'NUMERIC NOT NULL DEFAULT 0'],
+    ['jackpot_contributed_charm', 'NUMERIC NOT NULL DEFAULT 0'],
+    ['total_ticket_count', 'INT NOT NULL DEFAULT 0'],
     ['session_ttl_minutes', 'INT NOT NULL DEFAULT 20'],
     ['received_count', 'INT NOT NULL DEFAULT 0'],
     ['panel_channel_id', 'TEXT'],
@@ -378,6 +533,24 @@ async function ensureMawTables(poolOrDeps = null) {
       payout_status TEXT,
       payout_reference TEXT,
       ticket_id BIGINT,
+      overall_rank NUMERIC,
+      collection_rank NUMERIC,
+      average_rank NUMERIC(12,2),
+      rarity_tier TEXT,
+      ticket_count INT NOT NULL DEFAULT 1,
+      jackpot_contribution_charm NUMERIC NOT NULL DEFAULT 0,
+      reward_rules_version TEXT,
+      ranking_source_hash TEXT,
+      squig_disposition TEXT,
+      digestion_status TEXT,
+      admin_digestion_message_id TEXT,
+      burn_transaction_url TEXT,
+      burn_transaction_hash TEXT,
+      burn_confirmed_by TEXT,
+      burn_confirmed_at TIMESTAMPTZ,
+      digestion_receipt_message_id TEXT,
+      digestion_receipt_posted_at TIMESTAMPTZ,
+      digestion_receipt_error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -398,6 +571,24 @@ async function ensureMawTables(poolOrDeps = null) {
     ['payout_status', 'TEXT'],
     ['payout_reference', 'TEXT'],
     ['ticket_id', 'BIGINT'],
+    ['overall_rank', 'NUMERIC'],
+    ['collection_rank', 'NUMERIC'],
+    ['average_rank', 'NUMERIC(12,2)'],
+    ['rarity_tier', 'TEXT'],
+    ['ticket_count', 'INT NOT NULL DEFAULT 1'],
+    ['jackpot_contribution_charm', 'NUMERIC NOT NULL DEFAULT 0'],
+    ['reward_rules_version', 'TEXT'],
+    ['ranking_source_hash', 'TEXT'],
+    ['squig_disposition', 'TEXT'],
+    ['digestion_status', 'TEXT'],
+    ['admin_digestion_message_id', 'TEXT'],
+    ['burn_transaction_url', 'TEXT'],
+    ['burn_transaction_hash', 'TEXT'],
+    ['burn_confirmed_by', 'TEXT'],
+    ['burn_confirmed_at', 'TIMESTAMPTZ'],
+    ['digestion_receipt_message_id', 'TEXT'],
+    ['digestion_receipt_posted_at', 'TIMESTAMPTZ'],
+    ['digestion_receipt_error', 'TEXT'],
     ['created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
     ['updated_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
   ]);
@@ -405,6 +596,19 @@ async function ensureMawTables(poolOrDeps = null) {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_return_sessions_active_user_uidx ON maw_return_sessions (guild_id, discord_user_id) WHERE status = 'awaiting_transfer';`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_return_sessions_active_token_uidx ON maw_return_sessions (guild_id, contract_address, token_id) WHERE status = 'awaiting_transfer';`);
   await pool.query(`CREATE INDEX IF NOT EXISTS maw_return_sessions_event_status_idx ON maw_return_sessions (event_id, status, expires_at);`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_unique_burn_transaction_hash ON maw_return_sessions (burn_transaction_hash) WHERE burn_transaction_hash IS NOT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'maw_return_sessions_disposition_chk'
+      ) THEN
+        ALTER TABLE maw_return_sessions
+        ADD CONSTRAINT maw_return_sessions_disposition_chk
+        CHECK (squig_disposition IS NULL OR squig_disposition IN ('swallowed', 'regurgitated'));
+      END IF;
+    END $$;
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS maw_squig_pool (
@@ -424,6 +628,26 @@ async function ensureMawTables(poolOrDeps = null) {
       times_offered INT NOT NULL DEFAULT 0,
       times_rerolled_away INT NOT NULL DEFAULT 0,
       times_cashed_out INT NOT NULL DEFAULT 0,
+      overall_rank NUMERIC,
+      collection_rank NUMERIC,
+      average_rank NUMERIC(12,2),
+      rarity_tier TEXT,
+      original_payout_amount NUMERIC,
+      ticket_count INT NOT NULL DEFAULT 1,
+      jackpot_contribution_charm NUMERIC NOT NULL DEFAULT 0,
+      reward_rules_version TEXT,
+      ranking_source_hash TEXT,
+      disposition TEXT,
+      inventory_status TEXT,
+      digestion_status TEXT,
+      original_feeder_user_id TEXT,
+      original_feeder_wallet TEXT,
+      inbound_transaction_hash TEXT,
+      admin_digestion_message_id TEXT,
+      burn_transaction_hash TEXT,
+      burn_transaction_url TEXT,
+      burn_confirmed_by TEXT,
+      burn_confirmed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -444,11 +668,45 @@ async function ensureMawTables(poolOrDeps = null) {
     ['times_offered', 'INT NOT NULL DEFAULT 0'],
     ['times_rerolled_away', 'INT NOT NULL DEFAULT 0'],
     ['times_cashed_out', 'INT NOT NULL DEFAULT 0'],
+    ['overall_rank', 'NUMERIC'],
+    ['collection_rank', 'NUMERIC'],
+    ['average_rank', 'NUMERIC(12,2)'],
+    ['rarity_tier', 'TEXT'],
+    ['original_payout_amount', 'NUMERIC'],
+    ['ticket_count', 'INT NOT NULL DEFAULT 1'],
+    ['jackpot_contribution_charm', 'NUMERIC NOT NULL DEFAULT 0'],
+    ['reward_rules_version', 'TEXT'],
+    ['ranking_source_hash', 'TEXT'],
+    ['disposition', 'TEXT'],
+    ['inventory_status', 'TEXT'],
+    ['digestion_status', 'TEXT'],
+    ['original_feeder_user_id', 'TEXT'],
+    ['original_feeder_wallet', 'TEXT'],
+    ['inbound_transaction_hash', 'TEXT'],
+    ['admin_digestion_message_id', 'TEXT'],
+    ['burn_transaction_hash', 'TEXT'],
+    ['burn_transaction_url', 'TEXT'],
+    ['burn_confirmed_by', 'TEXT'],
+    ['burn_confirmed_at', 'TIMESTAMPTZ'],
     ['created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
     ['updated_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
   ]);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_squig_pool_active_token_uidx ON maw_squig_pool (contract_address, token_id) WHERE status <> 'retired';`);
   await pool.query(`CREATE INDEX IF NOT EXISTS maw_squig_pool_status_idx ON maw_squig_pool (status, updated_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS maw_squig_pool_disposition_status_idx ON maw_squig_pool (disposition, inventory_status, status);`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_squig_pool_unique_burn_transaction_hash ON maw_squig_pool (burn_transaction_hash) WHERE burn_transaction_hash IS NOT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'maw_squig_pool_disposition_chk'
+      ) THEN
+        ALTER TABLE maw_squig_pool
+        ADD CONSTRAINT maw_squig_pool_disposition_chk
+        CHECK (disposition IS NULL OR disposition IN ('swallowed', 'regurgitated'));
+      END IF;
+    END $$;
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS maw_tickets (
@@ -457,6 +715,7 @@ async function ensureMawTables(poolOrDeps = null) {
       ticket_number INT NOT NULL,
       discord_user_id TEXT NOT NULL,
       return_session_id BIGINT NOT NULL REFERENCES maw_return_sessions(id),
+      ticket_slot INT NOT NULL DEFAULT 1,
       contract_address TEXT NOT NULL,
       token_id TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -467,12 +726,14 @@ async function ensureMawTables(poolOrDeps = null) {
     ['ticket_number', 'INT'],
     ['discord_user_id', 'TEXT'],
     ['return_session_id', 'BIGINT REFERENCES maw_return_sessions(id)'],
+    ['ticket_slot', 'INT NOT NULL DEFAULT 1'],
     ['contract_address', 'TEXT'],
     ['token_id', 'TEXT'],
     ['created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
   ]);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_tickets_event_number_uidx ON maw_tickets (event_id, ticket_number);`);
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_tickets_event_session_uidx ON maw_tickets (event_id, return_session_id);`);
+  await pool.query(`DROP INDEX IF EXISTS maw_tickets_event_session_uidx;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_tickets_event_session_slot_uidx ON maw_tickets (event_id, return_session_id, ticket_slot);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS maw_tickets_user_idx ON maw_tickets (event_id, discord_user_id);`);
 
   await pool.query(`
@@ -607,8 +868,7 @@ function buildMawSlashCommand() {
         .setName('open')
         .setDescription('Admin: open a Feed the Maw event')
         .addIntegerOption((opt) => opt.setName('goal').setDescription('Squigs needed to fill the Maw').setMinValue(1).setRequired(false))
-        .addIntegerOption((opt) => opt.setName('reward').setDescription('Immediate $CHARM payout per return').setMinValue(0).setRequired(false))
-        .addIntegerOption((opt) => opt.setName('jackpot').setDescription('Maw Ticket Draw $CHARM prize').setMinValue(0).setRequired(false))
+        .addIntegerOption((opt) => opt.setName('jackpot').setDescription('Optional starting $CHARM added before rarity contributions').setMinValue(0).setRequired(false))
         .addChannelOption((opt) => opt.setName('feed_channel').setDescription('Public Maw feed channel').setRequired(false))
         .addChannelOption((opt) => opt.setName('admin_channel').setDescription('Admin review channel').setRequired(false))
     )
@@ -631,6 +891,19 @@ function buildMawSlashCommand() {
       sub
         .setName('reconcile')
         .setDescription('Admin: run the Maw transfer checker now')
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('rank')
+        .setDescription('Admin: audit a Squig Maw rarity quote')
+        .addIntegerOption((opt) => opt.setName('token').setDescription('Squig token ID').setMinValue(1).setRequired(true))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('digestion')
+        .setDescription('Admin: show pending or failed Swallowed digestion workflows')
+        .addStringOption((opt) => opt.setName('status').setDescription('pending, receipt_failed, burn_verified, or digested').setRequired(false))
+        .addIntegerOption((opt) => opt.setName('token').setDescription('Optional Squig token ID').setMinValue(1).setRequired(false))
     );
 }
 
@@ -689,9 +962,12 @@ async function handleComponent(interaction) {
   if (id.startsWith('maw_feed_start:')) return handleMawFeedStart(interaction);
   if (id.startsWith('maw_select_page:')) return handleMawSquigPageButton(interaction);
   if (id.startsWith('maw_review_continue:')) return handleMawReviewContinue(interaction);
+  if (id.startsWith('maw_fate_select:')) return handleMawFateSelect(interaction);
   if (id.startsWith('maw_confirm_start_timer:')) return handleMawConfirmStartTimer(interaction);
   if (id.startsWith('maw_cancel_session:')) return handleMawCancelSession(interaction);
   if (id.startsWith('maw_refresh_session:')) return handleMawRefreshSession(interaction);
+  if (id.startsWith('maw_submit_burn_tx:')) return handleMawSubmitBurnButton(interaction);
+  if (id.startsWith('maw_retry_digestion_receipt:')) return handleMawRetryDigestionReceiptButton(interaction);
   if (id.startsWith('maw_cancel:')) return handleMawPendingCancel(interaction);
 
   if (id.startsWith('maw_prize_accept_confirm:')) return handlePrizeAcceptConfirm(interaction);
@@ -706,9 +982,17 @@ async function handleComponent(interaction) {
   return false;
 }
 
+async function handleModalSubmit(interaction) {
+  const id = String(interaction.customId || '');
+  if (!id.startsWith('maw_')) return false;
+  assertReady();
+  if (id.startsWith('maw_burn_tx_modal:')) return handleMawBurnTransactionModal(interaction);
+  return false;
+}
+
 async function handleMawCommand(interaction) {
   const subcommand = interaction.options.getSubcommand();
-  if (['post', 'open', 'close', 'inventory', 'reconcile'].includes(subcommand) && !isAdmin(interaction)) {
+  if (['post', 'open', 'close', 'inventory', 'reconcile', 'rank', 'digestion'].includes(subcommand) && !isAdmin(interaction)) {
     await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
     return;
   }
@@ -719,6 +1003,8 @@ async function handleMawCommand(interaction) {
   if (subcommand === 'status') return handleMawStatus(interaction);
   if (subcommand === 'inventory') return handleMawInventory(interaction);
   if (subcommand === 'reconcile') return handleMawReconcile(interaction);
+  if (subcommand === 'rank') return handleMawRank(interaction);
+  if (subcommand === 'digestion') return handleMawDigestionStatus(interaction);
 
   await interaction.reply({ content: 'The Maw did not understand that command.', flags: EPHEMERAL });
 }
@@ -775,9 +1061,16 @@ async function countActiveTransferWindows(eventId, db = null) {
 async function getMawEventSummary(event, db = null) {
   if (!event) return null;
   const activeTransferWindows = await countActiveTransferWindows(event.id, db);
+  const pool = db || resolvePool();
+  const ticketRows = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM maw_tickets WHERE event_id = $1`,
+    [String(event.id)]
+  ).catch(() => ({ rows: [{ count: 0 }] }));
+  const actualTicketCount = Number(ticketRows.rows[0]?.count || 0);
   return {
     event,
     activeTransferWindows,
+    totalTicketCount: Math.max(Number(event.total_ticket_count || 0), actualTicketCount),
     openSlots: calculateMawOpenSlots({
       goalCount: event.goal_count,
       receivedCount: event.received_count,
@@ -805,9 +1098,20 @@ async function handleMawOpen(interaction) {
     return;
   }
 
+  let rankingIndex;
+  try {
+    rankingIndex = loadMawRankingIndex();
+  } catch (err) {
+    await postAdminLog(interaction.guild, 'Maw Ranking Data', `Open blocked: ${String(err?.message || err).slice(0, 1200)}`);
+    await interaction.reply({
+      content: 'The Maw ranking CSV could not be loaded, so no rarity event was opened. An admin log has been written.',
+      flags: EPHEMERAL,
+    });
+    return;
+  }
+
   const goal = interaction.options.getInteger('goal') || config.goalCount;
-  const reward = interaction.options.getInteger('reward') || config.returnRewardCharm;
-  const jackpot = interaction.options.getInteger('jackpot') || config.jackpotCharm;
+  const jackpotBase = interaction.options.getInteger('jackpot') ?? config.jackpotBaseCharm;
   const feedChannel = interaction.options.getChannel('feed_channel');
   const adminChannel = interaction.options.getChannel('admin_channel');
 
@@ -815,15 +1119,22 @@ async function handleMawOpen(interaction) {
   try {
     const { rows } = await pool.query(
       `INSERT INTO maw_events
-         (guild_id, status, goal_count, return_reward_charm, jackpot_charm, session_ttl_minutes,
-          feed_channel_id, admin_channel_id, started_at, created_by, created_at, updated_at)
-       VALUES ($1, 'open', $2, $3, $4, $5, $6, $7, NOW(), $8, NOW(), NOW())
+         (guild_id, status, goal_count, return_reward_charm, jackpot_charm, reward_model,
+          reward_rules_version, reward_rules_json, ranking_source_hash, jackpot_base_charm,
+          jackpot_contributed_charm, total_ticket_count, session_ttl_minutes, feed_channel_id,
+          admin_channel_id, started_at, created_by, created_at, updated_at)
+       VALUES ($1, 'open', $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 0, 0, $10, $11, $12, NOW(), $13, NOW(), NOW())
        RETURNING *`,
       [
         String(interaction.guildId),
         Math.floor(Number(goal) || config.goalCount),
-        Math.floor(Number(reward) || config.returnRewardCharm),
-        Math.floor(Number(jackpot) || config.jackpotCharm),
+        config.returnRewardCharm,
+        Math.floor(Number(jackpotBase) || 0),
+        MAW_REWARD_RULES_VERSION,
+        MAW_REWARD_RULES_VERSION,
+        JSON.stringify(MAW_RARITY_RULES),
+        rankingIndex.rankingSourceHash,
+        Math.floor(Number(jackpotBase) || 0),
         config.sessionTtlMinutes,
         feedChannel?.id || config.feedChannelId,
         adminChannel?.id || config.adminChannelId,
@@ -833,7 +1144,7 @@ async function handleMawOpen(interaction) {
     await interaction.reply({
       content:
         `The Maw is open. Event ID: ${rows[0].id}.\n` +
-        `Goal: ${rows[0].goal_count} Squigs. Return payout: ${formatCharm(rows[0].return_reward_charm)} $CHARM. Maw Ticket Draw: ${formatCharm(rows[0].jackpot_charm)} $CHARM.`,
+        `Goal: ${rows[0].goal_count} Squigs. Starting jackpot: ${formatCharm(rows[0].jackpot_base_charm)} $CHARM. Rules: ${rows[0].reward_rules_version}. Ranking: ${shortHash(rows[0].ranking_source_hash)}.`,
       flags: EPHEMERAL,
     });
   } catch (err) {
@@ -907,11 +1218,21 @@ async function handleMawStatus(interaction) {
   }
   const summary = await getMawEventSummary(event);
   const pool = resolvePool();
-  const tickets = await pool.query(
-    `SELECT ticket_number, token_id, created_at
-     FROM maw_tickets
-     WHERE event_id = $1 AND discord_user_id = $2
-     ORDER BY ticket_number ASC`,
+  const ticketGroups = await pool.query(
+    `SELECT s.id AS session_id,
+            s.token_id,
+            s.rarity_tier,
+            s.ticket_count,
+            s.squig_disposition,
+            s.digestion_status,
+            MIN(t.ticket_number)::int AS first_ticket_number,
+            MAX(t.ticket_number)::int AS last_ticket_number,
+            COUNT(t.id)::int AS physical_ticket_count
+     FROM maw_tickets t
+     JOIN maw_return_sessions s ON s.id = t.return_session_id
+     WHERE t.event_id = $1 AND t.discord_user_id = $2
+     GROUP BY s.id
+     ORDER BY MIN(t.ticket_number) ASC`,
     [String(event.id), String(interaction.user.id)]
   );
   const active = await pool.query(
@@ -923,13 +1244,27 @@ async function handleMawStatus(interaction) {
        AND expires_at > NOW()
      ORDER BY created_at DESC
      LIMIT 1`,
-    [String(event.id), String(interaction.user.id)]
+      [String(event.id), String(interaction.user.id)]
   );
-  const ticketText = tickets.rows.length
-    ? tickets.rows.map((row) => `#${row.ticket_number} (Squig ${formatToken(row.token_id)})`).join(', ')
+  const totalUserTickets = ticketGroups.rows.reduce((sum, row) => sum + Number(row.physical_ticket_count || 0), 0);
+  const ticketText = ticketGroups.rows.length
+    ? ticketGroups.rows.map((row) =>
+      `${formatToken(row.token_id)} • ${getSessionRarityLabel(row)} • Fate: ${getSessionDispositionLabel(row)} • ${digestionStatusText(row.squig_disposition, row.digestion_status)} • Tickets ${formatMawTicketRange(row.first_ticket_number, row.last_ticket_number, row.physical_ticket_count)}`
+    ).join('\n')
     : 'No Maw Tickets yet.';
-  const activeText = active.rows[0]
-    ? `Squig ${formatToken(active.rows[0].token_id)} expires <t:${Math.floor(new Date(active.rows[0].expires_at).getTime() / 1000)}:R>.`
+  const activeSession = active.rows[0] || null;
+  const activeSnapshot = activeSession ? resolveMawSessionRewardSnapshot(activeSession, event) : null;
+  const activeText = activeSession
+    ? [
+      `Squig ${formatToken(activeSession.token_id)} expires <t:${Math.floor(new Date(activeSession.expires_at).getTime() / 1000)}:R>.`,
+      `Rarity: ${activeSnapshot.rarityLabel}`,
+      `Fate: ${getSessionDispositionLabel(activeSession)}`,
+      `Maw Rank: ${activeSession.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(activeSession.average_rank)}`,
+      `Payout: ${formatCharm(activeSnapshot.payoutCharm)} $CHARM`,
+      `Tickets: ${activeSnapshot.ticketCount}`,
+      `Jackpot contribution: ${formatSignedCharm(activeSnapshot.jackpotContributionCharm)} $CHARM`,
+      `NFT lifecycle: ${digestionStatusText(activeSession.squig_disposition, activeSession.digestion_status)}`,
+    ].join('\n')
     : 'No active transfer window.';
   const embed = new EmbedBuilder()
     .setTitle('Maw Status')
@@ -938,9 +1273,12 @@ async function handleMawStatus(interaction) {
       { name: 'Progress', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
       { name: 'Open spots', value: String(summary.openSlots), inline: true },
       { name: 'Active transfers', value: String(summary.activeTransferWindows), inline: true },
-      { name: 'Your Maw Tickets', value: ticketText, inline: false },
-      { name: 'Your active session', value: activeText, inline: false },
-      { name: 'Maw Ticket Draw', value: event.draw_completed ? 'Complete.' : `${formatCharm(event.jackpot_charm)} $CHARM unlocks at goal.`, inline: false }
+      { name: 'Your tickets', value: String(totalUserTickets), inline: true },
+      { name: 'Squigs you fed', value: String(ticketGroups.rows.length), inline: true },
+      { name: 'Event tickets', value: String(summary.totalTicketCount || event.total_ticket_count || 0), inline: true },
+      { name: 'Your Maw Tickets', value: truncateField(ticketText), inline: false },
+      { name: 'Your active session', value: truncateField(activeText), inline: false },
+      { name: 'Maw Ticket Draw', value: event.draw_completed ? 'Complete.' : `${formatCharm(event.jackpot_charm)} $CHARM current jackpot.`, inline: false }
     );
   await interaction.reply({ embeds: [embed], flags: EPHEMERAL });
 }
@@ -963,11 +1301,83 @@ async function handleMawInventory(interaction) {
      LIMIT 10`,
     [String(interaction.guildId)]
   );
+  const rarityRows = await pool.query(
+    `SELECT COALESCE(rarity_tier, 'legacy') AS rarity_tier,
+            COUNT(*)::int AS total_count,
+            COUNT(*) FILTER (
+              WHERE COALESCE(disposition, 'regurgitated') = 'regurgitated'
+                AND COALESCE(inventory_status, status, 'available') = 'available'
+            )::int AS available_count
+     FROM maw_squig_pool
+     GROUP BY COALESCE(rarity_tier, 'legacy')
+     ORDER BY COALESCE(rarity_tier, 'legacy')`
+  );
+  const dispositionRows = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (
+         WHERE COALESCE(disposition, 'regurgitated') = 'regurgitated'
+           AND COALESCE(inventory_status, status, 'available') = 'available'
+       )::int AS regurgitated_available,
+       COUNT(*) FILTER (
+         WHERE COALESCE(disposition, 'regurgitated') = 'swallowed'
+           AND COALESCE(digestion_status, '') IN ('pending_transfer', 'pending_burn', 'burn_verified', 'receipt_failed')
+       )::int AS awaiting_digestion,
+       COUNT(*) FILTER (
+         WHERE COALESCE(disposition, 'regurgitated') = 'swallowed'
+           AND COALESCE(digestion_status, '') = 'digested'
+       )::int AS permanently_digested
+     FROM maw_squig_pool`
+  );
+  const payoutRows = await pool.query(
+    `SELECT COALESCE(SUM(payout_amount) FILTER (WHERE received_at IS NOT NULL), 0) AS promised,
+            COALESCE(SUM(payout_amount) FILTER (WHERE payout_status = 'paid'), 0) AS paid,
+            COALESCE(SUM(ticket_count) FILTER (WHERE received_at IS NOT NULL), 0) AS tickets,
+            COALESCE(SUM(jackpot_contribution_charm) FILTER (WHERE received_at IS NOT NULL), 0) AS contributions
+     FROM maw_return_sessions
+     WHERE guild_id = $1`,
+    [String(interaction.guildId)]
+  );
+  const recentInventoryRows = await pool.query(
+    `SELECT token_id, COALESCE(disposition, 'regurgitated') AS disposition,
+            COALESCE(inventory_status, status, 'available') AS inventory_status,
+            COALESCE(digestion_status, 'not_applicable') AS digestion_status,
+            rarity_tier
+     FROM maw_squig_pool
+     ORDER BY created_at DESC NULLS LAST, id DESC
+     LIMIT 8`
+  );
+  const currentEvent = await getOpenMawEvent(interaction.guildId).catch(() => null);
+  let rankingInfo = currentEvent?.ranking_source_hash
+    ? `${shortHash(currentEvent.ranking_source_hash)}\nRules: ${currentEvent.reward_rules_version || currentEvent.reward_model || 'legacy'}`
+    : 'No open rarity event.';
+  if (!currentEvent?.ranking_source_hash) {
+    const index = (() => {
+      try { return loadMawRankingIndex(); } catch { return null; }
+    })();
+    if (index) rankingInfo = `${shortHash(index.rankingSourceHash)}\nRules: ${MAW_REWARD_RULES_VERSION}`;
+  }
   const counts = new Map(statusRows.rows.map((row) => [String(row.status), Number(row.count || 0)]));
   const total = [...counts.values()].reduce((sum, n) => sum + n, 0);
   const eventText = eventRows.rows.length
     ? eventRows.rows.map((row) => `Event ${row.id}: ${row.status}, received ${row.received_count}, pool ${row.pool_count}`).join('\n')
     : 'No Maw events yet.';
+  const rarityOrder = ['legendary', 'epic', 'rare', 'uncommon', 'common', 'legacy'];
+  const rarityMap = new Map(rarityRows.rows.map((row) => [String(row.rarity_tier), row]));
+  const availableByRarity = rarityOrder
+    .filter((key) => rarityMap.has(key))
+    .map((key) => `${formatMawRarityLabel(key)}: ${rarityMap.get(key).available_count}`)
+    .join('\n') || 'None';
+  const totalByRarity = rarityOrder
+    .filter((key) => rarityMap.has(key))
+    .map((key) => `${formatMawRarityLabel(key)}: ${rarityMap.get(key).total_count}`)
+    .join('\n') || 'None';
+  const payoutStats = payoutRows.rows[0] || {};
+  const dispositionStats = dispositionRows.rows[0] || {};
+  const recentText = recentInventoryRows.rows.length
+    ? recentInventoryRows.rows.map((row) =>
+      `${formatToken(row.token_id)} • ${formatMawDispositionLabel(row.disposition)} • ${row.inventory_status} • ${row.digestion_status} • ${formatMawRarityLabel(row.rarity_tier)}`
+    ).join('\n')
+    : 'No inventory rows yet.';
   const embed = new EmbedBuilder()
     .setTitle('Maw Pool Inventory')
     .setColor(0x5f3dc4)
@@ -978,7 +1388,16 @@ async function handleMawInventory(interaction) {
       { name: 'Accepted pending delivery', value: String(counts.get('accepted_pending_delivery') || 0), inline: true },
       { name: 'Delivered', value: String(counts.get('delivered') || 0), inline: true },
       { name: 'Manual review', value: String(counts.get('manual_review') || 0), inline: true },
-      { name: 'Original event counts', value: eventText.slice(0, 1024), inline: false }
+      { name: 'Regurgitated and available', value: String(dispositionStats.regurgitated_available || 0), inline: true },
+      { name: 'Awaiting digestion', value: String(dispositionStats.awaiting_digestion || 0), inline: true },
+      { name: 'Permanently digested', value: String(dispositionStats.permanently_digested || 0), inline: true },
+      { name: 'Available by rarity', value: truncateField(availableByRarity), inline: true },
+      { name: 'Accepted by rarity', value: truncateField(totalByRarity), inline: true },
+      { name: 'Payouts', value: `Promised: ${formatCharm(payoutStats.promised)} $CHARM\nPaid: ${formatCharm(payoutStats.paid)} $CHARM`, inline: true },
+      { name: 'Ticket and jackpot totals', value: `Tickets issued: ${Number(payoutStats.tickets || 0)}\nJackpot contributions: ${formatCharm(payoutStats.contributions)} $CHARM\nCurrent jackpot: ${currentEvent ? `${formatCharm(currentEvent.jackpot_charm)} $CHARM` : 'No open event'}`, inline: false },
+      { name: 'Ranking source', value: rankingInfo, inline: false },
+      { name: 'Recent inventory audit', value: truncateField(recentText), inline: false },
+      { name: 'Original event counts', value: truncateField(eventText), inline: false }
     );
   await interaction.reply({ embeds: [embed], flags: EPHEMERAL });
 }
@@ -1002,6 +1421,109 @@ async function handleMawReconcile(interaction) {
   });
 }
 
+async function handleMawRank(interaction) {
+  const tokenId = interaction.options.getInteger('token');
+  try {
+    const quote = getMawRewardQuote(tokenId);
+    const embed = new EmbedBuilder()
+      .setTitle(`Maw Rank Audit ${formatToken(quote.tokenId)}`)
+      .setColor(0x5f3dc4)
+      .addFields(
+        { name: 'Overall Rank', value: formatMawAverageRank(quote.overallRank), inline: true },
+        { name: 'Collection Rank', value: formatMawAverageRank(quote.collectionRank), inline: true },
+        { name: 'Average Maw Rank', value: formatMawAverageRank(quote.averageRank), inline: true },
+        { name: 'Rarity', value: quote.rarityLabel, inline: true },
+        { name: 'Payout', value: `${formatCharm(quote.payoutCharm)} $CHARM`, inline: true },
+        { name: 'Tickets', value: String(quote.ticketCount), inline: true },
+        { name: 'Jackpot contribution', value: `${formatSignedCharm(quote.jackpotContributionCharm)} $CHARM`, inline: true },
+        { name: 'Rules version', value: quote.rewardRulesVersion, inline: true },
+        { name: 'Ranking source', value: shortHash(quote.rankingSourceHash), inline: true }
+      );
+    await interaction.reply({ embeds: [embed], flags: EPHEMERAL });
+  } catch (err) {
+    await postAdminLog(interaction.guild, 'Maw Ranking Data', `Rank audit failed for token ${tokenId}: ${String(err?.message || err).slice(0, 1200)}`);
+    await interaction.reply({ content: `Could not quote that Squig: ${String(err?.message || err).slice(0, 300)}`, flags: EPHEMERAL });
+  }
+}
+
+async function handleMawDigestionStatus(interaction) {
+  const statusFilter = String(interaction.options.getString('status') || 'pending').trim().toLowerCase();
+  const tokenFilter = interaction.options.getInteger('token');
+  const allowedStatuses = new Set(['pending', 'pending_burn', 'receipt_failed', 'burn_verified', 'digested', 'all', 'retry_request']);
+  const normalizedFilter = allowedStatuses.has(statusFilter) ? statusFilter : 'pending';
+  if (normalizedFilter === 'retry_request') {
+    if (!tokenFilter) {
+      await interaction.reply({ content: 'Provide token:<id> when retrying a digestion admin request.', flags: EPHEMERAL });
+      return;
+    }
+    const { rows } = await resolvePool().query(
+      `SELECT id FROM maw_return_sessions
+       WHERE guild_id = $1
+         AND token_id = $2
+         AND COALESCE(squig_disposition, 'regurgitated') = 'swallowed'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [String(interaction.guildId), String(tokenFilter)]
+    );
+    if (!rows[0]) {
+      await interaction.reply({ content: 'No Swallowed Maw session found for that token.', flags: EPHEMERAL });
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const result = await ensureSwallowedDigestionRequest(rows[0].id).catch((err) => ({ ok: false, reason: String(err?.message || err) }));
+    await interaction.editReply({ content: result.ok ? 'Digestion admin request retry completed or was already posted.' : `Retry failed: ${result.reason}` });
+    return;
+  }
+  const params = [String(interaction.guildId)];
+  let where = `s.guild_id = $1 AND COALESCE(s.squig_disposition, 'regurgitated') = 'swallowed'`;
+  if (tokenFilter) {
+    params.push(String(tokenFilter));
+    where += ` AND s.token_id = $${params.length}`;
+  }
+  if (normalizedFilter === 'pending') {
+    where += ` AND COALESCE(s.digestion_status, '') IN ('pending_transfer', 'pending_burn', 'burn_verified', 'receipt_failed')`;
+  } else if (normalizedFilter !== 'all') {
+    params.push(normalizedFilter);
+    where += ` AND s.digestion_status = $${params.length}`;
+  }
+  const { rows } = await resolvePool().query(
+    `SELECT s.*, p.id AS pool_squig_id, p.status AS pool_status, p.inventory_status,
+            p.admin_digestion_message_id AS pool_admin_digestion_message_id
+     FROM maw_return_sessions s
+     LEFT JOIN maw_squig_pool p ON p.received_session_id = s.id
+     WHERE ${where}
+     ORDER BY s.received_at DESC NULLS LAST, s.id DESC
+     LIMIT 12`,
+    params
+  );
+  if (!rows.length) {
+    await interaction.reply({ content: 'No matching Maw digestion workflows found.', flags: EPHEMERAL });
+    return;
+  }
+  const config = getMawConfig();
+  const lines = rows.map((row) => {
+    const adminMessageId = row.admin_digestion_message_id || row.pool_admin_digestion_message_id;
+    const received = row.received_at ? `<t:${Math.floor(new Date(row.received_at).getTime() / 1000)}:R>` : 'not received';
+    const adminLink = formatAdminMessageLink(row.guild_id, config.digestionAdminChannelId, adminMessageId);
+    const inbound = inboundTxUrl(row, config) || row.received_tx_hash || 'none';
+    const burn = row.burn_transaction_url || 'none';
+    const error = row.digestion_receipt_error ? `\nError: ${String(row.digestion_receipt_error).slice(0, 180)}` : '';
+    return [
+      `${formatToken(row.token_id)} • ${getSessionRarityLabel(row)} • Maw Rank ${row.average_rank == null ? 'Legacy' : formatMawAverageRank(row.average_rank)}`,
+      `Feeder: <@${row.discord_user_id}> • Received: ${received}`,
+      `Status: ${row.digestion_status || 'pending_transfer'} • Inventory: ${row.inventory_status || row.pool_status || 'pending'}`,
+      `Inbound: ${inbound}`,
+      `Admin request: ${adminLink}`,
+      `Burn: ${burn}${error}`,
+    ].join('\n');
+  }).join('\n\n');
+  const embed = new EmbedBuilder()
+    .setTitle('Maw Digestion Workflows')
+    .setColor(0xd9480f)
+    .setDescription(truncateField(lines, 4000));
+  await interaction.reply({ embeds: [embed], flags: EPHEMERAL });
+}
+
 function buildMawPanelPayload(summary = null) {
   const event = summary?.event || null;
   if (!event) {
@@ -1023,28 +1545,58 @@ function buildMawPanelPayload(summary = null) {
     };
   }
 
-  const reward = formatCharm(event.return_reward_charm);
   const jackpot = formatCharm(event.jackpot_charm);
   const embed = new EmbedBuilder()
     .setTitle('THE MAW IS HUNGRY')
     .setColor(event.draw_completed ? 0x2f9e44 : 0x8b1e3f)
-    .setDescription(
-      `Feed an eligible Squig to the Maw.\n\n` +
-      `Once the transfer is received and verified, you earn:\n` +
-      `\u2022 ${reward} $CHARM\n` +
-      `\u2022 1 Maw Ticket\n\n` +
-      `When the Maw consumes ${event.goal_count} Squigs, one Maw Ticket will be drawn to win the ${jackpot} $CHARM jackpot.`
-    )
-    .addFields(
-      { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
-      { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
-      { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
-      { name: 'REWARD', value: `${reward} $CHARM per accepted Squig`, inline: true },
-      { name: 'JACKPOT', value: `${jackpot} $CHARM\n1 ticket earned per accepted Squig`, inline: true },
-      { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
-      { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
-    )
     .setImage(MAW_PANEL_IMAGE_URL);
+  if (isRarityMawEvent(event)) {
+    embed
+      .setDescription(
+        `Feed an eligible Squig to the Maw.\n\n` +
+        `A Squig’s Maw Rank determines:\n` +
+        `• Your immediate $CHARM payout\n` +
+        `• The number of Maw Tickets you receive\n` +
+        `• How much $CHARM is added to the jackpot\n\n` +
+        `Maw Rank = average of Overall Rank and Collection Rank`
+      )
+      .addFields(
+        { name: 'RARITY REWARDS', value: buildMawRulesText(), inline: false },
+        {
+          name: 'CHOOSE ITS FATE',
+          value:
+            `**Swallowed**\nThe Squig enters the Maw’s digestion queue and will be permanently burned by an admin.\n\n` +
+            `**Regurgitated**\nThe Squig joins the Maw Pool for future games, prizes, giveaways, incentives, and community rewards.\n\n` +
+            `Both choices receive the same rarity-based $CHARM payout, Maw Tickets, and jackpot contribution.`,
+          inline: false,
+        },
+        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
+        { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
+        { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
+        { name: 'CURRENT JACKPOT', value: `${jackpot} $CHARM`, inline: true },
+        { name: 'STARTING JACKPOT', value: `${formatCharm(event.jackpot_base_charm)} $CHARM`, inline: true },
+        { name: 'CONTRIBUTIONS RECEIVED', value: `${formatCharm(event.jackpot_contributed_charm)} $CHARM`, inline: true },
+        { name: 'TOTAL TICKETS ISSUED', value: String(summary.totalTicketCount || event.total_ticket_count || 0), inline: true },
+        { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
+        { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
+      );
+  } else {
+    const reward = formatCharm(event.return_reward_charm);
+    embed
+      .setDescription(
+        `Feed an eligible Squig to the Maw.\n\n` +
+        `This is a legacy flat-reward Maw event. Once the transfer is received and verified, you earn ${reward} $CHARM and 1 Maw Ticket.`
+      )
+      .addFields(
+        { name: 'PROGRESS', value: `${event.received_count} / ${event.goal_count} Squigs consumed`, inline: true },
+        { name: 'OPEN SPOTS', value: String(summary.openSlots), inline: true },
+        { name: 'ACTIVE TRANSFERS', value: String(summary.activeTransferWindows), inline: true },
+        { name: 'REWARD', value: `${reward} $CHARM per accepted Squig`, inline: true },
+        { name: 'JACKPOT', value: `${jackpot} $CHARM\n1 ticket earned per accepted Squig`, inline: true },
+        { name: 'TRANSFER WINDOW', value: `After final confirmation, you have ${formatDurationMinutes(event.session_ttl_minutes)} to send your Squig. If the timer expires, the transfer will be cancelled and the spot will reopen.`, inline: false },
+        { name: 'WHERE DO THE SQUIGS GO?', value: 'Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.', inline: false }
+      );
+  }
   if (event.draw_completed) {
     embed.setTitle('THE MAW IS FULL');
     embed.setDescription(`${event.goal_count} / ${event.goal_count} Squigs consumed. The ${jackpot} $CHARM Maw Ticket Draw is complete.`);
@@ -1150,6 +1702,16 @@ async function handleMawFeedStart(interaction) {
     return true;
   }
 
+  if (isRarityMawEvent(event)) {
+    try {
+      loadMawRankingIndex();
+    } catch (err) {
+      await postAdminLog(interaction.guild, 'Maw Ranking Data', `Feed start blocked for <@${interaction.user.id}>: ${String(err?.message || err).slice(0, 1200)}`);
+      await interaction.editReply({ content: MAW_RANKING_FAILURE_MESSAGE });
+      return true;
+    }
+  }
+
   const links = await deps.getWalletLinks(interaction.guildId, interaction.user.id);
   const wallets = links.map((row) => normalizeAddress(row.wallet_address)).filter(Boolean);
   if (!wallets.length) {
@@ -1159,10 +1721,11 @@ async function handleMawFeedStart(interaction) {
 
   let eligible = [];
   try {
-    eligible = await getEligibleMawSquigsForUser(interaction.guildId, interaction.user.id, wallets, config.squigContract);
+    eligible = await getEligibleMawSquigsForUser(interaction.guildId, interaction.user.id, wallets, config.squigContract, event);
   } catch (err) {
-    await postAdminLog(interaction.guild, 'Maw Ownership Check', `Failed for <@${interaction.user.id}>: ${String(err?.message || err).slice(0, 800)}`);
-    await interaction.editReply({ content: 'The Maw could not check your Squigs right now. Try again in a moment.' });
+    const isRankingError = String(err?.code || '').startsWith('MAW_RANKING');
+    await postAdminLog(interaction.guild, isRankingError ? 'Maw Ranking Data' : 'Maw Ownership Check', `Failed for <@${interaction.user.id}>: ${String(err?.message || err).slice(0, 1200)}`);
+    await interaction.editReply({ content: isRankingError ? MAW_RANKING_FAILURE_MESSAGE : 'The Maw could not check your Squigs right now. Try again in a moment.' });
     return true;
   }
 
@@ -1201,7 +1764,7 @@ async function getActiveUserSession(guildId, userId, db = null) {
   return rows[0] || null;
 }
 
-async function getEligibleMawSquigsForUser(guildId, userId, wallets, contractAddress) {
+async function getEligibleMawSquigsForUser(guildId, userId, wallets, contractAddress, event = null) {
   const normalizedWallets = [...new Set(wallets.map(normalizeAddress).filter(Boolean))];
   const contract = normalizeAddress(contractAddress) || DEFAULT_SQUIG_CONTRACT;
   const owned = [];
@@ -1228,13 +1791,31 @@ async function getEligibleMawSquigsForUser(guildId, userId, wallets, contractAdd
     ...sessionRows.rows.map((row) => String(row.token_id)),
   ]);
   const seen = new Set();
-  return sortMawSquigsForDisplay(owned
+  const candidates = owned
     .filter((entry) => {
       const token = String(entry.tokenId);
       if (excluded.has(token) || seen.has(token)) return false;
       seen.add(token);
       return true;
-    }));
+    });
+  if (!isRarityMawEvent(event)) return sortMawSquigsForDisplay(candidates);
+
+  const enriched = [];
+  let invalidRankingCount = 0;
+  for (const entry of candidates) {
+    try {
+      enriched.push({ ...entry, quote: getMawRewardQuote(entry.tokenId) });
+    } catch (err) {
+      invalidRankingCount += 1;
+      await postAdminLogByGuildId(guildId, 'Maw Ranking Data', `Excluded Squig ${formatToken(entry.tokenId)} from user ${userId}: ${String(err?.message || err).slice(0, 800)}`);
+    }
+  }
+  if (candidates.length && !enriched.length && invalidRankingCount === candidates.length) {
+    const err = new Error('Every otherwise-eligible owned Squig was missing a valid Maw ranking quote.');
+    err.code = 'MAW_RANKING_NO_VALID_OWNED';
+    throw err;
+  }
+  return sortMawSquigsForDisplay(enriched);
 }
 
 async function handleMawSquigPageButton(interaction) {
@@ -1282,6 +1863,18 @@ async function handleMawSquigSelect(interaction) {
   }
   const sourceWallet = normalizeAddress(match[1]);
   const tokenId = String(match[2] || '').trim();
+  const selectionState = getPendingMawSelection(interaction.guildId, interaction.user.id, eventId);
+  if (!selectionState?.squigs?.length) {
+    await interaction.update({ content: 'This Maw Squig selector expired. Press Feed the Maw again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return;
+  }
+  const selectedEntry = selectionState.squigs.find((entry) =>
+    normalizeAddress(entry.wallet) === sourceWallet && String(entry.tokenId) === tokenId
+  );
+  if (!selectedEntry) {
+    await interaction.update({ content: 'That Squig selection is no longer valid. Press Feed the Maw again.', components: [], attachments: [] });
+    return;
+  }
   const event = await getOpenMawEvent(interaction.guildId);
   if (!event || String(event.id) !== eventId) {
     await interaction.update({ content: 'The Maw is closed or this panel is stale.', components: [] });
@@ -1304,6 +1897,16 @@ async function handleMawSquigSelect(interaction) {
     await interaction.update({ content: 'The Maw cannot see that Squig in that linked wallet anymore.', components: [] });
     return;
   }
+  let quote = selectedEntry.quote || null;
+  if (isRarityMawEvent(event) && !quote) {
+    try {
+      quote = getMawRewardQuote(tokenId);
+    } catch (err) {
+      await postAdminLog(interaction.guild, 'Maw Ranking Data', `Review blocked for Squig ${formatToken(tokenId)}: ${String(err?.message || err).slice(0, 1200)}`);
+      await interaction.update({ content: MAW_RANKING_FAILURE_MESSAGE, embeds: [], components: [], attachments: [] });
+      return;
+    }
+  }
 
   const token = randomToken();
   pendingMawSelections.delete(mawSelectionKey(interaction.guildId, interaction.user.id, event.id));
@@ -1313,11 +1916,12 @@ async function handleMawSquigSelect(interaction) {
     eventId: String(event.id),
     sourceWallet,
     tokenId,
+    quote: snapshotMawRewardQuote(quote),
     expiresAt: Date.now() + PENDING_TTL_MS,
   });
 
   await interaction.update({
-    ...buildMawReviewPayload(event, summary, tokenId, token),
+    ...buildMawReviewPayload(event, summary, tokenId, token, quote),
   });
 }
 
@@ -1332,27 +1936,43 @@ function getPendingMawReview(token, userId) {
   return pending;
 }
 
-function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null) {
+function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null, quote = null) {
   const embed = new EmbedBuilder()
     .setTitle('Review Maw Return')
     .setColor(0x8b1e3f)
-    .setDescription('Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.')
-    .addFields(
+    .setDescription('Accepted Squigs enter the Maw Pool and may later be used for prizes, games, store rewards, onboarding, draws, or other community features.');
+  if (quote) {
+    const projectedJackpot = Math.floor(Number(event.jackpot_charm) || 0) + Math.floor(Number(quote.jackpotContributionCharm) || 0);
+    embed.addFields(
+      { name: 'Squig', value: formatToken(tokenId), inline: true },
+      { name: 'Rarity', value: quote.rarityLabel, inline: true },
+      { name: 'Maw Rank', value: `${formatMawAverageRank(quote.averageRank)}\nOverall ${formatMawAverageRank(quote.overallRank)} • Collection ${formatMawAverageRank(quote.collectionRank)}`, inline: true },
+      { name: 'You receive', value: `${formatCharm(quote.payoutCharm)} $CHARM`, inline: true },
+      { name: 'Maw Tickets', value: String(quote.ticketCount), inline: true },
+      { name: 'Jackpot contribution', value: `${formatSignedCharm(quote.jackpotContributionCharm)} $CHARM`, inline: true },
+      { name: 'Current jackpot', value: `${formatCharm(event.jackpot_charm)} $CHARM`, inline: true },
+      { name: 'Projected jackpot', value: `${formatCharm(projectedJackpot)} $CHARM`, inline: true },
+      { name: 'Event progress', value: `${event.received_count} / ${event.goal_count}`, inline: true },
+      { name: 'Remaining open spots', value: String(summary.openSlots), inline: true }
+    );
+  } else {
+    embed.addFields(
       { name: 'Squig', value: formatToken(tokenId), inline: true },
       { name: 'Payout', value: `${formatCharm(event.return_reward_charm)} $CHARM`, inline: true },
       { name: 'Ticket', value: '1 Maw Ticket', inline: true },
       { name: 'Current progress', value: `${event.received_count} / ${event.goal_count}`, inline: true },
       { name: 'Remaining open spots', value: String(summary.openSlots), inline: true }
     );
+  }
   if (imageUrl) embed.setImage(imageUrl);
   return embed;
 }
 
-function buildMawReviewPayload(event, summary, tokenId, token) {
+function buildMawReviewPayload(event, summary, tokenId, token, quote = null) {
   const image = mawSquigImageAttachment(tokenId);
   return {
     content: '',
-    embeds: [buildMawReviewEmbed(event, summary, tokenId, image.imageUrl)],
+    embeds: [buildMawReviewEmbed(event, summary, tokenId, image.imageUrl, quote)],
     components: [buildMawReviewRow(token)],
     attachments: [],
     ...(image.files.length ? { files: image.files } : {}),
@@ -1384,31 +2004,108 @@ async function handleMawReviewContinue(interaction) {
     await interaction.update({ content: 'The Maw closed before the timer started.', embeds: [], components: [], attachments: [] });
     return true;
   }
+  if (isRarityMawEvent(event) && !pending.quote) {
+    await postAdminLog(interaction.guild, 'Maw Ranking Data', `Final confirmation blocked for Squig ${formatToken(pending.tokenId)}: missing pending reward quote.`);
+    await interaction.update({ content: MAW_RANKING_FAILURE_MESSAGE, embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  pending.reviewToken = token;
+  await interaction.update(buildMawFateSelectionPayload(event, pending, token));
+  return true;
+}
+
+function buildMawFateSelectionPayload(event, pending, token) {
   const embed = new EmbedBuilder()
-    .setTitle('Final Confirmation')
+    .setTitle('WHAT SHOULD THE MAW DO WITH YOUR SQUIG?')
+    .setColor(0x8b1e3f)
+    .setDescription(
+      `**Swallow It**\n` +
+      `The Squig will be sent to the Maw wallet and permanently burned by an admin after it is received.\n\n` +
+      `**Regurgitate It**\n` +
+      `The Squig will be added to the Maw Pool for future games, giveaways, incentives, prizes, and community rewards.\n\n` +
+      `Both choices receive the same rarity-based $CHARM payout, Maw Tickets, and jackpot contribution.`
+    )
+    .addFields(
+      { name: 'Squig', value: formatToken(pending.tokenId), inline: true },
+      { name: 'Rarity', value: pending.quote?.rarityLabel || 'Legacy', inline: true },
+      { name: 'Payout', value: `${formatCharm(pending.quote?.payoutCharm ?? event.return_reward_charm ?? 0)} $CHARM`, inline: true }
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`maw_fate_select:${token}:swallowed`)
+      .setLabel('Swallow It')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`maw_fate_select:${token}:regurgitated`)
+      .setLabel('Regurgitate It')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`maw_cancel:${token}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary)
+  );
+  return { content: '', embeds: [embed], components: [row], attachments: [] };
+}
+
+async function handleMawFateSelect(interaction) {
+  const match = String(interaction.customId || '').match(/^maw_fate_select:([^:]+):(swallowed|regurgitated)$/);
+  if (!match) return false;
+  const [, token, disposition] = match;
+  const pending = getPendingMawReview(token, interaction.user.id);
+  if (!pending) {
+    await interaction.update({ content: 'This Maw fate selection expired. Start again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  const event = await getMawEventById(pending.eventId);
+  if (!event || event.status !== 'open') {
+    await interaction.update({ content: 'The Maw closed before the timer started.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  pending.squigDisposition = normalizeDisposition(disposition);
+  console.info(`[Maw] User ${interaction.user.id} selected ${pending.squigDisposition} for Squig ${pending.tokenId}`);
+  await postAdminLog(interaction.guild, 'Maw Fate Selected', `<@${interaction.user.id}> selected ${formatMawDispositionLabel(pending.squigDisposition)} for Squig ${formatToken(pending.tokenId)}.`).catch(() => null);
+  await interaction.update(buildMawFinalConfirmationPayload(event, pending, token));
+  return true;
+}
+
+function buildMawFinalConfirmationPayload(event, pending, token) {
+  const quote = pending.quote || null;
+  const disposition = normalizeDisposition(pending.squigDisposition);
+  const isSwallowed = disposition === MAW_DISPOSITIONS.SWALLOWED;
+  const title = `${isSwallowed ? 'SWALLOW' : 'REGURGITATE'} SQUIG ${formatToken(pending.tokenId)}?`;
+  const fateText = isSwallowed
+    ? `After the Maw receives it, the Squig will enter the digestion queue. An admin will permanently burn it and publish the completed burn transaction.`
+    : `After the Maw receives it, the Squig will be added to the Maw Pool and may return as a future game prize, giveaway, incentive, onboarding reward, or community reward.`;
+  const embed = new EmbedBuilder()
+    .setTitle(title)
     .setColor(0xd9480f)
     .setDescription(
-      `You are about to start a ${formatDurationMinutes(event.session_ttl_minutes)} transfer window for Squig ${formatToken(pending.tokenId)}. ` +
-      `Do not click confirm unless you are ready to send the Squig now. After you click confirm, the bot will reveal the official Maw wallet and begin watching for the transfer automatically.`
+      `You will send Squig ${formatToken(pending.tokenId)} to the official Maw wallet.\n\n` +
+      `${fateText}\n\n` +
+      `This choice cannot be changed after the transfer session begins.\n\n` +
+      `You will receive:\n\n` +
+      `• ${formatCharm(quote ? quote.payoutCharm : event.return_reward_charm)} $CHARM\n` +
+      `• ${quote ? quote.ticketCount : 1} Maw Ticket${(quote ? quote.ticketCount : 1) === 1 ? '' : 's'}\n` +
+      `• ${formatSignedCharm(quote ? quote.jackpotContributionCharm : 0)} $CHARM added to the Maw Jackpot\n\n` +
+      `After confirming, you will have ${formatDurationMinutes(event.session_ttl_minutes)} to complete the transfer.`
     )
     .addFields(
       { name: `Only Squig ${formatToken(pending.tokenId)} counts for this session.`, value: 'No substitutions. The Maw reads receipts.', inline: false },
-      { name: 'If the timer expires before the Maw receives it, the session closes and the slot is released.', value: 'Late transfers go to manual review.', inline: false },
-      { name: 'Payout after verified receipt', value: `${formatCharm(event.return_reward_charm)} $CHARM`, inline: true },
-      { name: 'Maw Ticket after verified receipt', value: '1', inline: true }
+      { name: 'Rarity', value: quote ? quote.rarityLabel : 'Legacy flat event', inline: true },
+      { name: 'Maw Rank', value: quote ? formatMawAverageRank(quote.averageRank) : 'Legacy flat event', inline: true },
+      { name: 'Official Maw Wallet', value: 'The wallet address is revealed after you confirm and the timer starts.', inline: false }
     );
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`maw_confirm_start_timer:${token}`)
-      .setLabel(`Confirm - Start ${event.session_ttl_minutes} Minute Timer`)
+      .setLabel(isSwallowed ? 'Feed It to Be Swallowed' : 'Add It to the Maw Pool')
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId(`maw_cancel:${token}`)
       .setLabel('Cancel')
       .setStyle(ButtonStyle.Secondary)
   );
-  await interaction.update({ embeds: [embed], components: [row], attachments: [] });
-  return true;
+  return { content: '', embeds: [embed], components: [row], attachments: [] };
 }
 
 async function handleMawPendingCancel(interaction) {
@@ -1423,6 +2120,10 @@ async function handleMawConfirmStartTimer(interaction) {
   const pending = getPendingMawReview(token, interaction.user.id);
   if (!pending) {
     await interaction.update({ content: 'This Maw confirmation expired. Start again if the Maw is still hungry.', embeds: [], components: [], attachments: [] });
+    return true;
+  }
+  if (!isValidMawDisposition(pending.squigDisposition)) {
+    await interaction.update({ content: 'Choose whether the Maw should Swallow or Regurgitate this Squig before starting the transfer timer.', embeds: [], components: [], attachments: [] });
     return true;
   }
   await interaction.deferUpdate();
@@ -1466,6 +2167,13 @@ async function createMawReturnSession(pending) {
       done = true;
       return { ok: false, reason: 'The Maw closed before the timer started.' };
     }
+    const quote = snapshotMawRewardQuote(pending.quote);
+    if (isRarityMawEvent(event) && !quote) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: false, reason: MAW_RANKING_FAILURE_MESSAGE };
+    }
+    const disposition = normalizeDisposition(pending.squigDisposition);
     const activeUser = await db.query(
       `SELECT id FROM maw_return_sessions
        WHERE guild_id = $1 AND discord_user_id = $2 AND status = 'awaiting_transfer' AND expires_at > NOW()
@@ -1511,8 +2219,13 @@ async function createMawReturnSession(pending) {
 
     const inserted = await db.query(
       `INSERT INTO maw_return_sessions
-         (event_id, guild_id, discord_user_id, source_wallet, contract_address, token_id, status, expires_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_transfer', NOW() + ($7::int * INTERVAL '1 minute'), NOW(), NOW())
+         (event_id, guild_id, discord_user_id, source_wallet, contract_address, token_id, status,
+          expires_at, payout_amount, overall_rank, collection_rank, average_rank, rarity_tier,
+          ticket_count, jackpot_contribution_charm, reward_rules_version, ranking_source_hash,
+          squig_disposition, digestion_status,
+          created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_transfer', NOW() + ($7::int * INTERVAL '1 minute'),
+          $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
        RETURNING *`,
       [
         String(event.id),
@@ -1522,6 +2235,17 @@ async function createMawReturnSession(pending) {
         config.squigContract,
         String(pending.tokenId),
         Math.floor(Number(event.session_ttl_minutes) || config.sessionTtlMinutes),
+        quote ? quote.payoutCharm : null,
+        quote ? quote.overallRank : null,
+        quote ? quote.collectionRank : null,
+        quote ? quote.averageRank : null,
+        quote ? quote.rarityKey : null,
+        quote ? quote.ticketCount : 1,
+        quote ? quote.jackpotContributionCharm : 0,
+        quote ? quote.rewardRulesVersion : null,
+        quote ? quote.rankingSourceHash : null,
+        disposition,
+        mawDispositionDigestionStatus(disposition, false),
       ]
     );
 
@@ -1543,17 +2267,30 @@ async function createMawReturnSession(pending) {
 }
 
 function buildMawSessionEmbed(event, session, config) {
+  const snapshot = resolveMawSessionRewardSnapshot(session, event);
+  const disposition = getSessionDisposition(session);
+  const isSwallowed = disposition === MAW_DISPOSITIONS.SWALLOWED;
   return new EmbedBuilder()
     .setTitle('Maw Session Created')
     .setColor(0x8b1e3f)
-    .setDescription(`Send only Squig ${formatToken(session.token_id)} to the official Maw wallet below. The bot is now watching for the transfer automatically.`)
+    .setDescription(
+      `Send only Squig ${formatToken(session.token_id)} to the official Maw wallet shown below.\n\n` +
+      (isSwallowed
+        ? 'After it is received, it will enter the digestion queue and be permanently burned by an admin.'
+        : 'After it is received, it will be added to the Maw Pool.')
+    )
     .addFields(
       { name: 'Squig', value: formatToken(session.token_id), inline: true },
-      { name: 'Payout', value: `${formatCharm(event.return_reward_charm)} $CHARM`, inline: true },
-      { name: 'Ticket pending', value: '1 Maw Ticket', inline: true },
+      { name: 'Fate', value: getSessionDispositionLabel(session), inline: true },
+      { name: 'Rarity', value: snapshot.rarityLabel, inline: true },
+      { name: 'Maw Rank', value: session.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(session.average_rank), inline: true },
+      { name: 'Payout', value: `${formatCharm(snapshot.payoutCharm)} $CHARM`, inline: true },
+      { name: 'Ticket count', value: String(snapshot.ticketCount), inline: true },
+      { name: 'Jackpot contribution', value: `${formatSignedCharm(snapshot.jackpotContributionCharm)} $CHARM`, inline: true },
       { name: 'Status', value: 'Awaiting transfer', inline: true },
       { name: 'Expires', value: `<t:${Math.floor(new Date(session.expires_at).getTime() / 1000)}:R>`, inline: true },
-      { name: 'Maw wallet address', value: `\`${config.mawWalletAddress}\``, inline: false }
+      { name: 'Selected source wallet', value: `\`${session.source_wallet}\``, inline: false },
+      { name: 'Official Maw Wallet', value: `\`${config.mawWalletAddress}\``, inline: false }
     );
 }
 
@@ -1617,15 +2354,22 @@ async function getSessionForUser(sessionId, userId) {
 }
 
 function buildSessionStatusEmbed(event, session) {
+  const snapshot = resolveMawSessionRewardSnapshot(session, event || {});
   const fields = [
     { name: 'Squig', value: formatToken(session.token_id), inline: true },
+    { name: 'Fate', value: getSessionDispositionLabel(session), inline: true },
     { name: 'Status', value: String(session.status), inline: true },
+    { name: 'NFT lifecycle', value: digestionStatusText(session.squig_disposition, session.digestion_status), inline: true },
+    { name: 'Rarity', value: snapshot.rarityLabel, inline: true },
+    { name: 'Maw Rank', value: formatSessionMawRank(session), inline: true },
+    { name: 'Payout', value: `${formatCharm(snapshot.payoutCharm)} $CHARM${session.payout_status ? ` (${session.payout_status})` : ''}`, inline: true },
+    { name: 'Ticket count', value: String(snapshot.ticketCount), inline: true },
+    { name: 'Jackpot contribution', value: `${formatSignedCharm(snapshot.jackpotContributionCharm)} $CHARM`, inline: true },
   ];
   if (String(session.status) === 'awaiting_transfer') {
     fields.push({ name: 'Expires', value: `<t:${Math.floor(new Date(session.expires_at).getTime() / 1000)}:R>`, inline: true });
   }
-  if (session.ticket_id) fields.push({ name: 'Maw Ticket', value: `#${session.ticket_id}`, inline: true });
-  if (session.payout_status) fields.push({ name: 'Payout', value: String(session.payout_status), inline: true });
+  if (session.ticket_id) fields.push({ name: 'First ticket row', value: String(session.ticket_id), inline: true });
   return new EmbedBuilder()
     .setTitle(event ? 'Maw Session Status' : 'Maw Session')
     .setColor(0x8b1e3f)
@@ -1703,6 +2447,7 @@ async function createSquigPrizeClaim(guildId, targetUser, awardedById, reason = 
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'reserved_for_claim',
+           inventory_status = 'reserved_for_claim',
            reserved_claim_id = $2,
            times_offered = times_offered + 1,
            updated_at = NOW()
@@ -1732,10 +2477,10 @@ async function selectEligiblePrizeSquigForUpdate(db, targetUserId, targetWallets
     excludedClause = ` AND id <> ALL($${params.length}::bigint[])`;
   }
   const { rows } = await db.query(
-    `SELECT *
-     FROM maw_squig_pool
-     WHERE status = 'available'
-       AND original_sender_discord_id <> $1
+     `SELECT *
+      FROM maw_squig_pool
+      WHERE ${poolEligibilityWhere()}
+        AND original_sender_discord_id <> $1
        AND NOT (LOWER(original_sender_wallet) = ANY($2::text[]))
        ${excludedClause}
      ORDER BY random()
@@ -1954,6 +2699,7 @@ async function acceptPrizeClaim(claimId, userId, wallet) {
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'accepted_pending_delivery',
+           inventory_status = 'distributed',
            delivered_to_discord_id = $2,
            delivered_to_wallet = $3,
            updated_at = NOW()
@@ -2077,6 +2823,7 @@ async function cashoutPrizeClaim(claimId, userId) {
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'available',
+           inventory_status = 'available',
            reserved_claim_id = NULL,
            times_cashed_out = times_cashed_out + 1,
            updated_at = NOW()
@@ -2160,7 +2907,7 @@ async function precheckReroll(guildId, userId, claimId) {
   const links = await deps.getWalletLinks(guildId, userId);
   const wallets = links.map((row) => normalizeAddress(row.wallet_address)).filter(Boolean);
   const excluded = await getClaimOfferedPoolIds(claimId);
-  const rows = await resolvePool().query(`SELECT * FROM maw_squig_pool WHERE status = 'available'`);
+  const rows = await resolvePool().query(`SELECT * FROM maw_squig_pool WHERE ${poolEligibilityWhere()}`);
   const eligible = filterEligiblePrizeSquigsForUser(rows.rows, userId, wallets, excluded);
   if (!eligible.length) {
     return { ok: false, reason: 'No eligible reroll Squigs are available. You were not charged.' };
@@ -2265,6 +3012,7 @@ async function rerollPrizeClaim(claimId, userId, spendable) {
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'available',
+           inventory_status = 'available',
            reserved_claim_id = NULL,
            times_rerolled_away = times_rerolled_away + 1,
            updated_at = NOW()
@@ -2274,6 +3022,7 @@ async function rerollPrizeClaim(claimId, userId, spendable) {
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'reserved_for_claim',
+           inventory_status = 'reserved_for_claim',
            reserved_claim_id = $2,
            times_offered = times_offered + 1,
            updated_at = NOW()
@@ -2355,6 +3104,7 @@ async function markPrizeDelivered({ claimId, actorId, txHash = null, guild = nul
     await db.query(
       `UPDATE maw_squig_pool
        SET status = 'delivered',
+           inventory_status = 'distributed',
            delivered_to_discord_id = $2,
            delivered_to_wallet = COALESCE(delivered_to_wallet, $3),
            delivered_tx_hash = $4,
@@ -2562,6 +3312,9 @@ function parseTransferLog(log) {
 }
 
 async function processMawTransferLog(guildId, config, transfer) {
+  if (normalizeAddress(transfer?.to) !== normalizeAddress(config.mawWalletAddress)) {
+    return { status: 'unmatched', reason: 'wrong_destination' };
+  }
   const pool = resolvePool();
   const db = await pool.connect();
   let sessionForPayout = null;
@@ -2650,38 +3403,91 @@ async function processMawTransferLog(guildId, config, transfer) {
       return { status: 'matched' };
     }
 
+    const snapshot = resolveMawSessionRewardSnapshot(session, event);
     const ticketNumberRows = await db.query(
       `SELECT COALESCE(MAX(ticket_number), 0)::int + 1 AS next_number FROM maw_tickets WHERE event_id = $1`,
       [String(event.id)]
     );
-    const ticketNumber = Number(ticketNumberRows.rows[0]?.next_number || 1);
+    const firstTicketNumber = Number(ticketNumberRows.rows[0]?.next_number || 1);
     const ticketRows = await db.query(
-      `INSERT INTO maw_tickets
-         (event_id, ticket_number, discord_user_id, return_session_id, contract_address, token_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (event_id, return_session_id) DO NOTHING
-       RETURNING *`,
-      [String(event.id), ticketNumber, String(session.discord_user_id), String(session.id), config.squigContract, String(transfer.tokenId)]
+      `WITH inserted AS (
+         INSERT INTO maw_tickets
+           (event_id, ticket_number, discord_user_id, return_session_id, ticket_slot, contract_address, token_id, created_at)
+         SELECT $1, $2::int + gs.slot - 1, $3, $4, gs.slot, $5, $6, NOW()
+         FROM generate_series(1, $7::int) AS gs(slot)
+         ON CONFLICT (event_id, return_session_id, ticket_slot) DO NOTHING
+         RETURNING *
+       )
+       SELECT * FROM inserted ORDER BY ticket_slot ASC`,
+      [
+        String(event.id),
+        firstTicketNumber,
+        String(session.discord_user_id),
+        String(session.id),
+        config.squigContract,
+        String(transfer.tokenId),
+        snapshot.ticketCount,
+      ]
     );
-    const ticket = ticketRows.rows[0] || (await db.query(
-      `SELECT * FROM maw_tickets WHERE event_id = $1 AND return_session_id = $2 LIMIT 1`,
+    const tickets = ticketRows.rows.length ? ticketRows.rows : (await db.query(
+      `SELECT * FROM maw_tickets WHERE event_id = $1 AND return_session_id = $2 ORDER BY ticket_slot ASC`,
       [String(event.id), String(session.id)]
-    )).rows[0];
+    )).rows;
+    const ticketSummary = summarizeMawTicketRows(tickets);
+    const firstTicket = tickets[0] || null;
+    if (!firstTicket || !ticketSummary) {
+      throw new Error(`No Maw tickets were created for return session ${session.id}.`);
+    }
+    const disposition = getSessionDisposition(session);
+    const inventoryStatus = mawDispositionInventoryStatus(disposition);
+    const digestionStatus = mawDispositionDigestionStatus(disposition, true);
 
-    await db.query(
+    const poolInsert = await db.query(
       `INSERT INTO maw_squig_pool
          (event_id, contract_address, token_id, original_sender_discord_id, original_sender_wallet,
-          received_session_id, received_tx_hash, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'available', NOW(), NOW())`,
-      [String(event.id), config.squigContract, String(transfer.tokenId), String(session.discord_user_id), transfer.from, String(session.id), transfer.txHash]
+          received_session_id, received_tx_hash, status, overall_rank, collection_rank, average_rank,
+          rarity_tier, original_payout_amount, ticket_count, jackpot_contribution_charm,
+          reward_rules_version, ranking_source_hash, disposition, inventory_status, digestion_status,
+          original_feeder_user_id, original_feeder_wallet, inbound_transaction_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          $17, $18, $19, $20, $21, $22, $23, NOW(), NOW())
+       RETURNING *`,
+      [
+        String(event.id),
+        config.squigContract,
+        String(transfer.tokenId),
+        String(session.discord_user_id),
+        transfer.from,
+        String(session.id),
+        transfer.txHash,
+        inventoryStatus,
+        session.overall_rank ?? null,
+        session.collection_rank ?? null,
+        session.average_rank ?? null,
+        session.rarity_tier ?? null,
+        snapshot.payoutCharm,
+        snapshot.ticketCount,
+        snapshot.jackpotContributionCharm,
+        session.reward_rules_version ?? null,
+        session.ranking_source_hash ?? null,
+        disposition,
+        inventoryStatus,
+        digestionStatus,
+        String(session.discord_user_id),
+        transfer.from,
+        transfer.txHash,
+      ]
     );
     const updatedEvent = await db.query(
       `UPDATE maw_events
        SET received_count = received_count + 1,
+           total_ticket_count = total_ticket_count + $2,
+           jackpot_contributed_charm = jackpot_contributed_charm + $3,
+           jackpot_charm = jackpot_charm + $3,
            updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
-      [String(event.id)]
+      [String(event.id), snapshot.ticketCount, snapshot.jackpotContributionCharm]
     );
     await db.query(
       `UPDATE maw_return_sessions
@@ -2692,15 +3498,20 @@ async function processMawTransferLog(guildId, config, transfer) {
            payout_amount = $4,
            payout_status = 'pending',
            ticket_id = $5,
+           digestion_status = $6,
            updated_at = NOW()
        WHERE id = $1`,
-      [String(session.id), transfer.txHash, transfer.logIndex, Math.floor(Number(event.return_reward_charm) || 0), String(ticket.id)]
+      [String(session.id), transfer.txHash, transfer.logIndex, snapshot.payoutCharm, String(firstTicket.id), digestionStatus]
     );
     await db.query('COMMIT');
     done = true;
+    console.info(`[Maw] ${formatMawDispositionLabel(disposition)} inbound transfer accepted for Squig ${transfer.tokenId}; session ${session.id}.`);
+    if (disposition === MAW_DISPOSITIONS.SWALLOWED) {
+      console.info(`[Maw] Pending-burn inventory created for Squig ${transfer.tokenId}; pool row ${poolInsert.rows[0]?.id || 'unknown'}.`);
+    }
     sessionForPayout = session.id;
     eventIdForPanel = event.id;
-    result = { status: 'matched', event: updatedEvent.rows[0], session, ticket };
+    result = { status: 'matched', event: updatedEvent.rows[0], session, tickets, ticketSummary, poolSquig: poolInsert.rows[0] };
   } catch (err) {
     if (!done) await db.query('ROLLBACK').catch(() => null);
     throw err;
@@ -2709,6 +3520,9 @@ async function processMawTransferLog(guildId, config, transfer) {
   }
 
   if (sessionForPayout) {
+    await ensureSwallowedDigestionRequest(sessionForPayout).catch(async (err) => {
+      await postAdminLogByGuildId(guildId, 'Maw Digestion Request Failed', `Return session ${sessionForPayout}: ${String(err?.message || err).slice(0, 1000)}`);
+    });
     const paid = await payPendingMawReturnSession(sessionForPayout).catch(async (err) => {
       await postAdminLogByGuildId(guildId, 'Maw Payout Failure', `Return session ${sessionForPayout}: ${String(err?.message || err).slice(0, 800)}`);
       return null;
@@ -2719,12 +3533,12 @@ async function processMawTransferLog(guildId, config, transfer) {
         return null;
       });
       if (!receiptResult?.panelMoved) await updateMawPanel(eventIdForPanel).catch(() => null);
-      await maybeCompleteMawGoal(eventIdForPanel).catch(async (err) => {
-        await postAdminLogByGuildId(guildId, 'Maw Draw Failure', String(err?.message || err).slice(0, 800));
-      });
     } else {
       await updateMawPanel(eventIdForPanel).catch(() => null);
     }
+    await maybeCompleteMawGoal(eventIdForPanel).catch(async (err) => {
+      await postAdminLogByGuildId(guildId, 'Maw Draw Failure', String(err?.message || err).slice(0, 800));
+    });
   }
   return result;
 }
@@ -2734,12 +3548,13 @@ async function payPendingMawReturnSession(sessionId) {
   const db = await pool.connect();
   let session;
   let event;
-  let ticket;
+  let tickets = [];
   let done = false;
   try {
     await db.query('BEGIN');
     const rows = await db.query(
-      `SELECT s.*, e.goal_count, e.received_count, e.return_reward_charm, e.guild_id AS event_guild_id
+      `SELECT s.*, e.goal_count, e.received_count, e.return_reward_charm, e.guild_id AS event_guild_id,
+              e.jackpot_charm, e.jackpot_base_charm, e.jackpot_contributed_charm, e.total_ticket_count
        FROM maw_return_sessions s
        JOIN maw_events e ON e.id = s.event_id
        WHERE s.id = $1
@@ -2759,8 +3574,11 @@ async function payPendingMawReturnSession(sessionId) {
        WHERE id = $1`,
       [String(sessionId)]
     );
-    const ticketRows = await db.query(`SELECT * FROM maw_tickets WHERE id = $1 LIMIT 1`, [String(session.ticket_id)]);
-    ticket = ticketRows.rows[0] || null;
+    const ticketRows = await db.query(
+      `SELECT * FROM maw_tickets WHERE event_id = $1 AND return_session_id = $2 ORDER BY ticket_number ASC`,
+      [String(session.event_id), String(session.id)]
+    );
+    tickets = ticketRows.rows;
     await db.query('COMMIT');
     done = true;
   } catch (err) {
@@ -2771,7 +3589,8 @@ async function payPendingMawReturnSession(sessionId) {
   }
 
   try {
-    const payout = await awardCharmToUser(session.guild_id, session.discord_user_id, session.payout_amount, 'maw_return_reward');
+    const snapshot = resolveMawSessionRewardSnapshot(session, event || {});
+    const payout = await awardCharmToUser(session.guild_id, session.discord_user_id, snapshot.payoutCharm, snapshot.payoutContext);
     const paidRows = await pool.query(
       `UPDATE maw_return_sessions
        SET status = 'paid',
@@ -2783,12 +3602,12 @@ async function payPendingMawReturnSession(sessionId) {
       [String(session.id), payoutReference(payout)]
     );
     const refreshedEvent = await getMawEventById(session.event_id);
-    return { ok: true, session: paidRows.rows[0], event: refreshedEvent, ticket };
+    return { ok: true, session: paidRows.rows[0], event: refreshedEvent, tickets, ticketSummary: summarizeMawTicketRows(tickets) };
   } catch (err) {
     await pool.query(
       `UPDATE maw_return_sessions
-       SET status = 'manual_review',
-           payout_status = 'failed',
+       SET status = 'received',
+           payout_status = 'pending',
            payout_reference = $2,
            updated_at = NOW()
        WHERE id = $1`,
@@ -2827,27 +3646,49 @@ function payoutReference(result) {
   return parts.join('|').slice(0, 500) || 'paid';
 }
 
-async function postMawReceiptMessages({ session, event, ticket }) {
+async function postMawReceiptMessages({ session, event, tickets = [], ticketSummary = null }) {
+  const summary = ticketSummary || summarizeMawTicketRows(tickets) || {
+    text: session.ticket_id ? `row ${session.ticket_id}` : 'pending',
+    ticketCount: Math.max(1, Math.floor(Number(session.ticket_count) || 1)),
+  };
+  const snapshot = resolveMawSessionRewardSnapshot(session, event);
+  const disposition = getSessionDisposition(session);
+  const isSwallowed = disposition === MAW_DISPOSITIONS.SWALLOWED;
+  const receiptTitle = isSwallowed
+    ? `THE MAW ACCEPTED SQUIG ${formatToken(session.token_id)}`
+    : `THE MAW REGURGITATED SQUIG ${formatToken(session.token_id)}`;
+  const receiptStatus = isSwallowed
+    ? `Squig ${formatToken(session.token_id)} is now inside the Maw and awaiting final digestion.\n\nA final receipt will be posted after the burn has been completed and verified.`
+    : `Squig ${formatToken(session.token_id)} has been added to the Maw Pool and may return as a future community reward.`;
+  const ticketFieldName = Number(summary.ticketCount || snapshot.ticketCount) === 1 ? 'Maw Ticket' : 'Maw Tickets';
   const user = await deps.client?.users?.fetch?.(session.discord_user_id).catch(() => null);
   if (user?.send) {
     const embed = new EmbedBuilder()
-      .setTitle(`The Maw consumed Squig ${formatToken(session.token_id)}`)
+      .setTitle(receiptTitle)
       .setColor(0x2f9e44)
-      .setDescription(`Payout released: ${formatCharm(session.payout_amount)} $CHARM`)
+      .setDescription(`Payout released: ${formatCharm(session.payout_amount)} $CHARM\n\n${receiptStatus}`)
       .addFields(
-        { name: 'Maw Ticket', value: `#${ticket?.ticket_number || session.ticket_id}`, inline: true },
+        { name: 'Fate', value: getSessionDispositionLabel(session), inline: true },
+        { name: 'Rarity', value: snapshot.rarityLabel, inline: true },
+        { name: 'Maw Rank', value: session.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(session.average_rank), inline: true },
+        { name: ticketFieldName, value: summary.text, inline: true },
+        { name: 'Jackpot contribution', value: `${formatSignedCharm(snapshot.jackpotContributionCharm)} $CHARM`, inline: true },
         { name: 'Progress', value: `${event.received_count} / ${event.goal_count}`, inline: true },
-        { name: 'Status', value: 'Your Squig is now part of the Maw Pool.', inline: false }
+        { name: 'Status', value: receiptStatus, inline: false }
       );
     await user.send({ embeds: [embed] }).catch(() => null);
   }
   const content =
-    `Squig ${formatToken(session.token_id)} was fed to the Maw\n` +
+    `${receiptTitle}\n\n` +
     `Feeder: <@${session.discord_user_id}>\n` +
+    `Rarity: ${snapshot.rarityLabel}\n` +
+    `Maw Rank: ${session.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(session.average_rank)}\n` +
     `Payout: ${formatCharm(session.payout_amount)} $CHARM\n` +
-    `Maw Ticket: #${ticket?.ticket_number || session.ticket_id}\n` +
+    `${ticketFieldName}: ${summary.text}\n` +
+    `Jackpot contribution: ${formatSignedCharm(snapshot.jackpotContributionCharm)} $CHARM\n` +
+    `Current jackpot: ${formatCharm(event.jackpot_charm)} $CHARM\n` +
     `Progress: ${event.received_count} / ${event.goal_count}\n` +
-    `The Maw keeps what it chews.`;
+    `\n${receiptStatus}`;
   const receiptMessage = await postMawFeed(event, { content }).catch(() => null);
   const panelMoved = receiptMessage
     ? await moveMawPanelBelowMessage(event, receiptMessage).catch(async (err) => {
@@ -2856,6 +3697,570 @@ async function postMawReceiptMessages({ session, event, ticket }) {
     })
     : false;
   return { receiptPosted: Boolean(receiptMessage), panelMoved };
+}
+
+async function ensureSwallowedDigestionRequest(sessionId) {
+  const pool = resolvePool();
+  const config = getMawConfig();
+  if (!deps?.client) return { ok: false, reason: 'Discord client unavailable.' };
+  const db = await pool.connect();
+  let done = false;
+  try {
+    await db.query('BEGIN');
+    const rows = await db.query(
+      `SELECT s.*, p.id AS pool_squig_id, p.admin_digestion_message_id AS pool_admin_digestion_message_id
+       FROM maw_return_sessions s
+       LEFT JOIN maw_squig_pool p ON p.received_session_id = s.id
+       WHERE s.id = $1
+       FOR UPDATE OF s`,
+      [String(sessionId)]
+    );
+    const session = rows.rows[0];
+    if (!session || getSessionDisposition(session) !== MAW_DISPOSITIONS.SWALLOWED) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: true, skipped: true };
+    }
+    if (session.admin_digestion_message_id && !String(session.admin_digestion_message_id).startsWith('failed:')) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: true, skipped: true, messageId: session.admin_digestion_message_id };
+    }
+    const poolRows = await db.query(
+      `SELECT * FROM maw_squig_pool WHERE received_session_id = $1 FOR UPDATE`,
+      [String(session.id)]
+    );
+    const poolSquig = poolRows.rows[0];
+    if (!poolSquig) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: false, reason: 'Swallowed pool record missing.' };
+    }
+    if (poolSquig.admin_digestion_message_id && !String(poolSquig.admin_digestion_message_id).startsWith('failed:')) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: true, skipped: true, messageId: poolSquig.admin_digestion_message_id };
+    }
+
+    const channel = await deps.client.channels.fetch(config.digestionAdminChannelId).catch(() => null);
+    if (!channel?.isTextBased?.()) {
+      throw new Error(`Maw digestion admin channel ${config.digestionAdminChannelId} is unavailable.`);
+    }
+    const message = await channel.send(buildMawDigestionRequestPayload(session, poolSquig, config));
+    await db.query(
+      `UPDATE maw_return_sessions
+       SET admin_digestion_message_id = $2,
+           digestion_status = 'pending_burn',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(session.id), String(message.id)]
+    );
+    await db.query(
+      `UPDATE maw_squig_pool
+       SET admin_digestion_message_id = $2,
+           digestion_status = 'pending_burn',
+           inventory_status = 'pending_burn',
+           status = 'pending_burn',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(poolSquig.id), String(message.id)]
+    );
+    await db.query('COMMIT');
+    done = true;
+    console.info(`[Maw] Admin digestion request posted for Squig ${session.token_id} in channel ${config.digestionAdminChannelId}.`);
+    await postAdminLogByGuildId(session.guild_id, 'Maw Digestion Request Posted', `${createDigestionLogPrefix(session)} awaiting burn. Message ${message.id}.`).catch(() => null);
+    return { ok: true, messageId: message.id };
+  } catch (err) {
+    if (!done) {
+      await db.query('ROLLBACK').catch(() => null);
+      await pool.query(
+        `UPDATE maw_return_sessions
+         SET digestion_receipt_error = $2,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [String(sessionId), `admin_request_failed:${String(err?.message || err).slice(0, 500)}`]
+      ).catch(() => null);
+    }
+    console.warn('[Maw] admin digestion request failed:', String(err?.message || err));
+    throw err;
+  } finally {
+    db.release();
+  }
+}
+
+function buildMawDigestionRequestPayload(session, poolSquig, config) {
+  const inboundUrl = inboundTxUrl(session, config) || session.received_tx_hash || 'Unavailable';
+  const receivedTs = session.received_at ? Math.floor(new Date(session.received_at).getTime() / 1000) : null;
+  const embed = new EmbedBuilder()
+    .setTitle('SQUIG AWAITING DIGESTION')
+    .setColor(0xd9480f)
+    .setDescription('This Squig was marked Swallowed and must now be permanently burned.')
+    .addFields(
+      { name: 'Squig', value: formatToken(session.token_id), inline: true },
+      { name: 'Original feeder', value: `<@${session.discord_user_id}>`, inline: true },
+      { name: 'Rarity', value: getSessionRarityLabel(session), inline: true },
+      { name: 'Maw Rank', value: session.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(session.average_rank), inline: true },
+      { name: 'Source wallet', value: `\`${session.source_wallet || poolSquig.original_sender_wallet || 'unknown'}\``, inline: false },
+      { name: 'Current wallet', value: `\`${config.mawWalletAddress}\``, inline: false },
+      { name: 'Inbound transaction', value: inboundUrl, inline: false },
+      { name: 'Received', value: receivedTs ? `<t:${receivedTs}:F>` : 'Unknown', inline: true },
+      { name: 'Next step', value: 'After completing the burn from the Maw wallet, use the button below and provide the Etherscan transaction URL.', inline: false }
+    );
+  return {
+    embeds: [embed],
+    components: [buildDigestionActionRow(session.id, false)],
+  };
+}
+
+function buildDigestionActionRow(sessionId, completed = false, retryReceipt = false) {
+  const button = completed
+    ? new ButtonBuilder()
+      .setCustomId(`maw_submit_burn_tx:${sessionId}`)
+      .setLabel('✅ Digestion Complete')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(true)
+    : new ButtonBuilder()
+      .setCustomId(retryReceipt ? `maw_retry_digestion_receipt:${sessionId}` : `maw_submit_burn_tx:${sessionId}`)
+      .setLabel(retryReceipt ? 'Retry Digestion Receipt' : 'Submit Burn Transaction')
+      .setStyle(retryReceipt ? ButtonStyle.Secondary : ButtonStyle.Danger);
+  return new ActionRowBuilder().addComponents(button);
+}
+
+async function handleMawSubmitBurnButton(interaction) {
+  if (!isAdmin(interaction)) {
+    console.warn(`[Maw] Unauthorized burn submission button attempt by ${interaction.user?.id || 'unknown'}.`);
+    await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
+    return true;
+  }
+  const sessionId = String(interaction.customId || '').split(':')[1] || '';
+  const session = await getMawSessionWithPool(sessionId);
+  if (session && String(session.guild_id) !== String(interaction.guildId)) {
+    await interaction.reply({ content: 'That digestion request is not available here.', flags: EPHEMERAL });
+    return true;
+  }
+  if (!session || getSessionDisposition(session) !== MAW_DISPOSITIONS.SWALLOWED || String(session.digestion_status || '') !== 'pending_burn') {
+    if (String(session?.digestion_status || '') === 'receipt_failed' && session?.burn_transaction_hash) {
+      await interaction.reply({ content: 'The burn is already verified. Use Retry Digestion Receipt instead of submitting another burn transaction.', flags: EPHEMERAL });
+      return true;
+    }
+    await interaction.reply({ content: 'This Squig’s digestion has already been completed or is not ready for burn confirmation.', flags: EPHEMERAL });
+    return true;
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`maw_burn_tx_modal:${sessionId}`)
+    .setTitle('Confirm Squig Digestion')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('burn_tx')
+          .setLabel('Burn transaction Etherscan URL')
+          .setPlaceholder('https://etherscan.io/tx/0x...')
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short)
+      )
+    );
+  await interaction.showModal(modal);
+  return true;
+}
+
+async function handleMawBurnTransactionModal(interaction) {
+  if (!isAdmin(interaction)) {
+    console.warn(`[Maw] Unauthorized burn modal attempt by ${interaction.user?.id || 'unknown'}.`);
+    await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
+    return true;
+  }
+  const sessionId = String(interaction.customId || '').split(':')[1] || '';
+  const config = getMawConfig();
+  const input = interaction.fields?.getTextInputValue?.('burn_tx') || '';
+  let parsed;
+  try {
+    parsed = parseBurnTransactionInput(input, config.explorerBaseUrl);
+  } catch (err) {
+    await interaction.reply({ content: `Burn transaction rejected: ${err.message}`, flags: EPHEMERAL });
+    return true;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  await postAdminLog(interaction.guild, 'Maw Burn Submission', `<@${interaction.user.id}> submitted burn tx ${parsed.hash} for Maw session ${sessionId}.`).catch(() => null);
+  console.info(`[Maw] Burn submission received for session ${sessionId}: ${parsed.hash}`);
+  try {
+    const session = await getMawSessionWithPool(sessionId);
+    if (session && String(session.guild_id) !== String(interaction.guildId)) {
+      await interaction.editReply({ content: 'That digestion request is not available here.' });
+      return true;
+    }
+    if (!session || getSessionDisposition(session) !== MAW_DISPOSITIONS.SWALLOWED) {
+      await interaction.editReply({ content: 'This Squig is not pending Swallowed digestion.' });
+      return true;
+    }
+    if (String(session.digestion_status || '') !== 'pending_burn') {
+      await interaction.editReply({ content: 'This Squig’s digestion has already been completed or is currently being processed.' });
+      return true;
+    }
+    if (session.burn_transaction_hash) {
+      await interaction.editReply({ content: 'This Squig already has a verified burn transaction. Retry the final receipt instead.' });
+      return true;
+    }
+    const validation = await validateMawBurnTransaction({
+      session,
+      txHash: parsed.hash,
+      provider: getMawProvider(),
+      config,
+    });
+    const completed = await completeMawDigestionBurn({
+      sessionId,
+      burnTransactionHash: parsed.hash,
+      burnTransactionUrl: parsed.url,
+      confirmedBy: interaction.user.id,
+      validation,
+    });
+    await interaction.editReply({ content: `Burn verified for Squig ${formatToken(completed.session.token_id)}. Posting final digestion receipt...` });
+    const receipt = await postFinalDigestionReceiptForSession(sessionId).catch(async (err) => {
+      await markDigestionReceiptFailed(sessionId, err);
+      return { ok: false, reason: String(err?.message || err) };
+    });
+    if (receipt?.ok) {
+      await interaction.followUp({ content: 'Final digestion receipt posted.', flags: EPHEMERAL }).catch(() => null);
+    } else {
+      await interaction.followUp({ content: `Burn is verified, but the final receipt failed: ${receipt?.reason || 'unknown error'}. Use the retry button or /maw digestion to retry.`, flags: EPHEMERAL }).catch(() => null);
+    }
+  } catch (err) {
+    console.warn('[Maw] burn transaction rejected:', String(err?.message || err));
+    await postAdminLog(interaction.guild, 'Maw Burn Rejected', `Session ${sessionId}: ${String(err?.message || err).slice(0, 1000)}`).catch(() => null);
+    await interaction.editReply({ content: `Burn transaction rejected: ${String(err?.message || err).slice(0, 500)}` });
+  }
+  return true;
+}
+
+async function handleMawRetryDigestionReceiptButton(interaction) {
+  if (!isAdmin(interaction)) {
+    console.warn(`[Maw] Unauthorized digestion receipt retry by ${interaction.user?.id || 'unknown'}.`);
+    await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
+    return true;
+  }
+  const sessionId = String(interaction.customId || '').split(':')[1] || '';
+  await interaction.deferReply({ ephemeral: true });
+  const session = await getMawSessionWithPool(sessionId);
+  if (session && String(session.guild_id) !== String(interaction.guildId)) {
+    await interaction.editReply({ content: 'That digestion request is not available here.' });
+    return true;
+  }
+  console.info(`[Maw] Final digestion receipt retry requested for session ${sessionId}.`);
+  const receipt = await postFinalDigestionReceiptForSession(sessionId).catch(async (err) => {
+    await markDigestionReceiptFailed(sessionId, err);
+    return { ok: false, reason: String(err?.message || err) };
+  });
+  if (!receipt?.ok) {
+    await interaction.editReply({ content: `Retry failed: ${receipt?.reason || 'unknown error'}` });
+    return true;
+  }
+  await interaction.editReply({ content: 'Final digestion receipt posted.' });
+  return true;
+}
+
+async function getMawSessionWithPool(sessionId, db = null) {
+  const pool = db || resolvePool();
+  const { rows } = await pool.query(
+    `SELECT s.*, p.id AS pool_squig_id, p.disposition AS pool_disposition,
+            p.inventory_status AS pool_inventory_status, p.status AS pool_status,
+            p.digestion_status AS pool_digestion_status,
+            p.admin_digestion_message_id AS pool_admin_digestion_message_id,
+            p.burn_transaction_hash AS pool_burn_transaction_hash,
+            p.burn_transaction_url AS pool_burn_transaction_url
+     FROM maw_return_sessions s
+     LEFT JOIN maw_squig_pool p ON p.received_session_id = s.id
+     WHERE s.id = $1
+     LIMIT 1`,
+    [String(sessionId)]
+  );
+  return rows[0] || null;
+}
+
+async function validateMawBurnTransaction({ session, txHash, provider, config }) {
+  if (!provider?.getTransactionReceipt) throw new Error('No Ethereum provider is configured for burn validation.');
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) throw new Error('Burn transaction receipt was not found.');
+  if (receipt.status !== 1 && receipt.status !== '0x1' && receipt.status !== true) {
+    throw new Error('Burn transaction failed on-chain.');
+  }
+  const expectedTokenId = BigInt(session.token_id).toString();
+  const contract = normalizeAddress(config.squigContract);
+  const mawWallet = normalizeAddress(config.mawWalletAddress);
+  const burnAddresses = new Set(config.acceptedBurnAddresses.map(normalizeAddress).filter(Boolean));
+  const matchingLogs = (receipt.logs || []).filter((log) => {
+    const topics = log.topics || [];
+    if (normalizeAddress(log.address) !== contract) return false;
+    if (String(topics[0] || '').toLowerCase() !== MAW_TRANSFER_TOPIC) return false;
+    if (topics.length < 4) return false;
+    const from = normalizeAddress(`0x${String(topics[1] || '').slice(-40)}`);
+    const tokenId = BigInt(topics[3]).toString();
+    return from === mawWallet && tokenId === expectedTokenId;
+  });
+  if (!matchingLogs.length) {
+    throw new Error('Burn transaction does not show the expected Squig leaving the Maw wallet.');
+  }
+  const burnLog = matchingLogs.find((log) => {
+    const to = normalizeAddress(`0x${String((log.topics || [])[2] || '').slice(-40)}`);
+    return burnAddresses.has(to);
+  });
+  if (!burnLog) {
+    throw new Error('Burn transaction did not send the Squig to an accepted irrecoverable burn address.');
+  }
+  const burnTo = normalizeAddress(`0x${String((burnLog.topics || [])[2] || '').slice(-40)}`);
+
+  let ownerAfter = null;
+  let ownerLookupReverted = false;
+  if (provider) {
+    try {
+      const erc721 = new ethers.Contract(contract, ERC721_OWNER_ABI, provider);
+      ownerAfter = normalizeAddress(await erc721.ownerOf(expectedTokenId));
+    } catch {
+      ownerLookupReverted = true;
+    }
+  }
+  if (ownerAfter === mawWallet) {
+    throw new Error('Token is still owned by the Maw wallet after the submitted transaction.');
+  }
+  if (burnTo !== ZERO_ADDRESS && ownerAfter && ownerAfter !== burnTo) {
+    throw new Error('Token is not currently owned by the accepted burn address from the submitted transaction.');
+  }
+
+  return {
+    ok: true,
+    burnMethod: burnTo === ZERO_ADDRESS ? 'erc721_transfer_to_zero_from_burn' : 'transfer_to_accepted_burn_address',
+    burnTo,
+    ownerAfter,
+    ownerLookupReverted,
+    validationLevel: ownerLookupReverted || burnTo === ZERO_ADDRESS ? 'erc721_transfer_event_and_owner_absence' : 'erc721_transfer_event_and_owner_at_burn_address',
+  };
+}
+
+async function completeMawDigestionBurn({ sessionId, burnTransactionHash, burnTransactionUrl, confirmedBy, validation }) {
+  const pool = resolvePool();
+  const db = await pool.connect();
+  let done = false;
+  try {
+    await db.query('BEGIN');
+    const sessionRows = await db.query(`SELECT * FROM maw_return_sessions WHERE id = $1 FOR UPDATE`, [String(sessionId)]);
+    const session = sessionRows.rows[0];
+    if (!session || getSessionDisposition(session) !== MAW_DISPOSITIONS.SWALLOWED) {
+      throw new Error('This Squig is not a Swallowed Maw session.');
+    }
+    if (String(session.digestion_status || '') !== 'pending_burn') {
+      throw new Error('This Squig’s digestion has already been completed or is currently being processed.');
+    }
+    if (session.burn_transaction_hash) {
+      throw new Error('This Squig already has a verified burn transaction.');
+    }
+    const poolRows = await db.query(`SELECT * FROM maw_squig_pool WHERE received_session_id = $1 FOR UPDATE`, [String(session.id)]);
+    const poolSquig = poolRows.rows[0];
+    if (!poolSquig || normalizeDisposition(poolSquig.disposition) !== MAW_DISPOSITIONS.SWALLOWED) {
+      throw new Error('Swallowed inventory record is missing or invalid.');
+    }
+    const duplicate = await db.query(
+      `SELECT id FROM maw_return_sessions WHERE burn_transaction_hash = $1 AND id <> $2 LIMIT 1`,
+      [burnTransactionHash, String(session.id)]
+    );
+    if (duplicate.rows[0]) {
+      console.warn(`[Maw] Duplicate burn hash rejected: ${burnTransactionHash}`);
+      throw new Error('That burn transaction hash has already been used.');
+    }
+    await db.query(
+      `UPDATE maw_return_sessions
+       SET burn_transaction_hash = $2,
+           burn_transaction_url = $3,
+           burn_confirmed_by = $4,
+           burn_confirmed_at = NOW(),
+           digestion_status = 'burn_verified',
+           digestion_receipt_error = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(session.id), burnTransactionHash, burnTransactionUrl, String(confirmedBy)]
+    );
+    await db.query(
+      `UPDATE maw_squig_pool
+       SET burn_transaction_hash = $2,
+           burn_transaction_url = $3,
+           burn_confirmed_by = $4,
+           burn_confirmed_at = NOW(),
+           inventory_status = 'digested',
+           status = 'digested',
+           digestion_status = 'burn_verified',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(poolSquig.id), burnTransactionHash, burnTransactionUrl, String(confirmedBy)]
+    );
+    await db.query('COMMIT');
+    done = true;
+    console.info(`[Maw] Burn transaction verified for Squig ${session.token_id}: ${burnTransactionHash} (${validation?.validationLevel || 'validated'}).`);
+    await postAdminLogByGuildId(session.guild_id, 'Maw Burn Verified', `${createDigestionLogPrefix(session)} burn verified: ${burnTransactionUrl}.`).catch(() => null);
+    return { ok: true, session: { ...session, burn_transaction_hash: burnTransactionHash, burn_transaction_url: burnTransactionUrl }, poolSquig };
+  } catch (err) {
+    if (!done) await db.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    db.release();
+  }
+}
+
+async function postFinalDigestionReceiptForSession(sessionId) {
+  const pool = resolvePool();
+  const config = getMawConfig();
+  const channel = await deps.client?.channels?.fetch?.(config.digestionReceiptChannelId).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    throw new Error(`Maw digestion receipt channel ${config.digestionReceiptChannelId} is unavailable.`);
+  }
+  const db = await pool.connect();
+  let session;
+  let message;
+  let done = false;
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock($1::bigint)', [advisoryLockKey(`maw-digestion-receipt:${sessionId}`)]);
+    const rows = await db.query(
+      `SELECT s.*, p.id AS pool_squig_id
+       FROM maw_return_sessions s
+       LEFT JOIN maw_squig_pool p ON p.received_session_id = s.id
+       WHERE s.id = $1
+       FOR UPDATE OF s`,
+      [String(sessionId)]
+    );
+    session = rows.rows[0];
+    if (!session || getSessionDisposition(session) !== MAW_DISPOSITIONS.SWALLOWED) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: false, reason: 'Swallowed session not found.' };
+    }
+    if (String(session.digestion_status || '') === 'digested' && session.digestion_receipt_message_id) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: true, alreadyPosted: true, messageId: session.digestion_receipt_message_id };
+    }
+    if (!['burn_verified', 'receipt_failed'].includes(String(session.digestion_status || ''))) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: false, reason: 'Burn has not been verified or receipt already posted.' };
+    }
+    if (!session.burn_transaction_url || !session.burn_transaction_hash) {
+      await db.query('ROLLBACK');
+      done = true;
+      return { ok: false, reason: 'Burn transaction is missing.' };
+    }
+
+    const image = mawDigestedImageAttachment(config);
+    const embed = new EmbedBuilder()
+      .setTitle(`SQUIG ${formatToken(session.token_id)} HAS BEEN DIGESTED`)
+      .setColor(0x2f9e44)
+      .setDescription(
+        `<@${session.discord_user_id}>, the Maw has finished digesting your ${getSessionRarityLabel(session)} Squig.\n\n` +
+        `Squig ${formatToken(session.token_id)} has now been permanently burned and removed from circulation.`
+      )
+      .addFields(
+        { name: 'Original feeder', value: `<@${session.discord_user_id}>`, inline: true },
+        { name: 'Rarity', value: getSessionRarityLabel(session), inline: true },
+        { name: 'Maw Rank', value: session.average_rank == null ? 'Legacy flat event' : formatMawAverageRank(session.average_rank), inline: true },
+        { name: '$CHARM received', value: formatCharm(session.payout_amount), inline: true },
+        { name: 'Maw Tickets earned', value: String(Math.max(1, Math.floor(Number(session.ticket_count) || 1))), inline: true },
+        { name: 'Jackpot contribution', value: `${formatSignedCharm(session.jackpot_contribution_charm)} $CHARM`, inline: true },
+        { name: 'Burn receipt', value: session.burn_transaction_url, inline: false },
+        { name: 'The Maw keeps what it swallows.', value: '\u200B', inline: false }
+      );
+    if (image.imageUrl) embed.setImage(image.imageUrl);
+    message = await channel.send({
+      content: `<@${session.discord_user_id}>`,
+      embeds: [embed],
+      allowedMentions: { users: [String(session.discord_user_id)], roles: [], parse: [] },
+      ...(image.files.length ? { files: image.files } : {}),
+    });
+    await db.query(
+      `UPDATE maw_return_sessions
+       SET digestion_status = 'digested',
+           digestion_receipt_message_id = $2,
+           digestion_receipt_posted_at = NOW(),
+           digestion_receipt_error = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [String(session.id), String(message.id)]
+    );
+    await db.query(
+      `UPDATE maw_squig_pool
+       SET digestion_status = 'digested',
+           inventory_status = 'digested',
+           status = 'digested',
+           updated_at = NOW()
+       WHERE received_session_id = $1`,
+      [String(session.id)]
+    );
+    await db.query('COMMIT');
+    done = true;
+  } catch (err) {
+    if (!done) await db.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    db.release();
+  }
+  await disableDigestionAdminButton(session.id).catch(() => null);
+  console.info(`[Maw] Final digestion receipt posted for Squig ${session.token_id}: ${message.id}`);
+  await postAdminLogByGuildId(session.guild_id, 'Maw Digestion Complete', `${createDigestionLogPrefix(session)} final receipt posted: ${message.id}.`).catch(() => null);
+  return { ok: true, messageId: message.id };
+}
+
+function mawDigestedImageAttachment(config = getMawConfig()) {
+  const localPath = config.digestedImagePath ? path.resolve(config.digestedImagePath) : null;
+  if (localPath && fs.existsSync(localPath)) {
+    const name = `maw-digested${path.extname(localPath) || '.png'}`;
+    return { imageUrl: `attachment://${name}`, files: [new AttachmentBuilder(localPath, { name })] };
+  }
+  if (localPath) console.warn(`[Maw] configured digestion image path not found: ${localPath}`);
+  if (config.digestedImageUrl) return { imageUrl: config.digestedImageUrl, files: [] };
+  console.warn('[Maw] no digestion image configured; posting final receipt without image.');
+  return { imageUrl: null, files: [] };
+}
+
+async function markDigestionReceiptFailed(sessionId, err) {
+  const message = String(err?.message || err || 'unknown error').slice(0, 500);
+  await resolvePool().query(
+    `UPDATE maw_return_sessions
+     SET digestion_status = 'receipt_failed',
+         digestion_receipt_error = $2,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [String(sessionId), message]
+  ).catch(() => null);
+  await resolvePool().query(
+    `UPDATE maw_squig_pool
+     SET digestion_status = 'receipt_failed',
+         inventory_status = 'digested',
+         status = 'digested',
+         updated_at = NOW()
+     WHERE received_session_id = $1`,
+    [String(sessionId)]
+  ).catch(() => null);
+  const session = await getMawSessionWithPool(sessionId).catch(() => null);
+  if (session?.admin_digestion_message_id) await updateDigestionAdminButtonForRetry(session).catch(() => null);
+  console.warn(`[Maw] final digestion receipt failed for session ${sessionId}: ${message}`);
+  await postAdminLogByGuildId(session?.guild_id || null, 'Maw Digestion Receipt Failed', `Session ${sessionId}: ${message}`).catch(() => null);
+}
+
+async function disableDigestionAdminButton(sessionId) {
+  const session = await getMawSessionWithPool(sessionId);
+  if (!session?.admin_digestion_message_id || !deps?.client) return false;
+  const config = getMawConfig();
+  const channel = await deps.client.channels.fetch(config.digestionAdminChannelId).catch(() => null);
+  const message = await channel?.messages?.fetch?.(session.admin_digestion_message_id).catch(() => null);
+  if (!message?.edit) return false;
+  await message.edit({ components: [buildDigestionActionRow(session.id, true)] });
+  return true;
+}
+
+async function updateDigestionAdminButtonForRetry(session) {
+  if (!session?.admin_digestion_message_id || !deps?.client) return false;
+  const config = getMawConfig();
+  const channel = await deps.client.channels.fetch(config.digestionAdminChannelId).catch(() => null);
+  const message = await channel?.messages?.fetch?.(session.admin_digestion_message_id).catch(() => null);
+  if (!message?.edit) return false;
+  await message.edit({ components: [buildDigestionActionRow(session.id, false, true)] });
+  return true;
 }
 
 async function maybeCompleteMawGoal(eventId) {
@@ -2873,7 +4278,12 @@ async function maybeCompleteMawGoal(eventId) {
       return { ok: false, reason: 'Goal not ready.' };
     }
     const ticketRows = await db.query(
-      `SELECT * FROM maw_tickets WHERE event_id = $1 ORDER BY random() LIMIT 1`,
+      `SELECT t.*, s.rarity_tier, s.average_rank, s.ticket_count AS session_ticket_count
+       FROM maw_tickets t
+       LEFT JOIN maw_return_sessions s ON s.id = t.return_session_id
+       WHERE t.event_id = $1
+       ORDER BY random()
+       LIMIT 1`,
       [String(event.id)]
     );
     const ticket = ticketRows.rows[0];
@@ -2912,7 +4322,13 @@ async function maybeCompleteMawGoal(eventId) {
       new EmbedBuilder()
         .setTitle('THE MAW IS FULL')
         .setColor(0x2f9e44)
-        .setDescription(`${draw.event.goal_count} / ${draw.event.goal_count} Squigs consumed. The ${formatCharm(draw.event.jackpot_charm)} $CHARM Maw Ticket Draw is unlocked.`),
+        .setDescription(
+          `${draw.event.goal_count} / ${draw.event.goal_count} Squigs consumed.\n` +
+          `Total tickets in the draw: ${draw.event.total_ticket_count || 'unknown'}\n` +
+          `Starting jackpot: ${formatCharm(draw.event.jackpot_base_charm)} $CHARM\n` +
+          `Rarity contributions: ${formatCharm(draw.event.jackpot_contributed_charm)} $CHARM\n` +
+          `Final jackpot: ${formatCharm(draw.event.jackpot_charm)} $CHARM`
+        ),
     ],
   }).catch(() => null);
   const paid = await payPendingMawJackpot(draw.event.id);
@@ -2921,6 +4337,12 @@ async function maybeCompleteMawGoal(eventId) {
       content:
         `Maw Ticket #${paid.ticket.ticket_number} was drawn\n` +
         `Winner: <@${paid.ticket.discord_user_id}>\n` +
+        `Winning Squig: ${formatToken(paid.ticket.token_id)}\n` +
+        `Rarity: ${getSessionRarityLabel(paid.ticket)}\n` +
+        `Squigs consumed: ${paid.event.received_count} / ${paid.event.goal_count}\n` +
+        `Total tickets in draw: ${paid.event.total_ticket_count || 'unknown'}\n` +
+        `Starting jackpot: ${formatCharm(paid.event.jackpot_base_charm)} $CHARM\n` +
+        `Rarity contributions: ${formatCharm(paid.event.jackpot_contributed_charm)} $CHARM\n` +
         `Prize: ${formatCharm(paid.event.jackpot_charm)} $CHARM\n` +
         `The Maw burps. The Marketplace gets stronger.`,
     }).catch(() => null);
@@ -2943,7 +4365,14 @@ async function payPendingMawJackpot(eventId) {
       done = true;
       return { ok: false };
     }
-    const ticketRows = await db.query(`SELECT * FROM maw_tickets WHERE id = $1 LIMIT 1`, [String(event.draw_winning_ticket_id)]);
+    const ticketRows = await db.query(
+      `SELECT t.*, s.rarity_tier, s.average_rank, s.ticket_count AS session_ticket_count
+       FROM maw_tickets t
+       LEFT JOIN maw_return_sessions s ON s.id = t.return_session_id
+       WHERE t.id = $1
+       LIMIT 1`,
+      [String(event.draw_winning_ticket_id)]
+    );
     ticket = ticketRows.rows[0];
     if (!ticket) {
       await db.query('ROLLBACK');
@@ -3061,6 +4490,12 @@ async function payPendingMawJackpots(limit = 5) {
         content:
           `Maw Ticket #${result.ticket.ticket_number} was drawn\n` +
           `Winner: <@${result.ticket.discord_user_id}>\n` +
+          `Winning Squig: ${formatToken(result.ticket.token_id)}\n` +
+          `Rarity: ${getSessionRarityLabel(result.ticket)}\n` +
+          `Squigs consumed: ${result.event.received_count} / ${result.event.goal_count}\n` +
+          `Total tickets in draw: ${result.event.total_ticket_count || 'unknown'}\n` +
+          `Starting jackpot: ${formatCharm(result.event.jackpot_base_charm)} $CHARM\n` +
+          `Rarity contributions: ${formatCharm(result.event.jackpot_contributed_charm)} $CHARM\n` +
           `Prize: ${formatCharm(result.event.jackpot_charm)} $CHARM\n` +
           `The Maw burps. The Marketplace gets stronger.`,
       }).catch(() => null);
@@ -3106,6 +4541,7 @@ async function expirePrizeClaims(guildId = null) {
         await db.query(
           `UPDATE maw_squig_pool
            SET status = 'available',
+               inventory_status = 'available',
                reserved_claim_id = NULL,
                updated_at = NOW()
            WHERE id = $1
@@ -3186,6 +4622,7 @@ module.exports = {
   buildSquigPrizeSlashCommand,
   handleCommand,
   handleComponent,
+  handleModalSubmit,
   startMawWatchers,
   ensureMawTables,
   runMawReceiptCheck,
@@ -3200,4 +4637,5 @@ module.exports = {
   normalizeAddress,
   getMawConfig,
   formatCharm,
+  validateMawBurnTransaction,
 };

@@ -73,6 +73,7 @@ assert.strictEqual(normalizeAddress('not-a-wallet'), null);
 const savedEnv = {
   MAW_GOAL_COUNT: process.env.MAW_GOAL_COUNT,
   MAW_RETURN_REWARD_CHARM: process.env.MAW_RETURN_REWARD_CHARM,
+  MAW_JACKPOT_BASE_CHARM: process.env.MAW_JACKPOT_BASE_CHARM,
   MAW_JACKPOT_CHARM: process.env.MAW_JACKPOT_CHARM,
   MAW_SESSION_TTL_MINUTES: process.env.MAW_SESSION_TTL_MINUTES,
   MAW_PRIZE_CASHOUT_CHARM: process.env.MAW_PRIZE_CASHOUT_CHARM,
@@ -83,6 +84,7 @@ for (const key of Object.keys(savedEnv)) delete process.env[key];
 const defaults = getMawConfig();
 assert.strictEqual(defaults.goalCount, 20);
 assert.strictEqual(defaults.returnRewardCharm, 12500);
+assert.strictEqual(defaults.jackpotBaseCharm, 0);
 assert.strictEqual(defaults.jackpotCharm, 35000);
 assert.strictEqual(defaults.sessionTtlMinutes, 20);
 assert.strictEqual(defaults.prizeCashoutCharm, 8000);
@@ -131,6 +133,15 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   filterEligiblePrizeSquigsForUser(rerollPool, targetUser, targetWallets).map((row) => row.id),
   ['10']
+);
+
+assert.deepStrictEqual(
+  sortMawSquigsForDisplay([
+    { tokenId: '7', quote: { averageRank: 10 } },
+    { tokenId: '9', quote: { averageRank: 20 } },
+    { tokenId: '5', quote: { averageRank: 20 } },
+  ]).map((row) => row.tokenId),
+  ['7', '9', '5']
 );
 
 assert.deepStrictEqual(

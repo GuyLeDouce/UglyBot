@@ -9643,6 +9643,10 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await mawEvent.handleModalSubmit(interaction)) {
+        return;
+      }
+
       if ([
         'prize_set_name_modal',
         'prize_set_description_modal',
