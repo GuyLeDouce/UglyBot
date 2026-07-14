@@ -2192,6 +2192,7 @@ function buildMawFinalConfirmationPayload(event, pending, token) {
   const quote = pending.quote || null;
   const disposition = normalizeDisposition(pending.squigDisposition);
   const isSwallowed = disposition === MAW_DISPOSITIONS.SWALLOWED;
+  const isOgSquig = /^\d+$/.test(String(pending.tokenId)) && Number(pending.tokenId) <= 1250;
   const title = `${isSwallowed ? 'SWALLOW' : 'REGURGITATE'} SQUIG ${formatToken(pending.tokenId)}?`;
   const fateText = isSwallowed
     ? `After the Maw receives it, the Squig will enter the digestion queue. An admin will permanently burn it and publish the completed burn transaction.`
@@ -2210,6 +2211,11 @@ function buildMawFinalConfirmationPayload(event, pending, token) {
       `After confirming, you will have ${formatDurationMinutes(event.session_ttl_minutes)} to complete the transfer.`
     )
     .addFields(
+      ...(isOgSquig ? [{
+        name: '⚠️ FINAL OG SQUIG REMINDER',
+        value: `Squig ${formatToken(pending.tokenId)} is an **OG Squig**. You are about to send it to the Malformed Maw for consumption. This is allowed, but confirm only if you intend to feed this OG Squig.`,
+        inline: false
+      }] : []),
       { name: `Only Squig ${formatToken(pending.tokenId)} counts for this session.`, value: 'No substitutions. The Maw reads receipts.', inline: false },
       { name: 'Rarity', value: quote ? quote.rarityLabel : 'Legacy flat event', inline: true },
       { name: 'Maw Rank', value: quote ? formatMawAverageRank(quote.averageRank) : 'Legacy flat event', inline: true },
