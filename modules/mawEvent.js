@@ -382,7 +382,7 @@ async function handleMawExplain(interaction) {
     .setColor(0x8b1e3f)
     .setDescription(
       `It’s a Squig return event.\n\n` +
-      `Pick an eligible Squig, review its exact reward, choose its fate, then confirm. Only after that do you get a ${ttl} timer to send that Squig to the official Maw wallet.`
+      `Pick an eligible Squig, review its exact reward, choose its fate, then confirm. Only after that do you get a ${ttl} timer to send that Squig to the Malformed Maw wallet.`
     )
     .addFields(
       {
@@ -1755,7 +1755,7 @@ async function handleMawFeedStart(interaction) {
   const eventId = String(interaction.customId || '').split(':')[1] || '';
   const config = getMawConfig();
   if (!config.mawWalletAddress) {
-    await interaction.reply({ content: 'The Maw wallet is not configured yet. Tell an admin it needs MAW_WALLET_ADDRESS.', flags: EPHEMERAL });
+    await interaction.reply({ content: 'The Malformed Maw wallet is not configured yet. Tell an admin it needs MAW_WALLET_ADDRESS.', flags: EPHEMERAL });
     return true;
   }
 
@@ -2135,7 +2135,7 @@ function buildMawFateSelectionPayload(event, pending, token) {
     .setColor(0x8b1e3f)
     .setDescription(
       `**Swallow It**\n` +
-      `The Squig will be sent to the Maw wallet and permanently burned by an admin after it is received.\n\n` +
+      `The Squig will be sent to the Malformed Maw wallet and permanently burned by an admin after it is received.\n\n` +
       `**Regurgitate It**\n` +
       `The Squig will be added to the Maw Pool for future games, giveaways, incentives, prizes, and community rewards.\n\n` +
       `Both choices receive the same rarity-based $CHARM payout, Maw Tickets, and jackpot contribution.`
@@ -2195,7 +2195,7 @@ function buildMawFinalConfirmationPayload(event, pending, token) {
     .setTitle(title)
     .setColor(0xd9480f)
     .setDescription(
-      `You will send Squig ${formatToken(pending.tokenId)} to the official Maw wallet.\n\n` +
+      `You will send Squig ${formatToken(pending.tokenId)} to the Malformed Maw wallet.\n\n` +
       `${fateText}\n\n` +
       `This choice cannot be changed after the transfer session begins.\n\n` +
       `You will receive:\n\n` +
@@ -2208,7 +2208,7 @@ function buildMawFinalConfirmationPayload(event, pending, token) {
       { name: `Only Squig ${formatToken(pending.tokenId)} counts for this session.`, value: 'No substitutions. The Maw reads receipts.', inline: false },
       { name: 'Rarity', value: quote ? quote.rarityLabel : 'Legacy flat event', inline: true },
       { name: 'Maw Rank', value: quote ? formatMawAverageRank(quote.averageRank) : 'Legacy flat event', inline: true },
-      { name: 'Official Maw Wallet', value: 'The wallet address is revealed after you confirm and the timer starts.', inline: false }
+      { name: 'Malformed Maw Wallet', value: 'The wallet address is revealed after you confirm and the timer starts.', inline: false }
     );
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -2260,7 +2260,7 @@ async function handleMawConfirmStartTimer(interaction) {
 
 async function createMawReturnSession(pending) {
   const config = getMawConfig();
-  if (!config.mawWalletAddress) return { ok: false, reason: 'The Maw wallet is not configured.' };
+  if (!config.mawWalletAddress) return { ok: false, reason: 'The Malformed Maw wallet is not configured.' };
   const pool = resolvePool();
   if (!pool.connect) throw new Error('Maw database pool does not support transactions.');
   const db = await pool.connect();
@@ -2389,7 +2389,7 @@ function buildMawSessionEmbed(event, session, config) {
     .setTitle('Maw Session Created')
     .setColor(0x8b1e3f)
     .setDescription(
-      `Send only Squig ${formatToken(session.token_id)} to the official Maw wallet shown below.\n\n` +
+      `Send only Squig ${formatToken(session.token_id)} to the Malformed Maw wallet shown below.\n\n` +
       (isSwallowed
         ? 'After it is received, it will enter the digestion queue and be permanently burned by an admin.'
         : 'After it is received, it will be added to the Maw Pool.')
@@ -2405,7 +2405,7 @@ function buildMawSessionEmbed(event, session, config) {
       { name: 'Status', value: 'Awaiting transfer', inline: true },
       { name: 'Expires', value: `<t:${Math.floor(new Date(session.expires_at).getTime() / 1000)}:R>`, inline: true },
       { name: 'Selected source wallet', value: `\`${session.source_wallet}\``, inline: false },
-      { name: 'Official Maw Wallet', value: `\`${config.mawWalletAddress}\``, inline: false }
+      { name: 'Malformed Maw Wallet', value: `\`${config.mawWalletAddress}\``, inline: false }
     );
 }
 
@@ -3919,7 +3919,7 @@ function buildMawDigestionRequestPayload(session, poolSquig, config) {
       { name: 'Current wallet', value: `\`${config.mawWalletAddress}\``, inline: false },
       { name: 'Inbound transaction', value: inboundUrl, inline: false },
       { name: 'Received', value: receivedTs ? `<t:${receivedTs}:F>` : 'Unknown', inline: true },
-      { name: 'Next step', value: 'After completing the burn from the Maw wallet, use the button below and provide the Etherscan transaction URL.', inline: false }
+      { name: 'Next step', value: 'After completing the burn from the Malformed Maw wallet, use the button below and provide the Etherscan transaction URL.', inline: false }
     );
   return {
     embeds: [embed],
@@ -4112,7 +4112,7 @@ async function validateMawBurnTransaction({ session, txHash, provider, config })
     return from === mawWallet && tokenId === expectedTokenId;
   });
   if (!matchingLogs.length) {
-    throw new Error('Burn transaction does not show the expected Squig leaving the Maw wallet.');
+    throw new Error('Burn transaction does not show the expected Squig leaving the Malformed Maw wallet.');
   }
   const burnLog = matchingLogs.find((log) => {
     const to = normalizeAddress(`0x${String((log.topics || [])[2] || '').slice(-40)}`);
@@ -4134,7 +4134,7 @@ async function validateMawBurnTransaction({ session, txHash, provider, config })
     }
   }
   if (ownerAfter === mawWallet) {
-    throw new Error('Token is still owned by the Maw wallet after the submitted transaction.');
+    throw new Error('Token is still owned by the Malformed Maw wallet after the submitted transaction.');
   }
   if (burnTo !== ZERO_ADDRESS && ownerAfter && ownerAfter !== burnTo) {
     throw new Error('Token is not currently owned by the accepted burn address from the submitted transaction.');
@@ -4681,7 +4681,7 @@ async function expirePrizeClaims(guildId = null) {
 
 async function notifyUnmatchedTransfer(guildId, transfer) {
   const message =
-    `Unmatched Squig transfer into the Maw wallet.\n` +
+    `Unmatched Squig transfer into the Malformed Maw wallet.\n` +
     `Squig: ${formatToken(transfer.token_id)}\n` +
     `From: \`${transfer.from_wallet}\`\n` +
     `Tx: \`${transfer.tx_hash}\`\n` +
