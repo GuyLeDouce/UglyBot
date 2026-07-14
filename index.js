@@ -2231,7 +2231,7 @@ async function postWalletReceipt(guild, settings, actorDiscordId, action, wallet
   }
 }
 
-async function postAdminSystemLog({ guild = null, guildId = null, category = 'System', message, files = [] }) {
+async function postAdminSystemLog({ guild = null, guildId = null, category = 'System', message, files = [], components = [] }) {
   if (!ADMIN_LOG_CHANNEL_ID) return;
   try {
     const ch = await client.channels.fetch(ADMIN_LOG_CHANNEL_ID).catch(() => null);
@@ -2243,6 +2243,7 @@ async function postAdminSystemLog({ guild = null, guildId = null, category = 'Sy
         `Guild: ${guildLabel}\n` +
         `${String(message || '').slice(0, 1600)}`,
       files,
+      components,
     });
   } catch (err) {
     console.warn('⚠️ Admin system log failed:', String(err?.message || err || ''));

@@ -871,6 +871,9 @@ async function ensureMawTables(poolOrDeps = null) {
     ['log_index', 'INT'],
     ['block_number', 'BIGINT'],
     ['status', "TEXT NOT NULL DEFAULT 'manual_review'"],
+    ['reviewed_by_discord_id', 'TEXT'],
+    ['reviewed_at', 'TIMESTAMPTZ'],
+    ['pool_squig_id', 'BIGINT REFERENCES maw_squig_pool(id)'],
     ['created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()'],
   ]);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maw_unmatched_transfers_log_uidx ON maw_unmatched_transfers (tx_hash, log_index);`);
@@ -1059,6 +1062,8 @@ async function handleComponent(interaction) {
   if (id.startsWith('maw_confirm_start_timer:')) return handleMawConfirmStartTimer(interaction);
   if (id.startsWith('maw_cancel_session:')) return handleMawCancelSession(interaction);
   if (id.startsWith('maw_refresh_session:')) return handleMawRefreshSession(interaction);
+  if (id.startsWith('maw_copy_wallet:')) return handleMawCopyWallet(interaction);
+  if (id.startsWith('maw_accept_unmatched:')) return handleMawAcceptUnmatchedTransfer(interaction);
   if (id.startsWith('maw_submit_burn_tx:')) return handleMawSubmitBurnButton(interaction);
   if (id.startsWith('maw_retry_digestion_receipt:')) return handleMawRetryDigestionReceiptButton(interaction);
   if (id.startsWith('maw_cancel:')) return handleMawPendingCancel(interaction);
@@ -2389,7 +2394,8 @@ function buildMawSessionEmbed(event, session, config) {
     .setTitle('Maw Session Created')
     .setColor(0x8b1e3f)
     .setDescription(
-      `Send only Squig ${formatToken(session.token_id)} to the Malformed Maw wallet shown below.\n\n` +
+      `**SEND IT TO THE MALFORMED MAW:**\n\`${config.mawWalletAddress}\`\n\n` +
+      `Send only Squig ${formatToken(session.token_id)} to this wallet.\n\n` +
       (isSwallowed
         ? 'After it is received, it will enter the digestion queue and be permanently burned by an admin.'
         : 'After it is received, it will be added to the Maw Pool.')
@@ -2403,24 +2409,42 @@ function buildMawSessionEmbed(event, session, config) {
       { name: 'Ticket count', value: String(snapshot.ticketCount), inline: true },
       { name: 'Jackpot contribution', value: `${formatSignedCharm(snapshot.jackpotContributionCharm)} $CHARM`, inline: true },
       { name: 'Status', value: 'Awaiting transfer', inline: true },
-      { name: 'Expires', value: `<t:${Math.floor(new Date(session.expires_at).getTime() / 1000)}:R>`, inline: true },
-      { name: 'Selected source wallet', value: `\`${session.source_wallet}\``, inline: false },
-      { name: 'Malformed Maw Wallet', value: `\`${config.mawWalletAddress}\``, inline: false }
+      { name: 'Expires', value: `<t:${Math.floor(new Date(session.expires_at).getTime() / 1000)}:R>`, inline: true }
     );
 }
 
 function buildSessionActionRow(session) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId(`maw_copy_wallet:${session.id}`)
+      .setLabel('Copy Maw Wallet')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
       .setCustomId(`maw_refresh_session:${session.id}`)
       .setLabel('Refresh Status')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`maw_cancel_session:${session.id}`)
-      .setLabel('Cancel Session')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(String(session.status) !== 'awaiting_transfer')
+      .setStyle(ButtonStyle.Secondary)
   );
+}
+
+async function handleMawCopyWallet(interaction) {
+  const sessionId = String(interaction.customId || '').split(':')[1] || '';
+  const session = await getSessionForUser(sessionId, interaction.user.id);
+  if (!session) {
+    await interaction.reply({ content: 'That Maw session was not found.', flags: EPHEMERAL });
+    return true;
+  }
+
+  const wallet = getMawConfig().mawWalletAddress;
+  if (!wallet) {
+    await interaction.reply({ content: 'The Malformed Maw wallet is not configured.', flags: EPHEMERAL });
+    return true;
+  }
+
+  await interaction.reply({
+    content: `**Malformed Maw wallet**\n\`\`\`\n${wallet}\n\`\`\``,
+    flags: EPHEMERAL
+  });
+  return true;
 }
 
 async function handleMawRefreshSession(interaction) {
@@ -2440,23 +2464,15 @@ async function handleMawRefreshSession(interaction) {
 
 async function handleMawCancelSession(interaction) {
   const sessionId = String(interaction.customId || '').split(':')[1] || '';
-  const pool = resolvePool();
-  const { rows } = await pool.query(
-    `UPDATE maw_return_sessions
-     SET status = 'cancelled',
-         updated_at = NOW()
-     WHERE id = $1
-       AND discord_user_id = $2
-       AND status = 'awaiting_transfer'
-     RETURNING *`,
-    [String(sessionId), String(interaction.user.id)]
-  );
-  if (!rows[0]) {
-    await interaction.reply({ content: 'That session cannot be cancelled now. If the Maw already received it, the chewing has begun.', flags: EPHEMERAL });
+  const session = await getSessionForUser(sessionId, interaction.user.id);
+  if (!session) {
+    await interaction.reply({ content: 'That Maw session was not found.', flags: EPHEMERAL });
     return true;
   }
-  await updateMawPanel(rows[0].event_id).catch(() => null);
-  await interaction.reply({ content: 'Maw session cancelled. No Squig was received, and no $CHARM was paid.', flags: EPHEMERAL });
+  await interaction.reply({
+    content: 'This Maw session cannot be cancelled because the Malformed Maw wallet has already been revealed. Use Refresh Status while the transfer is processing.',
+    flags: EPHEMERAL
+  });
   return true;
 }
 
@@ -4687,8 +4703,134 @@ async function notifyUnmatchedTransfer(guildId, transfer) {
     `Tx: \`${transfer.tx_hash}\`\n` +
     `Log index: ${transfer.log_index}`;
   const event = await getOpenMawEvent(guildId).catch(() => null);
-  await postMawAdminMessage(event, { content: `**Maw Manual Review**\n${message}` }).catch(() => null);
-  await postAdminLogByGuildId(guildId, 'Maw Manual Review', message);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`maw_accept_unmatched:${transfer.id}`)
+      .setLabel('Confirm & Add to Maw Pool')
+      .setStyle(ButtonStyle.Success)
+  );
+  await postMawAdminMessage(event, { content: `**Maw Manual Review**\n${message}`, components: [row] }).catch(() => null);
+  await postAdminLogByGuildId(guildId, 'Maw Manual Review', message, { components: [row] });
+}
+
+async function handleMawAcceptUnmatchedTransfer(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
+    return true;
+  }
+
+  const transferId = String(interaction.customId || '').split(':')[1] || '';
+  if (!/^\d+$/.test(transferId)) {
+    await interaction.reply({ content: 'Invalid unmatched transfer.', flags: EPHEMERAL });
+    return true;
+  }
+
+  await interaction.deferReply({ flags: EPHEMERAL });
+  const pool = resolvePool();
+  const db = await pool.connect();
+  let accepted = null;
+  let done = false;
+  try {
+    await db.query('BEGIN');
+    const transferRows = await db.query(
+      `SELECT * FROM maw_unmatched_transfers WHERE id = $1 FOR UPDATE`,
+      [transferId]
+    );
+    const transfer = transferRows.rows[0];
+    if (!transfer) {
+      await db.query('ROLLBACK');
+      done = true;
+      await interaction.editReply({ content: 'That unmatched transfer no longer exists.' });
+      return true;
+    }
+    if (String(transfer.status) !== 'manual_review') {
+      await db.query('ROLLBACK');
+      done = true;
+      await interaction.editReply({ content: `That transfer has already been reviewed (${transfer.status}).` });
+      return true;
+    }
+
+    const existingRows = await db.query(
+      `SELECT id FROM maw_squig_pool
+       WHERE contract_address = $1 AND token_id = $2 AND status <> 'retired'
+       LIMIT 1 FOR UPDATE`,
+      [transfer.contract_address, String(transfer.token_id)]
+    );
+    if (existingRows.rows[0]) {
+      await db.query(
+        `UPDATE maw_unmatched_transfers
+         SET status = 'already_in_pool', reviewed_by_discord_id = $2, reviewed_at = NOW(), pool_squig_id = $3
+         WHERE id = $1`,
+        [transferId, String(interaction.user.id), String(existingRows.rows[0].id)]
+      );
+      await db.query('COMMIT');
+      done = true;
+      await interaction.editReply({ content: `Squig ${formatToken(transfer.token_id)} is already in the Maw Pool.` });
+      return true;
+    }
+
+    let quote = null;
+    try {
+      quote = getMawRewardQuote(transfer.token_id);
+    } catch (_) {
+      quote = null;
+    }
+    const eventRows = await db.query(
+      `SELECT id FROM maw_events WHERE guild_id = $1 AND status = 'open' ORDER BY started_at DESC NULLS LAST, id DESC LIMIT 1`,
+      [String(transfer.guild_id)]
+    );
+    const inventoryRows = await db.query(
+      `INSERT INTO maw_squig_pool
+         (event_id, contract_address, token_id, original_sender_discord_id, original_sender_wallet,
+          received_tx_hash, status, overall_rank, collection_rank, average_rank, rarity_tier,
+          original_payout_amount, ticket_count, jackpot_contribution_charm, reward_rules_version,
+          ranking_source_hash, disposition, inventory_status, digestion_status,
+          original_feeder_wallet, inbound_transaction_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, 'unknown', $4, $5, 'available', $6, $7, $8, $9,
+          0, 0, 0, $10, $11, 'regurgitated', 'available', 'not_applicable', $4, $5, NOW(), NOW())
+       RETURNING *`,
+      [
+        eventRows.rows[0]?.id ? String(eventRows.rows[0].id) : null,
+        transfer.contract_address,
+        String(transfer.token_id),
+        transfer.from_wallet,
+        transfer.tx_hash,
+        quote?.overallRank ?? null,
+        quote?.collectionRank ?? null,
+        quote?.averageRank ?? null,
+        quote?.rarityKey ?? null,
+        quote?.rewardRulesVersion ?? null,
+        quote?.rankingSourceHash ?? null,
+      ]
+    );
+    accepted = { transfer, poolSquig: inventoryRows.rows[0] };
+    await db.query(
+      `UPDATE maw_unmatched_transfers
+       SET status = 'added_to_pool', reviewed_by_discord_id = $2, reviewed_at = NOW(), pool_squig_id = $3
+       WHERE id = $1`,
+      [transferId, String(interaction.user.id), String(accepted.poolSquig.id)]
+    );
+    await db.query('COMMIT');
+    done = true;
+  } catch (err) {
+    if (!done) await db.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    db.release();
+  }
+
+  const confirmation = `✅ Confirmed by <@${interaction.user.id}> and added Squig ${formatToken(accepted.transfer.token_id)} to the Maw Pool.`;
+  await interaction.message.edit({
+    content: `${interaction.message.content}\n\n${confirmation}`,
+    components: []
+  }).catch(() => null);
+  await interaction.editReply({ content: `Squig ${formatToken(accepted.transfer.token_id)} was added to the Maw Pool as available inventory.` });
+  await postAdminLogByGuildId(
+    accepted.transfer.guild_id,
+    'Maw Manual Review Accepted',
+    `Squig ${formatToken(accepted.transfer.token_id)} added to the Maw Pool by <@${interaction.user.id}> from unmatched transfer ${accepted.transfer.tx_hash}:${accepted.transfer.log_index}.`
+  );
+  return true;
 }
 
 async function postMawFeed(event, payload) {
@@ -4724,9 +4866,9 @@ async function postAdminLog(guild, category, message) {
   }
 }
 
-async function postAdminLogByGuildId(guildId, category, message) {
+async function postAdminLogByGuildId(guildId, category, message, options = {}) {
   if (typeof deps?.postAdminSystemLog === 'function') {
-    await deps.postAdminSystemLog({ guildId, category, message }).catch(() => null);
+    await deps.postAdminSystemLog({ guildId, category, message, ...options }).catch(() => null);
   }
 }
 
