@@ -1612,6 +1612,14 @@ function buildAllMawRanksExport() {
   };
 }
 
+function squigMawRankText(tokenId) {
+  try {
+    return formatMawAverageRank(getMawRewardQuote(tokenId).averageRank);
+  } catch {
+    return null;
+  }
+}
+
 function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
   const normalizedContract = String(contractAddress || '').toLowerCase();
   if (!isSquigsContract(normalizedContract)) return [];
@@ -1872,6 +1880,7 @@ async function squigsReloadedDetails(guildId, tokenIds) {
       tokenId: String(tokenId),
       name: String(meta?.name || localMeta?.name || `Squig #${tokenId}`),
       uglyPoints: Math.max(0, Math.floor(Number(total) || 0)),
+      mawRank: squigMawRankText(tokenId),
       imagePath: localSquigImagePath(tokenId),
     };
   });
@@ -1902,6 +1911,7 @@ async function buildRandomSquigReloadedResponse(guildId, discordUserId, username
     .setDescription(
       `Collection: **Squigs Reloaded**\n` +
       `Token ID: **${detail.tokenId}**\n` +
+      `Rank: **${detail.mawRank || 'Unavailable'}**\n` +
       `UglyPoints: **${detail.uglyPoints}**\n` +
       `OpenSea: ${openseaAssetUrl(DEFAULT_NFT_CHAIN, SQUIGS_CONTRACT, detail.tokenId)}`
     )

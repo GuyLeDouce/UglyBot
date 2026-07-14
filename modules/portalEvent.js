@@ -8,6 +8,10 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const {
+  getMawRewardQuote,
+  formatMawAverageRank,
+} = require('./mawRarity');
 
 function readPositiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const value = Number(process.env[name]);
@@ -206,6 +210,14 @@ function localSquigTraits(tokenId) {
 
 function attachmentNameForSquig(tokenId, prefix = 'portal-squig') {
   return `${prefix}-${String(tokenId || 'unknown').replace(/[^\w.-]/g, '')}.png`;
+}
+
+function squigMawRankText(tokenId) {
+  try {
+    return formatMawAverageRank(getMawRewardQuote(tokenId).averageRank);
+  } catch {
+    return null;
+  }
 }
 
 function normalizeImageUrl(input) {
@@ -862,7 +874,7 @@ async function fetchEligibleSquigsForUser(links) {
         currentPortal?.type === 'dual' ? currentPortal?.traitB?.trait : null
       );
       if (!valid) continue;
-      squigs.push({ tokenId: String(tokenId), traits, imagePath, imageUrl });
+      squigs.push({ tokenId: String(tokenId), traits, imagePath, imageUrl, mawRank: squigMawRankText(tokenId) });
     } catch (err) {
       failures++;
       if (failures <= 3) portalWarn(`claim trait scan skipped #${tokenId}: ${err.message}`);
@@ -919,6 +931,7 @@ async function handlePortalClaim(interaction) {
 
   const options = squigs.slice(0, MAX_SELECT_OPTIONS).map((s) => ({
     label: `Squig #${s.tokenId}`.slice(0, 100),
+    ...(s.mawRank ? { description: `Maw Rank ${s.mawRank}`.slice(0, 100) } : {}),
     value: String(s.tokenId),
   }));
   const menu = new StringSelectMenuBuilder()
@@ -1030,6 +1043,8 @@ async function handlePortalSelect(interaction) {
     .setTitle('Portal Stabilized')
     .setDescription(
       `<@${interaction.user.id}> deployed Squig #${selectedTokenId}\n\n` +
+      `Rank:\n` +
+      `${chosenSquig.mawRank || 'Unavailable'}\n\n` +
       `Trait detected:\n` +
       `${traitLine}\n\n` +
       `Reward:\n` +
