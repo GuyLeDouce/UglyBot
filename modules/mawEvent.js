@@ -2153,7 +2153,7 @@ function buildMawFateSelectionPayload(event, pending, token) {
     new ButtonBuilder()
       .setCustomId(`maw_fate_select:${token}:regurgitated`)
       .setLabel('Regurgitate It')
-      .setStyle(ButtonStyle.Secondary),
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId(`maw_cancel:${token}`)
       .setLabel('Cancel')
