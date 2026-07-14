@@ -40,6 +40,12 @@ const portalEvent = require('./modules/portalEvent');
 const marketplaceCommand = require('./modules/marketplaceCommand');
 const mawEvent = require('./modules/mawEvent');
 const squigDuels = require('./modules/squigDuels');
+const {
+  MAW_EXPECTED_TOKEN_COUNT,
+  loadMawRankingIndex,
+  getMawRewardQuote,
+  formatMawAverageRank,
+} = require('./modules/mawRarity');
 const { ethers } = require('ethers');
 const { Pool } = require('pg');
 
@@ -1184,6 +1190,22 @@ function buildSlashCommands() {
       .setDescription('Admin: post a public plain-English guide for users')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('allrank')
+      .setDescription('Admin: export every Squig Maw Rank to CSV')
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('rank')
+      .setDescription('Show the Maw Rank and image for a Squig')
+      .addIntegerOption((opt) =>
+        opt
+          .setName('token_id')
+          .setDescription('Squig token ID')
+          .setRequired(true)
+          .setMinValue(1)
+          .setMaxValue(MAW_EXPECTED_TOKEN_COUNT)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('flex')
       .setDescription('Show a random NFT you own from Charm of the Ugly, Ugly Monsters, or Squigs')
       .toJSON(),
@@ -1530,6 +1552,64 @@ function localSquigImagePath(tokenId) {
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+function mawRankColor(rarityKey) {
+  const key = String(rarityKey || '').trim().toLowerCase();
+  if (key === 'legendary') return 0xffc857;
+  if (key === 'epic') return 0x9b5de5;
+  if (key === 'rare') return 0x00bbf9;
+  if (key === 'uncommon') return 0x70e000;
+  return 0xb0deee;
+}
+
+function squigRankImageAttachment(tokenId) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return { imageUrl: null, files: [] };
+  const imagePath = localSquigImagePath(tid);
+  if (imagePath) {
+    const name = `squig-${tid}${path.extname(imagePath) || '.png'}`;
+    return {
+      imageUrl: `attachment://${name}`,
+      files: [new AttachmentBuilder(imagePath, { name })],
+    };
+  }
+  return { imageUrl: null, files: [] };
+}
+
+function buildSquigRankPayload(tokenId) {
+  const quote = getMawRewardQuote(tokenId);
+  const image = squigRankImageAttachment(quote.tokenId);
+  const embed = new EmbedBuilder()
+    .setTitle(`Squig #${quote.tokenId}`)
+    .setColor(mawRankColor(quote.rarityKey))
+    .setDescription(
+      `Rank: **${formatMawAverageRank(quote.averageRank)}**\n` +
+      `Class: **${quote.rarityLabel}**`
+    );
+
+  if (image.imageUrl) embed.setImage(image.imageUrl);
+  return {
+    embeds: [embed],
+    ...(image.files.length ? { files: image.files } : {}),
+  };
+}
+
+function buildAllMawRanksExport() {
+  const index = loadMawRankingIndex();
+  const rows = [...index.rows].sort((a, b) => Number(a.tokenId) - Number(b.tokenId));
+  const lines = ['TOKEN ID|RANK|CLASS'];
+  for (const row of rows) {
+    lines.push(`${row.tokenId}|${formatMawAverageRank(row.averageRank)}|${row.rarityLabel}`);
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return {
+    rowCount: rows.length,
+    rankingSourceHash: index.rankingSourceHash,
+    attachment: new AttachmentBuilder(Buffer.from(`${lines.join('\n')}\n`, 'utf8'), {
+      name: `squigs-maw-ranks-${timestamp}.csv`,
+    }),
+  };
 }
 
 function localSquigTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
@@ -8087,6 +8167,58 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({
           embeds: infoUserEmbeds(interaction.guild.name, settings)
         });
+        return;
+      }
+
+      if (interaction.commandName === 'allrank') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', flags: 64 });
+          return;
+        }
+        await interaction.deferReply({ flags: 64 });
+
+        let exportResult;
+        try {
+          exportResult = buildAllMawRanksExport();
+        } catch (err) {
+          await interaction.editReply({
+            content: `Could not build Maw Rank export: ${String(err?.message || err || 'unknown error').slice(0, 300)}`
+          });
+          return;
+        }
+
+        await postAdminSystemLog({
+          guild: interaction.guild,
+          category: 'Admin Export',
+          message:
+            `Actor: <@${interaction.user.id}>\n` +
+            `Action: /allrank\n` +
+            `Rows exported: ${exportResult.rowCount}\n` +
+            `Source hash: \`${exportResult.rankingSourceHash || 'unavailable'}\``
+        }).catch(() => null);
+
+        await interaction.editReply({
+          content:
+            `Maw Rank CSV ready.\n` +
+            `Rows: **${exportResult.rowCount}**\n` +
+            `Format: \`TOKEN ID|RANK|CLASS\``,
+          files: [exportResult.attachment]
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'rank') {
+        await interaction.deferReply();
+        const tokenId = interaction.options.getInteger('token_id', true);
+        try {
+          await interaction.editReply(buildSquigRankPayload(tokenId));
+        } catch (err) {
+          const code = String(err?.code || '');
+          const message = code === 'MAW_RANKING_MISSING_TOKEN' || code === 'MAW_RANKING_INVALID_TOKEN'
+            ? `No Maw Rank found for Squig #${tokenId}.`
+            : `Maw Rank data is temporarily unavailable: ${String(err?.message || err || 'unknown error').slice(0, 220)}`;
+          await interaction.editReply({ content: message });
+        }
         return;
       }
 

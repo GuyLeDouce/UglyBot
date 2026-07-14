@@ -47,6 +47,8 @@ Reward accrual is tracked per NFT. If an NFT sells or transfers before it is cla
 - `/maw inventory`: admin only. Shows Maw Pool inventory counts.
 - `/maw reconcile`: admin only. Runs the transfer checker immediately.
 - `/maw rank token:<token id>`: admin only. Shows the local ranking quote without creating a session.
+- `/rank token_id:<token id>`: public. Shows the Squig image, Maw Rank, and class.
+- `/allrank`: admin only. Exports all Squig Maw Ranks as `TOKEN ID|RANK|CLASS`.
 - `/maw digestion status:<optional> token:<optional>`: admin only. Shows pending or failed Swallowed digestion workflows. Use `status:retry_request token:<id>` to retry a failed admin digestion request.
 - `/squigprize user:@user reason:"optional"`: admin only. Offers a random Maw Pool Squig the user did not originally send.
 - `/squigprize claim_id:<id> tx:<optional>`: admin only. Marks an accepted Squig prize delivered.
