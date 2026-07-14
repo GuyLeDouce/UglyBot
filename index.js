@@ -1598,9 +1598,9 @@ function buildSquigRankPayload(tokenId) {
 function buildAllMawRanksExport() {
   const index = loadMawRankingIndex();
   const rows = [...index.rows].sort((a, b) => Number(a.tokenId) - Number(b.tokenId));
-  const lines = ['TOKEN ID|RANK|CLASS'];
+  const lines = ['TOKEN ID,RANK,CLASS'];
   for (const row of rows) {
-    lines.push(`${row.tokenId}|${formatMawAverageRank(row.averageRank)}|${row.rarityLabel}`);
+    lines.push([row.tokenId, formatMawAverageRank(row.averageRank), row.rarityLabel].map(csvEscape).join(','));
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   return {
@@ -8201,7 +8201,7 @@ client.on('interactionCreate', async (interaction) => {
           content:
             `Maw Rank CSV ready.\n` +
             `Rows: **${exportResult.rowCount}**\n` +
-            `Format: \`TOKEN ID|RANK|CLASS\``,
+            `Format: \`TOKEN ID,RANK,CLASS\``,
           files: [exportResult.attachment]
         });
         return;
