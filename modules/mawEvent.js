@@ -279,7 +279,7 @@ function createDigestionLogPrefix(session) {
 
 function buildMawRulesText() {
   return [
-    'Legendary: Better than Rank 32 • 800,000 • 20 tickets • +100,000 jackpot',
+    'Legendary: Rank 1 • 800,000 • 20 tickets • +100,000 jackpot',
     'Epic: Rank 32–443 • 187,500 • 10 tickets • +25,000 jackpot',
     'Rare: Rank 444–1110 • 67,500 • 5 tickets • +5,000 jackpot',
     'Uncommon: Rank 1111–2276 • 22,500 • 2 tickets • +2,000 jackpot',
@@ -396,7 +396,7 @@ async function handleMawExplain(interaction) {
       },
       {
         name: 'Maw Rank',
-        value: 'Average of Overall Rank and Collection Rank. Higher number = more common.',
+        value: 'Legendary Squigs share rank 1. Every other Squig is ranked by Total UglyPoints, with lower rank numbers earning stronger rewards.',
         inline: false,
       },
       {
@@ -1522,9 +1522,9 @@ async function handleMawRank(interaction) {
       .setTitle(`Maw Rank Audit ${formatToken(quote.tokenId)}`)
       .setColor(0x5f3dc4)
       .addFields(
-        { name: 'Overall Rank', value: formatMawAverageRank(quote.overallRank), inline: true },
-        { name: 'Collection Rank', value: formatMawAverageRank(quote.collectionRank), inline: true },
-        { name: 'Average Maw Rank', value: formatMawAverageRank(quote.averageRank), inline: true },
+        { name: 'Maw Rank', value: formatMawAverageRank(quote.averageRank), inline: true },
+        { name: 'Total UglyPoints', value: formatMawAverageRank(quote.totalUglyPoints), inline: true },
+        { name: 'Legend', value: quote.legend || 'No', inline: true },
         { name: 'Rarity', value: quote.rarityLabel, inline: true },
         { name: 'Payout', value: `${formatCharm(quote.payoutCharm)} $CHARM`, inline: true },
         { name: 'Tickets', value: String(quote.ticketCount), inline: true },
@@ -2052,7 +2052,7 @@ function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null, quote = n
     embed.addFields(
       { name: 'Squig', value: formatToken(tokenId), inline: true },
       { name: 'Rarity', value: quote.rarityLabel, inline: true },
-      { name: 'Maw Rank', value: `${formatMawAverageRank(quote.averageRank)}\nOverall ${formatMawAverageRank(quote.overallRank)} • Collection ${formatMawAverageRank(quote.collectionRank)}`, inline: true },
+      { name: 'Maw Rank', value: `${formatMawAverageRank(quote.averageRank)}\n${formatMawAverageRank(quote.totalUglyPoints)} UglyPoints`, inline: true },
       { name: 'You receive', value: `${formatCharm(quote.payoutCharm)} $CHARM`, inline: true },
       { name: 'Maw Tickets', value: String(quote.ticketCount), inline: true },
       { name: 'Jackpot contribution', value: `${formatSignedCharm(quote.jackpotContributionCharm)} $CHARM`, inline: true },

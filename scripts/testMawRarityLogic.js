@@ -1,6 +1,8 @@
 const assert = require('assert');
 const {
   MAW_RARITY_RULES,
+  MAW_EXPECTED_LEGENDARY_COUNT,
+  MAW_FIRST_NON_LEGENDARY_RANK,
   MAW_REWARD_RULES_VERSION,
   loadMawRankingIndex,
   calculateMawAverageRank,
@@ -54,32 +56,40 @@ assert.strictEqual(formatMawAverageRank(632.5), '632.5');
 assert.strictEqual(formatMawAverageRank(444), '444');
 assert.strictEqual(normalizeMawRankingHeader('\uFEFF Overall Rank '), 'overallrank');
 
-const quotedCsv = '\uFEFF" Token ID ","Name","Overall Rank","Collection Rank"\n"001","Squig, One","31","32"\n"2","Two","444","445"\n';
+const quotedCsv = '\uFEFF" Token ID ","Name","Legend","Total UglyPoints","Overall Rank","Collection Rank"\n"001","Squig, One","Legend One","1200","31","32"\n"2","Two","","900","444","445"\n';
 const parsedQuoted = parseMawRankingCsvContent(quotedCsv, { expectedTokenCount: 2 });
 assert.strictEqual(parsedQuoted.rows.length, 2);
-assert.strictEqual(parsedQuoted.tokenMap.get('1').averageRank, 31.5);
+assert.strictEqual(parsedQuoted.tokenMap.get('1').averageRank, 1);
 assert.strictEqual(parsedQuoted.tokenMap.get('1').rarityKey, 'legendary');
-assert.strictEqual(parsedQuoted.tokenMap.get('2').averageRank, 444.5);
-assert.strictEqual(parsedQuoted.tokenMap.get('2').rarityKey, 'rare');
+assert.strictEqual(parsedQuoted.tokenMap.get('1').totalUglyPoints, 1200);
+assert.strictEqual(parsedQuoted.tokenMap.get('2').averageRank, MAW_FIRST_NON_LEGENDARY_RANK);
+assert.strictEqual(parsedQuoted.tokenMap.get('2').rarityKey, 'epic');
 assert.strictEqual(parsedQuoted.rankingSourceHash, parseMawRankingCsvContent(quotedCsv, { expectedTokenCount: 2 }).rankingSourceHash);
 
 assertThrowsCode(() => validateMawRankingRows([
-  { 'Token ID': '1', 'Overall Rank': '1', 'Collection Rank': '1' },
-  { 'Token ID': '1', 'Overall Rank': '2', 'Collection Rank': '2' },
+  { 'Token ID': '1', 'Total UglyPoints': '1' },
+  { 'Token ID': '1', 'Total UglyPoints': '2' },
 ], { expectedTokenCount: 2 }), 'MAW_RANKING_DUPLICATE_TOKEN');
 
 assertThrowsCode(() => validateMawRankingRows([
-  { 'Token ID': '1', 'Overall Rank': '', 'Collection Rank': '1' },
-], { expectedTokenCount: 1 }), 'MAW_RANKING_MISSING_RANK');
+  { 'Token ID': '1', 'Total UglyPoints': '' },
+], { expectedTokenCount: 1 }), 'MAW_RANKING_MISSING_SCORE');
 
 assertThrowsCode(() => validateMawRankingRows([
-  { 'Token ID': '1', 'Overall Rank': 'abc', 'Collection Rank': '1' },
-], { expectedTokenCount: 1 }), 'MAW_RANKING_INVALID_RANK');
+  { 'Token ID': '1', 'Total UglyPoints': 'abc' },
+], { expectedTokenCount: 1 }), 'MAW_RANKING_INVALID_SCORE');
 
 assertThrowsCode(() => validateMawRankingRows([
-  { 'Token ID': '1', 'Overall Rank': '1', 'Collection Rank': '1' },
-  { 'Token ID': '3', 'Overall Rank': '3', 'Collection Rank': '3' },
+  { 'Token ID': '1', 'Total UglyPoints': '1' },
+  { 'Token ID': '3', 'Total UglyPoints': '3' },
 ], { expectedTokenCount: 3 }), 'MAW_RANKING_MISSING_TOKEN');
+
+const tiedCsv = '"Token ID","Total UglyPoints","Legend"\n"1","100",""\n"2","100",""\n"3","200",""\n';
+const parsedTied = parseMawRankingCsvContent(tiedCsv, { expectedTokenCount: 3 });
+assert.deepStrictEqual(
+  ['3', '1', '2'].map((tokenId) => parsedTied.tokenMap.get(tokenId).averageRank),
+  [32, 33, 34]
+);
 
 clearMawRankingCache();
 const indexA = loadMawRankingIndex({ forceReload: true });
@@ -90,17 +100,36 @@ for (let tokenId = 1; tokenId <= 4444; tokenId += 1) {
   assert.ok(indexA.tokenMap.has(String(tokenId)), `missing token ${tokenId}`);
 }
 assert.strictEqual(indexA.rankingSourceHash, indexB.rankingSourceHash);
+assert.strictEqual(indexA.tierDistribution.legendary, MAW_EXPECTED_LEGENDARY_COUNT);
+assert.strictEqual(indexA.tierDistribution.epic, 412);
+assert.strictEqual(indexA.tierDistribution.rare, 667);
+assert.strictEqual(indexA.tierDistribution.uncommon, 1166);
+assert.strictEqual(indexA.tierDistribution.common, 2168);
 
 const quote1 = getMawRewardQuote('001', { index: indexA });
 assert.strictEqual(quote1.tokenId, '1');
-assert.strictEqual(quote1.overallRank, 303);
-assert.strictEqual(quote1.collectionRank, 962);
-assert.strictEqual(quote1.averageRank, 632.5);
-assert.strictEqual(quote1.rarityKey, 'rare');
-assert.strictEqual(quote1.payoutCharm, 67500);
-assert.strictEqual(quote1.ticketCount, 5);
-assert.strictEqual(quote1.jackpotContributionCharm, 5000);
+assert.strictEqual(quote1.overallRank, null);
+assert.strictEqual(quote1.collectionRank, null);
+assert.strictEqual(quote1.sourceOverallRank, 303);
+assert.strictEqual(quote1.sourceCollectionRank, 962);
+assert.strictEqual(quote1.totalUglyPoints, 805);
+assert.strictEqual(quote1.averageRank, 303);
+assert.strictEqual(quote1.rarityKey, 'epic');
+assert.strictEqual(quote1.payoutCharm, 187500);
+assert.strictEqual(quote1.ticketCount, 10);
+assert.strictEqual(quote1.jackpotContributionCharm, 25000);
 assert.strictEqual(quote1.rewardRulesVersion, MAW_REWARD_RULES_VERSION);
+
+const legendaryQuote = getMawRewardQuote('69', { index: indexA });
+assert.strictEqual(legendaryQuote.averageRank, 1);
+assert.strictEqual(legendaryQuote.rarityKey, 'legendary');
+assert.strictEqual(legendaryQuote.isLegendary, true);
+
+const tieA = getMawRewardQuote('549', { index: indexA });
+const tieB = getMawRewardQuote('678', { index: indexA });
+assert.strictEqual(tieA.totalUglyPoints, tieB.totalUglyPoints);
+assert.strictEqual(tieA.averageRank, 34);
+assert.strictEqual(tieB.averageRank, 35);
 
 assert.strictEqual(formatMawTicketRange(41, 41, 1), '#41');
 assert.strictEqual(formatMawTicketRange(41, 45, 5), '#41–#45 (5)');
@@ -117,9 +146,9 @@ assert.deepStrictEqual(
 );
 
 const snapshotted = { ...quote1 };
-MAW_RARITY_RULES[2].payoutCharm = 1;
-assert.strictEqual(snapshotted.payoutCharm, 67500);
-assert.strictEqual(MAW_RARITY_RULES[2].payoutCharm, 67500);
+MAW_RARITY_RULES[1].payoutCharm = 1;
+assert.strictEqual(snapshotted.payoutCharm, 187500);
+assert.strictEqual(MAW_RARITY_RULES[1].payoutCharm, 187500);
 
 const plan = createMawTicketPlan(41, 10);
 assert.deepStrictEqual(plan.map((row) => row.ticketNumber), [41, 42, 43, 44, 45, 46, 47, 48, 49, 50]);

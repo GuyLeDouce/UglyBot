@@ -55,13 +55,13 @@ Reward accrual is tracked per NFT. If an NFT sells or transfers before it is cla
 
 New Maw events use rarity-based rewards from the validated local CSV:
 
-- Legendary: Maw Rank below 32, 800,000 $CHARM, 20 tickets, +100,000 $CHARM jackpot.
-- Epic: Maw Rank 32–443.5, 187,500 $CHARM, 10 tickets, +25,000 $CHARM jackpot.
-- Rare: Maw Rank 444–1110.5, 67,500 $CHARM, 5 tickets, +5,000 $CHARM jackpot.
-- Uncommon: Maw Rank 1111–2276.5, 22,500 $CHARM, 2 tickets, +2,000 $CHARM jackpot.
+- Legendary: Maw Rank 1, 800,000 $CHARM, 20 tickets, +100,000 $CHARM jackpot.
+- Epic: Maw Rank 32–443, 187,500 $CHARM, 10 tickets, +25,000 $CHARM jackpot.
+- Rare: Maw Rank 444–1110, 67,500 $CHARM, 5 tickets, +5,000 $CHARM jackpot.
+- Uncommon: Maw Rank 1111–2276, 22,500 $CHARM, 2 tickets, +2,000 $CHARM jackpot.
 - Common: Maw Rank 2277+, 15,000 $CHARM, 1 ticket, +1,000 $CHARM jackpot.
 
-Maw Rank is the exact average of `Overall Rank` and `Collection Rank`. Each accepted Squig fills one event spot regardless of rarity. Rarity controls the immediate $CHARM payout, the number of physical Maw Ticket rows issued, and how much $CHARM is added to the jackpot.
+Maw Rank is calculated from each Squig's individual `Total UglyPoints`. The 31 Squigs with a nonblank `Legend` value all share rank 1. Every other Squig is sorted by `Total UglyPoints` descending, with token ID ascending as the deterministic tie-breaker, and receives a unique rank from 32 through 4444. Each accepted Squig fills one event spot regardless of rarity. Rarity controls the immediate $CHARM payout, the number of physical Maw Ticket rows issued, and how much $CHARM is added to the jackpot.
 
 After reviewing the reward quote, the feeder chooses the Squig’s NFT fate:
 

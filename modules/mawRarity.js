@@ -3,6 +3,9 @@ const fs = require('fs');
 const path = require('path');
 
 const MAW_EXPECTED_TOKEN_COUNT = 4444;
+const MAW_EXPECTED_LEGENDARY_COUNT = 31;
+const MAW_LEGENDARY_SHARED_RANK = 1;
+const MAW_FIRST_NON_LEGENDARY_RANK = MAW_EXPECTED_LEGENDARY_COUNT + 1;
 const MAW_REWARD_RULES_VERSION = 'rarity_v1';
 
 const MAW_RARITY_RULES = Object.freeze([
@@ -53,6 +56,11 @@ const MAW_RARITY_RULES = Object.freeze([
 
 const REQUIRED_HEADERS = Object.freeze({
   tokenId: 'Token ID',
+  totalUglyPoints: 'Total UglyPoints',
+});
+
+const OPTIONAL_HEADERS = Object.freeze({
+  legend: 'Legend',
   overallRank: 'Overall Rank',
   collectionRank: 'Collection Rank',
 });
@@ -101,6 +109,33 @@ function parsePositiveRank(value, label, tokenId = null) {
   if (!Number.isFinite(parsed) || parsed <= 0) {
     const err = new Error(`${label} must be greater than zero${tokenId ? ` for Squig #${tokenId}` : ''}.`);
     err.code = 'MAW_RANKING_INVALID_RANK';
+    throw err;
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveRank(value, label, tokenId = null) {
+  const text = stripBomAndTrim(value);
+  if (!text) return null;
+  return parsePositiveRank(text, label, tokenId);
+}
+
+function parseNonNegativeScore(value, label, tokenId = null) {
+  const text = stripBomAndTrim(value);
+  if (!text) {
+    const err = new Error(`${label} is missing${tokenId ? ` for Squig #${tokenId}` : ''}.`);
+    err.code = 'MAW_RANKING_MISSING_SCORE';
+    throw err;
+  }
+  if (!/^\d+(?:\.\d+)?$/.test(text)) {
+    const err = new Error(`${label} is not numeric${tokenId ? ` for Squig #${tokenId}` : ''}: ${text}`);
+    err.code = 'MAW_RANKING_INVALID_SCORE';
+    throw err;
+  }
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    const err = new Error(`${label} must be zero or greater${tokenId ? ` for Squig #${tokenId}` : ''}.`);
+    err.code = 'MAW_RANKING_INVALID_SCORE';
     throw err;
   }
   return parsed;
@@ -197,6 +232,10 @@ function resolveRequiredHeaderMap(rows) {
     }
     required[key] = actual;
   }
+  for (const [key, label] of Object.entries(OPTIONAL_HEADERS)) {
+    const actual = normalized.get(normalizeMawRankingHeader(label));
+    if (actual) required[key] = actual;
+  }
   return required;
 }
 
@@ -246,6 +285,9 @@ function formatMawRarityLabel(rarityKey) {
 function validateMawRankingRows(rows, options = {}) {
   const expectedTokenCount = Math.max(1, Math.floor(Number(options.expectedTokenCount || MAW_EXPECTED_TOKEN_COUNT)));
   const requireCompleteCollection = options.requireCompleteCollection !== false;
+  const expectedLegendaryCount = options.expectedLegendaryCount == null
+    ? (requireCompleteCollection && expectedTokenCount === MAW_EXPECTED_TOKEN_COUNT ? MAW_EXPECTED_LEGENDARY_COUNT : null)
+    : Math.max(0, Math.floor(Number(options.expectedLegendaryCount)));
   if (!Array.isArray(rows) || !rows.length) {
     const err = new Error('Ranking CSV contains no Squig rows.');
     err.code = 'MAW_RANKING_INVALID_CSV';
@@ -254,6 +296,7 @@ function validateMawRankingRows(rows, options = {}) {
 
   const headerMap = resolveRequiredHeaderMap(rows);
   const tokenMap = new Map();
+  const rawRows = [];
   const normalizedRows = [];
   const tierDistribution = Object.fromEntries(MAW_RARITY_RULES.map((rule) => [rule.key, 0]));
 
@@ -270,22 +313,26 @@ function validateMawRankingRows(rows, options = {}) {
       err.code = 'MAW_RANKING_UNEXPECTED_TOKEN';
       throw err;
     }
-    const overallRank = parsePositiveRank(row[headerMap.overallRank], REQUIRED_HEADERS.overallRank, tokenId);
-    const collectionRank = parsePositiveRank(row[headerMap.collectionRank], REQUIRED_HEADERS.collectionRank, tokenId);
-    const averageRank = calculateMawAverageRank(overallRank, collectionRank);
-    const rarityRule = classifyMawRarity(averageRank);
-    const normalized = Object.freeze({
+    const totalUglyPoints = parseNonNegativeScore(row[headerMap.totalUglyPoints], REQUIRED_HEADERS.totalUglyPoints, tokenId);
+    const legend = headerMap.legend ? stripBomAndTrim(row[headerMap.legend]) : '';
+    const sourceOverallRank = headerMap.overallRank
+      ? parseOptionalPositiveRank(row[headerMap.overallRank], OPTIONAL_HEADERS.overallRank, tokenId)
+      : null;
+    const sourceCollectionRank = headerMap.collectionRank
+      ? parseOptionalPositiveRank(row[headerMap.collectionRank], OPTIONAL_HEADERS.collectionRank, tokenId)
+      : null;
+    const raw = Object.freeze({
       rowNumber: index + 2,
       tokenId,
-      overallRank,
-      collectionRank,
-      averageRank,
-      rarityKey: rarityRule.key,
-      rarityLabel: rarityRule.label,
+      numericTokenId,
+      totalUglyPoints,
+      legend,
+      isLegendary: legend !== '',
+      sourceOverallRank,
+      sourceCollectionRank,
     });
-    tokenMap.set(tokenId, normalized);
-    normalizedRows.push(normalized);
-    tierDistribution[rarityRule.key] = (tierDistribution[rarityRule.key] || 0) + 1;
+    rawRows.push(raw);
+    tokenMap.set(tokenId, raw);
   });
 
   if (requireCompleteCollection) {
@@ -301,6 +348,51 @@ function validateMawRankingRows(rows, options = {}) {
       err.code = 'MAW_RANKING_TOKEN_COUNT';
       throw err;
     }
+  }
+
+  const legendaryRows = rawRows.filter((row) => row.isLegendary);
+  if (expectedLegendaryCount != null && legendaryRows.length !== expectedLegendaryCount) {
+    const err = new Error(`Ranking CSV contains ${legendaryRows.length} Legendary Squigs; expected ${expectedLegendaryCount}.`);
+    err.code = 'MAW_RANKING_LEGENDARY_COUNT';
+    throw err;
+  }
+
+  const rankByTokenId = new Map();
+  for (const row of legendaryRows) {
+    rankByTokenId.set(row.tokenId, MAW_LEGENDARY_SHARED_RANK);
+  }
+  const nonLegendaryRows = rawRows
+    .filter((row) => !row.isLegendary)
+    .sort((a, b) => {
+      if (b.totalUglyPoints !== a.totalUglyPoints) return b.totalUglyPoints - a.totalUglyPoints;
+      return a.numericTokenId - b.numericTokenId;
+    });
+  nonLegendaryRows.forEach((row, index) => {
+    rankByTokenId.set(row.tokenId, MAW_FIRST_NON_LEGENDARY_RANK + index);
+  });
+
+  tokenMap.clear();
+  for (const row of rawRows) {
+    const mawRank = rankByTokenId.get(row.tokenId);
+    const rarityRule = classifyMawRarity(mawRank);
+    const normalized = Object.freeze({
+      rowNumber: row.rowNumber,
+      tokenId: row.tokenId,
+      totalUglyPoints: row.totalUglyPoints,
+      legend: row.legend,
+      isLegendary: row.isLegendary,
+      overallRank: null,
+      collectionRank: null,
+      sourceOverallRank: row.sourceOverallRank,
+      sourceCollectionRank: row.sourceCollectionRank,
+      mawRank,
+      averageRank: mawRank,
+      rarityKey: rarityRule.key,
+      rarityLabel: rarityRule.label,
+    });
+    tokenMap.set(row.tokenId, normalized);
+    normalizedRows.push(normalized);
+    tierDistribution[rarityRule.key] = (tierDistribution[rarityRule.key] || 0) + 1;
   }
 
   return Object.freeze({
@@ -372,6 +464,12 @@ function getMawRewardQuote(tokenId, options = {}) {
     tokenId: normalizedTokenId,
     overallRank: ranking.overallRank,
     collectionRank: ranking.collectionRank,
+    sourceOverallRank: ranking.sourceOverallRank,
+    sourceCollectionRank: ranking.sourceCollectionRank,
+    totalUglyPoints: ranking.totalUglyPoints,
+    legend: ranking.legend,
+    isLegendary: ranking.isLegendary,
+    mawRank: ranking.mawRank,
     averageRank: ranking.averageRank,
     rarityKey: rule.key,
     rarityLabel: rule.label,
@@ -383,12 +481,24 @@ function getMawRewardQuote(tokenId, options = {}) {
   });
 }
 
+function optionalNumber(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function snapshotMawRewardQuote(quote) {
   if (!quote) return null;
   return Object.freeze({
     tokenId: normalizeMawTokenId(quote.tokenId),
-    overallRank: Number(quote.overallRank),
-    collectionRank: Number(quote.collectionRank),
+    overallRank: optionalNumber(quote.overallRank),
+    collectionRank: optionalNumber(quote.collectionRank),
+    sourceOverallRank: optionalNumber(quote.sourceOverallRank),
+    sourceCollectionRank: optionalNumber(quote.sourceCollectionRank),
+    totalUglyPoints: optionalNumber(quote.totalUglyPoints),
+    legend: String(quote.legend || '').trim(),
+    isLegendary: Boolean(quote.isLegendary),
+    mawRank: Number(quote.mawRank ?? quote.averageRank),
     averageRank: Number(quote.averageRank),
     rarityKey: String(quote.rarityKey || '').trim().toLowerCase(),
     rarityLabel: String(quote.rarityLabel || formatMawRarityLabel(quote.rarityKey)).trim(),
@@ -461,6 +571,9 @@ function clearMawRankingCache() {
 
 module.exports = {
   MAW_EXPECTED_TOKEN_COUNT,
+  MAW_EXPECTED_LEGENDARY_COUNT,
+  MAW_LEGENDARY_SHARED_RANK,
+  MAW_FIRST_NON_LEGENDARY_RANK,
   MAW_REWARD_RULES_VERSION,
   MAW_RARITY_RULES,
   DEFAULT_MAW_RANKING_CSV_PATH,
