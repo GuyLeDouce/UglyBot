@@ -1440,6 +1440,56 @@ function normalizeImageUrl(input) {
   return null;
 }
 
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractNftImageUrl(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const nft = metadata.nft || metadata.item || metadata.asset || metadata;
+  const rawMetadata = parseJsonObject(metadata?.raw?.metadata);
+  const nestedMetadata = parseJsonObject(metadata?.metadata);
+  const media = Array.isArray(metadata.media)
+    ? metadata.media
+    : Array.isArray(nft?.media)
+    ? nft.media
+    : [];
+  const candidates = [
+    nft?.display_image_url,
+    nft?.image_url,
+    nft?.image,
+    nft?.display_animation_url,
+    nft?.animation_url,
+    metadata?.display_image_url,
+    metadata?.image_url,
+    metadata?.image,
+    metadata?.metadata?.image,
+    metadata?.metadata?.image_url,
+    metadata?.raw?.metadata?.image,
+    metadata?.raw?.metadata?.image_url,
+    rawMetadata?.image,
+    rawMetadata?.image_url,
+    nestedMetadata?.image,
+    nestedMetadata?.image_url,
+    media[0]?.gateway,
+    media[0]?.raw,
+    media[0]?.thumbnail,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeImageUrl(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function pickRandom(arr) {
   if (!Array.isArray(arr) || !arr.length) return null;
   return arr[Math.floor(Math.random() * arr.length)];
@@ -3633,6 +3683,23 @@ async function getHolderCollections(guildId) {
     seen.add(key);
     out.push({ name: String(c.name || addr), chain, contract_address: addr });
   }
+  const { rows: mappingRows } = await pointsPool.query(
+    `SELECT COALESCE(NULLIF(chain, ''), 'ethereum') AS chain, contract_address
+     FROM holder_point_mappings
+     WHERE guild_id = $1
+     ORDER BY updated_at ASC`,
+    [guildId]
+  );
+  for (const c of mappingRows) {
+    const chain = normalizeNftChain(c.chain) || DEFAULT_NFT_CHAIN;
+    const addr = normalizeEthAddress(c.contract_address);
+    const key = collectionKey(chain, addr);
+    if (!addr || !key || seen.has(key)) continue;
+    const override = overrides.get(key);
+    if (override && !override.enabled) continue;
+    seen.add(key);
+    out.push({ name: labelForContract(addr, chain), chain, contract_address: addr });
+  }
   return out;
 }
 
@@ -3851,6 +3918,11 @@ const OPENSEA_OWNERSHIP_CACHE_TTL_MS = Math.max(
   numberFromEnv('OPENSEA_OWNERSHIP_CACHE_TTL_MS', 5 * 60 * 1000)
 );
 const openSeaOwnershipCache = new Map();
+const OPENSEA_NFT_METADATA_CACHE_TTL_MS = Math.max(
+  0,
+  numberFromEnv('OPENSEA_NFT_METADATA_CACHE_TTL_MS', 5 * 60 * 1000)
+);
+const openSeaNftMetadataCache = new Map();
 
 function publicRpcUrlForChain(chain = DEFAULT_NFT_CHAIN) {
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
@@ -10107,14 +10179,45 @@ client.on('interactionCreate', async (interaction) => {
         const key = `${interaction.guild.id}:${interaction.user.id}`;
         const pending = globalThis.__PENDING_CHECK_STATS.get(key) || null;
         globalThis.__PENDING_CHECK_STATS.delete(key);
+        if (!pending?.contractAddress) {
+          await interaction.reply({ content: 'No pending collection selection found. Click "Check NFT Status" again.', flags: 64 });
+          return;
+        }
         const chain = normalizeNftChain(pending?.chain) || DEFAULT_NFT_CHAIN;
-        const contractAddress = normalizeEthAddress(pending?.contractAddress || '') || SQUIGS_CONTRACT.toLowerCase();
+        const contractAddress = normalizeEthAddress(pending?.contractAddress || '');
+        if (!contractAddress) {
+          await interaction.reply({ content: 'Invalid pending collection selection. Click "Check NFT Status" again.', flags: 64 });
+          return;
+        }
         await interaction.deferReply({ flags: 64 });
         const settings = await getGuildSettings(interaction.guild.id);
         const pointsLabel = getPointsLabel(settings);
         const guildPointMappings = await getGuildPointMappings(interaction.guild.id);
         const table = hpTableForContract(contractAddress, guildPointMappings, chain);
-        const { attrs } = await getTraitsForTokenResilient(tokenId, contractAddress, chain);
+        const alchemyMetaPromise = ALCHEMY_API_KEY
+          ? getNftMetadataAlchemy(tokenId, contractAddress, chain).catch((err) => {
+              console.warn(providerFailureSummary('Alchemy metadata lookup failed', err));
+              return null;
+            })
+          : Promise.resolve(null);
+        const openSeaMetaPromise = OPENSEA_API_KEY
+          ? getNftMetadataOpenSea(tokenId, contractAddress, chain).catch((err) => {
+              if (err?.status !== 404) console.warn(providerFailureSummary('OpenSea metadata lookup failed', err));
+              return null;
+            })
+          : Promise.resolve(null);
+        let attrs = [];
+        try {
+          ({ attrs } = await getTraitsForTokenResilient(tokenId, contractAddress, chain));
+        } catch (err) {
+          await interaction.editReply({
+            content:
+              `Could not fetch NFT traits for ${nftChainLabel(chain)} \`${contractAddress}\` token **${tokenId}**.\n` +
+              `${providerFailureSummary('Trait lookup', err)}`
+          });
+          return;
+        }
+        const [alchemyMeta, openSeaMeta] = await Promise.all([alchemyMetaPromise, openSeaMetaPromise]);
         const grouped = normalizeTraits(attrs);
         const hpAgg = computeHpFromTraits(grouped, table);
         const tier = hpToTierLabel(hpAgg.total || 0);
@@ -10127,17 +10230,13 @@ client.on('interactionCreate', async (interaction) => {
           chain
         );
         const collectionName = String(pending?.collectionName || labelForContract(contractAddress, chain));
-        const imageUrlRaw = String(
-          meta?.image?.cachedUrl ||
-          meta?.image?.pngUrl ||
-          meta?.image?.thumbnailUrl ||
-          meta?.raw?.metadata?.image ||
-          ''
-        ).trim();
-        const imageUrl = /^https?:\/\//i.test(imageUrlRaw)
-          ? imageUrlRaw
-          : (isSquigsContract(contractAddress) && SQUIG_IMAGE_BASE_URL
+        const imageUrl =
+          extractNftImageUrl(openSeaMeta) ||
+          extractNftImageUrl(alchemyMeta) ||
+          (isSquigsContract(contractAddress) && SQUIG_IMAGE_BASE_URL
             ? `${SQUIG_IMAGE_BASE_URL}/${tokenId}`
+            : isOgSquigsContract(contractAddress) && OG_SQUIG_IMAGE_BASE_URL
+            ? `${OG_SQUIG_IMAGE_BASE_URL}/${tokenId}`
             : null);
 
         const traitLines = [];
@@ -10476,12 +10575,45 @@ client.on('messageCreate', async (message) => {
 client.login(DISCORD_TOKEN);
 // ===== Helper funcs (metadata) =====
 async function getNftMetadataAlchemy(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  if (!ALCHEMY_API_KEY) throw new Error('Alchemy API key is not configured.');
   const u = new URL(alchemyNftUrl(chain, 'getNFTMetadata'));
   u.searchParams.set('contractAddress', contractAddress);
   u.searchParams.set('tokenId', tokenId);
   u.searchParams.set('refreshCache', 'false');
   const res = await fetchWithRetry(u.toString(), 3, 800, { timeout: 10000 });
   return res.json();
+}
+
+async function getNftMetadataOpenSea(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
+  if (!OPENSEA_API_KEY) throw new Error('OpenSea API key is not configured.');
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = normalizeEthAddress(contractAddress);
+  const normalizedTokenId = String(tokenId || '').trim();
+  if (!normalizedContract || !normalizedTokenId) throw new Error('Invalid OpenSea NFT metadata lookup input.');
+  const cacheKey = `${normalizedChain}:${normalizedContract}:${normalizedTokenId}`;
+  const cached = openSeaNftMetadataCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    const cfg = nftChainConfig(normalizedChain);
+    const url = `https://api.opensea.io/api/v2/chain/${cfg.openseaChain}/contract/${normalizedContract}/nfts/${normalizedTokenId}`;
+    const res = await fetchWithRetry(url, 3, 800, {
+      headers: { accept: 'application/json', 'x-api-key': OPENSEA_API_KEY },
+      timeoutMs: 10000,
+    });
+    return res.json();
+  })();
+
+  openSeaNftMetadataCache.set(cacheKey, {
+    expiresAt: Date.now() + OPENSEA_NFT_METADATA_CACHE_TTL_MS,
+    promise,
+  });
+  if (openSeaNftMetadataCache.size > 10000) {
+    const oldestKey = openSeaNftMetadataCache.keys().next().value;
+    if (oldestKey && oldestKey !== cacheKey) openSeaNftMetadataCache.delete(oldestKey);
+  }
+  promise.catch(() => openSeaNftMetadataCache.delete(cacheKey));
+  return promise;
 }
 
 // ===== STRICT MINT CHECK (hot-reload safe singletons) =====
@@ -10722,27 +10854,18 @@ function validAttrFilter(t) {
 
 // OpenSea v2: fallback trait fetch (with headers + small retry)
 async function fetchOpenSeaTraits(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN) {
-  const cfg = nftChainConfig(chain);
-  const url = `https://api.opensea.io/api/v2/chain/${cfg.openseaChain}/contract/${contractAddress}/nfts/${tokenId}`;
-  const headers = { 'X-API-KEY': OPENSEA_API_KEY };
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetchWithTimeout(url, { headers, timeoutMs: 10000 });
-      if (res.status === 404) return [];
-      if (!res.ok) throw new Error(`OpenSea HTTP ${res.status}`);
-      const data = await res.json();
-      const arr =
-        (Array.isArray(data?.nft?.traits) && data.nft.traits) ||
-        (Array.isArray(data?.traits) && data.traits) ||
-        (Array.isArray(data?.item?.traits) && data.item.traits) ||
-        [];
-      return arr.map(massageTraitKeys).filter(validAttrFilter);
-    } catch (e) {
-      if (attempt === 2) throw e;
-      await new Promise(r => setTimeout(r, 500));
-    }
+  try {
+    const data = await getNftMetadataOpenSea(tokenId, contractAddress, chain);
+    const arr =
+      (Array.isArray(data?.nft?.traits) && data.nft.traits) ||
+      (Array.isArray(data?.traits) && data.traits) ||
+      (Array.isArray(data?.item?.traits) && data.item.traits) ||
+      [];
+    return arr.map(massageTraitKeys).filter(validAttrFilter);
+  } catch (e) {
+    if (e?.status === 404) return [];
+    throw e;
   }
-  return [];
 }
 
 // ===== TRAIT NORMALIZER =====
