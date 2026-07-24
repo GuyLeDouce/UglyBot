@@ -1984,7 +1984,7 @@ async function squigsReloadedDetails(guildId, tokenIds, options = {}) {
       name: String(meta?.name || localMeta?.name || `Squig #${tokenId}`),
       uglyPoints: Math.max(0, Math.floor(Number(hpAgg.total) || 0)),
       pointsLabel: getPointsLabel(settings),
-      tier: hpToTierLabel(hpAgg.total || 0),
+      mawRank: squigMawRankText(tokenId),
       traitsText,
       imagePath: localSquigImagePath(tokenId),
       chain: rewardChain,
@@ -2031,7 +2031,7 @@ async function buildSquigReloadedResponse(guildId, discordUserId, username, requ
     .setDescription(
       `Total ${detail.pointsLabel}: **${detail.uglyPoints}**\n` +
       `Claimable $CHARM: **${formatNumber(detail.claimableCharm)}**\n` +
-      `Rarity: **${detail.tier}**\n\n` +
+      `MAW Rank: **${detail.mawRank || 'Unavailable'}**\n\n` +
       `Trait ${detail.pointsLabel} breakdown:\n${detail.traitsText}\n\n` +
       `[View On OpenSea](${openseaAssetUrl(detail.chain, SQUIGS_CONTRACT, detail.tokenId)})`
     )
