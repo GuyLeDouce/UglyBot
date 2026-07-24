@@ -2020,11 +2020,11 @@ async function buildSquigReloadedResponse(guildId, discordUserId, username, requ
     .setTitle(detail.name)
     .setColor(0x7A83BF)
     .setDescription(
-      `OpenSea: ${openseaAssetUrl(detail.chain, SQUIGS_CONTRACT, detail.tokenId)}\n` +
       `Total ${detail.pointsLabel}: **${detail.uglyPoints}**\n` +
       `Claimable $CHARM: **${formatNumber(detail.claimableCharm)}**\n` +
       `Rarity: **${detail.tier}**\n\n` +
-      `Trait ${detail.pointsLabel} breakdown:\n${detail.traitsText}`
+      `Trait ${detail.pointsLabel} breakdown:\n${detail.traitsText}\n\n` +
+      `[View On OpenSea](${openseaAssetUrl(detail.chain, SQUIGS_CONTRACT, detail.tokenId)})`
     )
     .setFooter({ text: `${commandLabel}${normalizedRequestedTokenId ? ' lookup' : ' pull'} for ${username}` });
   if (detail.imagePath) embed.setImage(`attachment://${imageName}`);
