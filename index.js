@@ -1993,10 +1993,11 @@ async function squigsReloadedDetails(guildId, tokenIds, options = {}) {
   });
 }
 
-async function buildSquigReloadedResponse(guildId, discordUserId, username, requestedTokenId = null, commandLabel = '!squig') {
+async function buildSquigReloadedResponse(guildId, discordUserId, username, requestedTokenId = null, commandLabel = '!squig', options = {}) {
   const normalizedRequestedTokenId = parseSquigTokenIdInput(requestedTokenId);
+  const requireOwnedToken = Boolean(options.requireOwnedToken);
   let chosenTokenId = normalizedRequestedTokenId;
-  if (!chosenTokenId) {
+  if (!chosenTokenId || requireOwnedToken) {
     const links = await getWalletLinks(guildId, discordUserId);
     const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
     if (!walletAddresses.length) {
@@ -2011,7 +2012,15 @@ async function buildSquigReloadedResponse(guildId, discordUserId, username, requ
           `Checked: Squigs Reloaded (${nftChainLabel(squigsChain())}) \`${SQUIGS_CONTRACT}\``,
       };
     }
-    chosenTokenId = pickRandom(tokenIds);
+    const ownedTokenIds = new Set(tokenIds.map((tokenId) => parseSquigTokenIdInput(tokenId)).filter(Boolean));
+    if (chosenTokenId && !ownedTokenIds.has(chosenTokenId)) {
+      return {
+        content:
+          `Squig #${chosenTokenId} was not found in your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\n` +
+          `Use \`!check ${chosenTokenId}\` to view any Squig in the collection.`
+      };
+    }
+    if (!chosenTokenId) chosenTokenId = pickRandom(tokenIds);
   }
 
   const [detail] = await squigsReloadedDetails(guildId, [chosenTokenId]);
@@ -8417,7 +8426,8 @@ client.on('interactionCreate', async (interaction) => {
           interaction.user.id,
           interaction.user.username,
           tokenId == null ? null : String(tokenId),
-          '/squig'
+          '/squig',
+          { requireOwnedToken: true }
         );
         await interaction.editReply(payload);
         return;
@@ -10617,7 +10627,8 @@ client.on('messageCreate', async (message) => {
         message.author.id,
         message.author.username,
         parts[0] || null,
-        command
+        command,
+        { requireOwnedToken: command === '!squig' }
       ));
     } catch (err) {
       console.error(`${command} command error:`, err);
