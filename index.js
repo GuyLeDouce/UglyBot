@@ -1219,7 +1219,14 @@ function buildSlashCommands() {
       .toJSON(),
     new SlashCommandBuilder()
       .setName('squig')
-      .setDescription('Show a random Squig you own')
+      .setDescription('Show a Squig by token ID, or a random Squig you own')
+      .addIntegerOption((opt) =>
+        opt
+          .setName('token_id')
+          .setDescription('Optional Squig token ID')
+          .setRequired(false)
+          .setMinValue(1)
+      )
       .toJSON(),
     new SlashCommandBuilder()
       .setName('mint')
@@ -1912,60 +1919,114 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   };
 }
 
-async function squigsReloadedDetails(guildId, tokenIds) {
+function parseSquigTokenIdInput(value) {
+  const raw = String(value || '').trim().replace(/^#/, '');
+  if (!/^\d+$/.test(raw)) return null;
+  try {
+    const tokenId = BigInt(raw);
+    return tokenId > 0n ? tokenId.toString(10) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveSquigsRewardChain(guildId) {
+  const rules = guildId ? await getHolderRules(guildId).catch(() => []) : [];
+  const rule = rules.find((r) => isSquigsContract(r.contract_address));
+  if (rule) return normalizeNftChain(rule.chain) || squigsChain();
+
+  const collections = guildId ? await getHolderCollections(guildId).catch(() => []) : [];
+  const collection = collections.find((c) => isSquigsContract(c.contract_address || c.contractAddress));
+  if (collection) return normalizeNftChain(collection.chain) || squigsChain();
+
+  return squigsChain();
+}
+
+async function squigsReloadedDetails(guildId, tokenIds, options = {}) {
+  const rewardChain = normalizeNftChain(options.chain) || await resolveSquigsRewardChain(guildId);
+  const settings = (await getGuildSettings(guildId)) || { payout_type: 'per_up', payout_amount: 1, claim_streak_bonus: 0 };
   const mappings = await getGuildPointMappings(guildId);
-  const table = hpTableForContract(SQUIGS_CONTRACT, mappings, DEFAULT_NFT_CHAIN);
+  const table = hpTableForContract(SQUIGS_CONTRACT, mappings, rewardChain);
   return mapLimit(tokenIds, 8, async (tokenId) => {
     const localMeta = loadLocalSquigMetadata().get(String(tokenId));
-    let attrs = localSquigTraits(tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN).map(massageTraitKeys).filter(validAttrFilter);
+    let attrs = localSquigTraits(tokenId, SQUIGS_CONTRACT, rewardChain).map(massageTraitKeys).filter(validAttrFilter);
     let meta = null;
     if (!attrs.length) {
-      meta = await getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN).catch(() => null);
-      ({ attrs } = await getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, DEFAULT_NFT_CHAIN));
+      meta = await getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, rewardChain).catch(() => null);
+      ({ attrs } = await getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, rewardChain));
     }
     attrs = normalizeSquigsReloadedAttrs(attrs, SQUIGS_CONTRACT);
     const grouped = normalizeTraits(attrs);
-    const { total } = computeHpFromTraits(grouped, table);
+    const hpAgg = computeHpFromTraits(grouped, table);
+    const traitLines = [];
+    for (const cat of Object.keys(grouped)) {
+      for (const t of grouped[cat]) {
+        const pts = hpAgg.per[`${cat}::${t.value}`] ?? 0;
+        traitLines.push(`• ${cat} | ${t.value}: **${pts}**`);
+      }
+    }
+    let traitsText = traitLines.join('\n');
+    if (!traitsText) traitsText = '- none';
+    const maxTraitsChars = 3200;
+    if (traitsText.length > maxTraitsChars) {
+      traitsText = `${traitsText.slice(0, maxTraitsChars)}\n... (truncated)`;
+    }
+    const claimState = await getClaimableAmountForNft(
+      guildId,
+      SQUIGS_CONTRACT,
+      tokenId,
+      settings,
+      hpAgg.total || 0,
+      rewardChain
+    );
     return {
       tokenId: String(tokenId),
       name: String(meta?.name || localMeta?.name || `Squig #${tokenId}`),
-      uglyPoints: Math.max(0, Math.floor(Number(total) || 0)),
-      mawRank: squigMawRankText(tokenId),
+      uglyPoints: Math.max(0, Math.floor(Number(hpAgg.total) || 0)),
+      pointsLabel: getPointsLabel(settings),
+      tier: hpToTierLabel(hpAgg.total || 0),
+      traitsText,
       imagePath: localSquigImagePath(tokenId),
+      chain: rewardChain,
+      claimableCharm: Number(claimState.claimableAmount || 0),
     };
   });
 }
 
-async function buildRandomSquigReloadedResponse(guildId, discordUserId, username) {
-  const links = await getWalletLinks(guildId, discordUserId);
-  const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
-  if (!walletAddresses.length) {
-    return { content: 'Connect your wallet first with the verification menu before using this command.' };
+async function buildSquigReloadedResponse(guildId, discordUserId, username, requestedTokenId = null, commandLabel = '!squig') {
+  const normalizedRequestedTokenId = parseSquigTokenIdInput(requestedTokenId);
+  let chosenTokenId = normalizedRequestedTokenId;
+  if (!chosenTokenId) {
+    const links = await getWalletLinks(guildId, discordUserId);
+    const walletAddresses = links.map((x) => x.wallet_address).filter(Boolean);
+    if (!walletAddresses.length) {
+      return { content: 'Connect your wallet first with the verification menu before using this command.' };
+    }
+
+    const tokenIds = await getOwnedSquigsReloadedTokenIds(walletAddresses);
+    if (!tokenIds.length) {
+      return {
+        content:
+          `No ${commandLabel} NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\n` +
+          `Checked: Squigs Reloaded (${nftChainLabel(squigsChain())}) \`${SQUIGS_CONTRACT}\``,
+      };
+    }
+    chosenTokenId = pickRandom(tokenIds);
   }
 
-  const tokenIds = await getOwnedSquigsReloadedTokenIds(walletAddresses);
-  if (!tokenIds.length) {
-    return {
-      content:
-        `No !squig NFTs found across your linked wallet${walletAddresses.length === 1 ? '' : 's'}.\n` +
-        `Checked: Squigs Reloaded (Ethereum) \`${SQUIGS_CONTRACT}\``,
-    };
-  }
-
-  const chosenTokenId = pickRandom(tokenIds);
   const [detail] = await squigsReloadedDetails(guildId, [chosenTokenId]);
   const imageName = detail.imagePath ? `squig-${detail.tokenId}${path.extname(detail.imagePath) || '.png'}` : null;
   const embed = new EmbedBuilder()
     .setTitle(detail.name)
-    .setColor(0xB0DEEE)
+    .setColor(0x7A83BF)
     .setDescription(
-      `Collection: **Squigs Reloaded**\n` +
-      `Token ID: **${detail.tokenId}**\n` +
-      `Rank: **${detail.mawRank || 'Unavailable'}**\n` +
-      `UglyPoints: **${detail.uglyPoints}**\n` +
-      `OpenSea: ${openseaAssetUrl(DEFAULT_NFT_CHAIN, SQUIGS_CONTRACT, detail.tokenId)}`
+      `OpenSea: ${openseaAssetUrl(detail.chain, SQUIGS_CONTRACT, detail.tokenId)}\n` +
+      `Total ${detail.pointsLabel}: **${detail.uglyPoints}**\n` +
+      `Claimable $CHARM: **${formatNumber(detail.claimableCharm)}**\n` +
+      `Rarity: **${detail.tier}**\n\n` +
+      `Trait ${detail.pointsLabel} breakdown:\n${detail.traitsText}`
     )
-    .setFooter({ text: `!squig pull for ${username}` });
+    .setFooter({ text: `${commandLabel}${normalizedRequestedTokenId ? ' lookup' : ' pull'} for ${username}` });
   if (detail.imagePath) embed.setImage(`attachment://${imageName}`);
   else if (SQUIG_IMAGE_BASE_URL) embed.setImage(`${SQUIG_IMAGE_BASE_URL}/${detail.tokenId}`);
 
@@ -4898,10 +4959,27 @@ async function getClaimableAmountForNft(guildId, contractAddress, tokenId, setti
   const normalizedTokenId = String(tokenId || '');
   const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   const { rows } = await claimsPool.query(
-    `SELECT last_claimed_at
-     FROM nft_claims
-     WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = $4
-     LIMIT 1`,
+    `WITH normal_claims AS (
+       SELECT last_claimed_at
+       FROM nft_claims
+       WHERE guild_id = $1 AND chain = $2 AND contract_address = $3 AND token_id = $4
+     ),
+     completed_attempts AS (
+       SELECT MAX(transfer_succeeded_at) AS last_claimed_at
+       FROM claim_attempt_nfts
+       WHERE guild_id = $1
+         AND chain = $2
+         AND contract_address = $3
+         AND token_id = $4
+         AND status IN ('transfer_succeeded', 'recorded')
+         AND transfer_succeeded_at IS NOT NULL
+     )
+     SELECT MAX(last_claimed_at) AS last_claimed_at
+     FROM (
+       SELECT last_claimed_at FROM normal_claims
+       UNION ALL
+       SELECT last_claimed_at FROM completed_attempts
+     ) s`,
     [guildId, normalizedChain, normalizedContract, normalizedTokenId]
   );
 
@@ -8333,9 +8411,15 @@ client.on('interactionCreate', async (interaction) => {
 
       if (interaction.commandName === 'squig') {
         await interaction.deferReply();
-        await replyWithRandomOwnedNft(interaction, [
-          { name: 'Squigs Reloaded', contractAddress: SQUIGS_CONTRACT, chain: squigsChain() },
-        ], '/squig');
+        const tokenId = interaction.options.getInteger('token_id', false);
+        const payload = await buildSquigReloadedResponse(
+          interaction.guild.id,
+          interaction.user.id,
+          interaction.user.username,
+          tokenId == null ? null : String(tokenId),
+          '/squig'
+        );
+        await interaction.editReply(payload);
         return;
       }
 
@@ -10515,12 +10599,28 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  if (command === '!squig') {
+  if (command === '!squig' || command === '!check') {
     try {
       await message.channel.sendTyping().catch(() => {});
-      await message.reply(await buildRandomSquigReloadedResponse(message.guild.id, message.author.id, message.author.username));
+      const parts = content.split(/\s+/).slice(1);
+      const tokenRequired = command === '!check';
+      if (parts.length > 1 || (parts.length === 1 && !parseSquigTokenIdInput(parts[0]))) {
+        await message.reply(tokenRequired ? 'Usage: `!check 123`.' : 'Usage: `!squig` or `!squig 123`.');
+        return;
+      }
+      if (tokenRequired && !parts.length) {
+        await message.reply('Usage: `!check 123`.');
+        return;
+      }
+      await message.reply(await buildSquigReloadedResponse(
+        message.guild.id,
+        message.author.id,
+        message.author.username,
+        parts[0] || null,
+        command
+      ));
     } catch (err) {
-      console.error('!squig command error:', err);
+      console.error(`${command} command error:`, err);
       await message.reply('Something went wrong handling that command.').catch(() => {});
     }
     return;
