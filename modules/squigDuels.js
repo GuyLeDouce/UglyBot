@@ -66,6 +66,7 @@ const BOT_DUEL_WAGER = 50;
 const BOT_DUEL_MAX_WAGER = 5000;
 const BOT_DUEL_WIN_BONUS = 100;
 const MAX_DUEL_WAGER = 10000;
+const SQUIG_DUEL_OPPONENT_MAX_UGLY_POINTS_ADVANTAGE = 250;
 const MAX_SELECT_OPTIONS = 25;
 const MAX_FAVORITE_SQUIGS = 10;
 const SQUIG_SORT_LABEL = 'favorites first, then UglyPoints';
@@ -377,6 +378,93 @@ function squigOptionDescription(squig) {
   return `${favorite}HP ${squig.maxHp} | Attack ${squig.attackPower}`.slice(0, 100);
 }
 
+function opponentUglyPointsLimitSummary(duel) {
+  const challengerUglyPoints = Number(duel?.challengerUglyPoints);
+  if (!Number.isFinite(challengerUglyPoints)) return null;
+  return {
+    challengerUglyPoints: Math.floor(challengerUglyPoints),
+    advantage: SQUIG_DUEL_OPPONENT_MAX_UGLY_POINTS_ADVANTAGE,
+    limit: Math.floor(challengerUglyPoints) + SQUIG_DUEL_OPPONENT_MAX_UGLY_POINTS_ADVANTAGE,
+  };
+}
+
+function opponentLimitFieldValue(duel) {
+  const limit = opponentUglyPointsLimitSummary(duel);
+  if (!limit) return `Max **${formatCharm(SQUIG_DUEL_OPPONENT_MAX_UGLY_POINTS_ADVANTAGE)} UglyPoints** above challenger`;
+  return `Max **${formatCharm(limit.limit)} UglyPoints**\n` +
+    `(${formatCharm(limit.challengerUglyPoints)} + ${formatCharm(limit.advantage)})`;
+}
+
+function opponentLimitLine(duel) {
+  const limit = opponentUglyPointsLimitSummary(duel);
+  if (!limit) return `Opponent cap: ${formatCharm(SQUIG_DUEL_OPPONENT_MAX_UGLY_POINTS_ADVANTAGE)} UglyPoints above the challenger.`;
+  return `Opponent cap: ${formatCharm(limit.limit)} UglyPoints max ` +
+    `(${formatCharm(limit.challengerUglyPoints)} + ${formatCharm(limit.advantage)}).`;
+}
+
+function noEligibleOpponentSquigReason(duel) {
+  const limit = opponentUglyPointsLimitSummary(duel);
+  if (!limit) return `<@${duel.opponentId}> could not choose a Squig because the challenger UglyPoints are unavailable.`;
+  return `<@${duel.opponentId}> has no Squigs at or below ${formatCharm(limit.limit)} UglyPoints for this matchup ` +
+    `(challenger ${formatCharm(limit.challengerUglyPoints)} + ${formatCharm(limit.advantage)}).`;
+}
+
+function validateSquigChoiceForDuel(duel, side, squig) {
+  if (side !== 'opponent' || isBotDuel(duel)) return { ok: true };
+  const limit = opponentUglyPointsLimitSummary(duel);
+  if (!limit) {
+    return {
+      ok: false,
+      reason: 'The challenger Squig UglyPoints are not locked in yet.',
+    };
+  }
+  const uglyPoints = Number(squig?.uglyPoints);
+  if (!Number.isFinite(uglyPoints)) {
+    return {
+      ok: false,
+      reason: 'That Squig has no valid UglyPoints score.',
+    };
+  }
+  if (Math.floor(uglyPoints) > limit.limit) {
+    return {
+      ok: false,
+      reason:
+        `${squigDisplayName(squig)} has ${formatCharm(uglyPoints)} UglyPoints. ` +
+        `Opponent Squigs are capped at ${formatCharm(limit.limit)} UglyPoints for this duel ` +
+        `(${formatCharm(limit.challengerUglyPoints)} + ${formatCharm(limit.advantage)}). Choose another Squig.`,
+    };
+  }
+  return { ok: true };
+}
+
+function limitSquigsForDuel(duel, side, squigs) {
+  const list = Array.isArray(squigs) ? squigs : [];
+  if (side !== 'opponent' || isBotDuel(duel)) {
+    return { squigs: list, hiddenCount: 0 };
+  }
+  const eligible = list.filter((squig) => validateSquigChoiceForDuel(duel, side, squig).ok);
+  return {
+    squigs: eligible,
+    hiddenCount: Math.max(0, list.length - eligible.length),
+  };
+}
+
+function squigSelectionLimitLine(duel, side, hiddenCount = 0) {
+  if (side !== 'opponent' || isBotDuel(duel)) return '';
+  const hidden = hiddenCount
+    ? ` ${hiddenCount} Squig${hiddenCount === 1 ? '' : 's'} above this limit ${hiddenCount === 1 ? 'is' : 'are'} hidden.`
+    : '';
+  return `${opponentLimitLine(duel)}${hidden}`;
+}
+
+function squigSelectionContent(duel, side, hiddenCount = 0, extra = '') {
+  const lines = ['Choose your Squig Fighter!'];
+  const limitLine = squigSelectionLimitLine(duel, side, hiddenCount);
+  if (limitLine) lines.push(limitLine);
+  if (extra) lines.push(extra);
+  return lines.join('\n');
+}
+
 function squigNameForSide(duel, side) {
   const tokenId = tokenIdForSide(duel, side);
   const nickname = String(side === 'challenger' ? duel.challengerSquigName || '' : duel.opponentSquigName || '').trim();
@@ -612,6 +700,7 @@ async function postOpenChallengeAnnouncement(guild, duel) {
   await channel.send({
     content:
       `<@&${OPEN_CHALLENGE_ROLE_ID}> <@${duel.challengerId}> opened a Squig Duel for ${formatCharm(duel.wagerAmount)} $CHARM.\n` +
+      `${opponentLimitLine(duel)}\n` +
       `Accept within <t:${deadlineUnix}:R>, or the bot takes it.\n` +
       `[JOIN HERE](${threadUrl})`,
     ...(image.embeds.length ? { embeds: image.embeds } : {}),
@@ -2110,25 +2199,34 @@ async function promptSquigSelection(interaction, duel, side) {
     await interaction.editReply({ content: result.reason });
     return;
   }
-  const selectedTokenId = result.squigs[0]?.tokenId || null;
+  const limited = limitSquigsForDuel(duel, side, result.squigs);
+  if (!limited.squigs.length) {
+    if (side === 'opponent') {
+      await cancelDuel(interaction.guild, duel, noEligibleOpponentSquigReason(duel));
+      return;
+    }
+    await interaction.editReply({ content: 'No UglyPoints mapping found for your Squigs.' });
+    return;
+  }
+  const selectedTokenId = limited.squigs[0]?.tokenId || null;
   pendingSquigSelections.set(`${duel.id}:${side}:${userId}`, {
     duelId: duel.id,
     side,
     userId,
-    squigsById: new Map(result.squigs.map((s) => [String(s.tokenId), s])),
-    squigs: result.squigs,
+    squigsById: new Map(limited.squigs.map((s) => [String(s.tokenId), s])),
+    squigs: limited.squigs,
+    hiddenCount: limited.hiddenCount,
     selectedTokenId,
     page: 0,
     createdAt: Date.now(),
   });
-  const extra = result.squigs.length > MAX_SELECT_OPTIONS
-    ? `\nUse Previous and Next to browse all ${result.squigs.length} Squigs.`
+  const extra = limited.squigs.length > MAX_SELECT_OPTIONS
+    ? `Use Previous and Next to browse all ${limited.squigs.length} eligible Squigs.`
     : '';
   await interaction.editReply({
-    content:
-      `Choose your Squig Fighter!${extra}`,
-    ...buildSquigSelectionMessage(result.squigs, 0, selectedTokenId),
-    components: buildSquigSelectRows(duel.id, side, result.squigs, 0, selectedTokenId),
+    content: squigSelectionContent(duel, side, limited.hiddenCount, extra),
+    ...buildSquigSelectionMessage(limited.squigs, 0, selectedTokenId),
+    components: buildSquigSelectRows(duel.id, side, limited.squigs, 0, selectedTokenId),
   });
 }
 
@@ -2159,9 +2257,7 @@ async function handleSquigSelectionPageButton(interaction) {
     pending.selectedTokenId = squigPageItems(pending.squigs, page)[0]?.tokenId || pending.selectedTokenId;
   }
   await interaction.update({
-    content:
-      `Choose your Squig Fighter!\n` +
-      `${squigPageLabel(pending.squigs, page)}.`,
+    content: squigSelectionContent(duel, side, pending.hiddenCount || 0, `${squigPageLabel(pending.squigs, page)}.`),
     ...buildSquigSelectionMessage(pending.squigs, page, pending.selectedTokenId, { replaceAttachments: true }),
     components: buildSquigSelectRows(duel.id, side, pending.squigs, page, pending.selectedTokenId),
   });
@@ -2418,6 +2514,11 @@ function buildChallengeEmbed(duel) {
         inline: true,
       },
       {
+        name: 'Opponent Limit',
+        value: opponentLimitFieldValue(duel),
+        inline: true,
+      },
+      {
         name: 'Response Time',
         value: `**${formatAcceptTimeout(acceptTimeoutMs(duel))}**`,
         inline: true,
@@ -2526,11 +2627,16 @@ async function handleSquigSelect(interaction) {
     await interaction.reply({ content: 'Invalid Squig selection. Start your selection again.', flags: 64 });
     return true;
   }
+  const validation = validateSquigChoiceForDuel(duel, side, chosen);
+  if (!validation.ok) {
+    await interaction.reply({ content: validation.reason, flags: 64 });
+    return true;
+  }
 
   pending.selectedTokenId = tokenId;
   pending.page = Math.floor(pending.squigs.findIndex((s) => String(s.tokenId) === tokenId) / MAX_SELECT_OPTIONS);
   await interaction.update({
-    content: 'Choose your Squig Fighter!',
+    content: squigSelectionContent(duel, side, pending.hiddenCount || 0),
     ...buildSquigSelectionMessage(pending.squigs, pending.page || 0, tokenId, { replaceAttachments: true }),
     components: buildSquigSelectRows(duel.id, side, pending.squigs, pending.page || 0, tokenId),
   });
@@ -2583,6 +2689,11 @@ async function handleFighterReadyButton(interaction) {
     await interaction.reply({ content: 'Select a Squig first.', flags: 64 });
     return true;
   }
+  const validation = validateSquigChoiceForDuel(duel, side, chosen);
+  if (!validation.ok) {
+    await interaction.reply({ content: validation.reason, flags: 64 });
+    return true;
+  }
 
   await interaction.deferUpdate();
   await lockInSquigFighter(interaction, duel, side, pending, chosen, pendingKey);
@@ -2593,8 +2704,16 @@ async function lockInSquigFighter(interaction, duel, side, pending, chosen, pend
   const tokenId = String(chosen.tokenId || '').trim();
 
   const ownership = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
-  if (!ownership.ok || !ownership.squigs.some((s) => String(s.tokenId) === tokenId)) {
+  const ownedChosen = ownership.squigs?.find((s) => String(s.tokenId) === tokenId);
+  if (!ownership.ok || !ownedChosen) {
     await interaction.followUp({ content: 'That Squig is no longer found in your connected wallet.', flags: 64 }).catch(() => null);
+    return;
+  }
+  chosen = ownedChosen;
+
+  const validation = validateSquigChoiceForDuel(duel, side, chosen);
+  if (!validation.ok) {
+    await interaction.followUp({ content: validation.reason, flags: 64 }).catch(() => null);
     return;
   }
 
