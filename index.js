@@ -1745,18 +1745,24 @@ const DIRECT_SQUIG_OWNER_CACHE_TTL_MS = Math.max(0, Number(process.env.DIRECT_SQ
 const DIRECT_SQUIG_MAX_TOKEN_ID = Math.max(1, Number(process.env.SQUIG_MAX_TOKEN_ID || 4444));
 const DIRECT_OG_SQUIG_MAX_TOKEN_ID = Math.max(1, Number(process.env.OG_SQUIG_MAX_TOKEN_ID || 10000));
 
-async function getOwnedErc721ByOwnerScan(walletAddress, contractAddress, maxTokenId, cacheLabel) {
+async function getOwnedErc721ByOwnerScan(walletAddress, contractAddress, maxTokenId, cacheLabel, chain = DEFAULT_NFT_CHAIN) {
   const wallet = normalizeEthAddress(walletAddress);
   const contractAddr = normalizeEthAddress(contractAddress);
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
   if (!wallet) return [];
   if (!contractAddr) return [];
-  const cacheKey = `ethereum:${contractAddr}:${wallet}:${cacheLabel}`;
+  const cacheKey = `${normalizedChain}:${contractAddr}:${wallet}:${cacheLabel}`;
   const cached = directSquigsOwnerCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
 
   const promise = (async () => {
+    const rpcUrl = publicRpcUrlForChain(normalizedChain);
+    if (!rpcUrl) return [];
     const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
-    const contract = new ethers.Contract(contractAddr, abi, globalThis.__SQUIGS_PROVIDER);
+    const provider = normalizedChain === 'ethereum' && ALCHEMY_API_KEY && globalThis.__SQUIGS_PROVIDER
+      ? globalThis.__SQUIGS_PROVIDER
+      : new ethers.JsonRpcProvider(rpcUrl);
+    const contract = new ethers.Contract(contractAddr, abi, provider);
     const ids = [];
     await mapLimit(Array.from({ length: maxTokenId }, (_, i) => i + 1), 12, async (tokenId) => {
       try {
@@ -1780,12 +1786,20 @@ async function getOwnedErc721ByOwnerScan(walletAddress, contractAddress, maxToke
   return promise;
 }
 
-async function getOwnedSquigsReloadedDirect(walletAddress) {
-  return getOwnedErc721ByOwnerScan(walletAddress, SQUIGS_CONTRACT, DIRECT_SQUIG_MAX_TOKEN_ID, 'reloaded');
+async function getOwnedSquigsReloadedDirect(walletAddress, chain = squigsChain()) {
+  return getOwnedErc721ByOwnerScan(walletAddress, SQUIGS_CONTRACT, DIRECT_SQUIG_MAX_TOKEN_ID, 'reloaded', chain);
 }
 
-async function getOwnedOgSquigsDirect(walletAddress) {
-  return getOwnedErc721ByOwnerScan(walletAddress, OG_SQUIGS_CONTRACT, DIRECT_OG_SQUIG_MAX_TOKEN_ID, 'og');
+async function getOwnedOgSquigsDirect(walletAddress, chain = DEFAULT_NFT_CHAIN) {
+  return getOwnedErc721ByOwnerScan(walletAddress, OG_SQUIGS_CONTRACT, DIRECT_OG_SQUIG_MAX_TOKEN_ID, 'og', chain);
+}
+
+async function getOwnedSquigTokenIdsDirectForContract(walletAddress, contractAddress, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedContract = normalizeEthAddress(contractAddress);
+  if (!normalizedContract) return [];
+  if (isSquigsContract(normalizedContract)) return getOwnedSquigsReloadedDirect(walletAddress, chain);
+  if (isOgSquigsContract(normalizedContract)) return getOwnedOgSquigsDirect(walletAddress, chain);
+  return [];
 }
 
 async function getOwnedSquigsReloadedTokenIds(walletAddresses) {
@@ -4148,6 +4162,57 @@ async function getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddres
   return out;
 }
 
+async function augmentSquigOwnershipWithDirectScan(walletAddress, ownedMap, contractAddresses, chain = DEFAULT_NFT_CHAIN) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedWallet = normalizeEthAddress(walletAddress);
+  if (!normalizedWallet) return ownedMap;
+
+  const squigContracts = [...new Set(
+    (Array.isArray(contractAddresses) ? contractAddresses : [contractAddresses])
+      .map((addr) => normalizeEthAddress(addr))
+      .filter((addr) => addr && (isSquigsContract(addr) || isOgSquigsContract(addr)))
+  )];
+  if (!squigContracts.length) return ownedMap;
+
+  for (const contractAddress of squigContracts) {
+    const key = collectionKey(normalizedChain, contractAddress);
+    if (!key) continue;
+
+    const providerIds = Array.isArray(ownedMap.get(key)) ? ownedMap.get(key) : [];
+    let shouldScanDirect = providerIds.length === 0;
+    try {
+      const balance = await getErc721BalanceOnChain(normalizedWallet, contractAddress, normalizedChain);
+      shouldScanDirect = balance > providerIds.length;
+    } catch (err) {
+      if (!shouldScanDirect) continue;
+      console.warn(
+        `Squig ownership balance check failed for ${key}; trying direct owner scan: ` +
+        sanitizeProviderErrorDetail(err?.message || err)
+      );
+    }
+
+    if (!shouldScanDirect) continue;
+    const directIds = await getOwnedSquigTokenIdsDirectForContract(normalizedWallet, contractAddress, normalizedChain).catch((err) => {
+      console.warn(
+        `Squig direct ownership scan failed for ${key}: ` +
+        sanitizeProviderErrorDetail(err?.message || err)
+      );
+      return [];
+    });
+    if (directIds.length <= providerIds.length) continue;
+
+    const merged = [...new Set([...providerIds, ...directIds].map((tokenId) => String(tokenId)))];
+    merged.sort((a, b) => Number(a) - Number(b));
+    ownedMap.set(key, merged);
+    console.warn(
+      `Squig ownership provider returned ${providerIds.length} token id(s) for ${key}; ` +
+      `direct owner scan found ${directIds.length}. Using merged direct result.`
+    );
+  }
+
+  return ownedMap;
+}
+
 function providerFailureSummary(provider, err) {
   const status = Number(err?.status || 0);
   const message = sanitizeProviderErrorDetail(err?.responseDetail || err?.message || err || 'unknown error');
@@ -4159,6 +4224,7 @@ async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, ch
   let openSeaResult = null;
   try {
     openSeaResult = await getOwnedTokenIdsForContractsOpenSea(walletAddress, contractAddresses, chain);
+    openSeaResult = await augmentSquigOwnershipWithDirectScan(walletAddress, openSeaResult, contractAddresses, chain);
     const tokenCount = [...openSeaResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
     if (tokenCount > 0) return openSeaResult;
   } catch (err) {
@@ -4167,7 +4233,8 @@ async function getOwnedTokenIdsForContracts(walletAddress, contractAddresses, ch
   }
 
   try {
-    const alchemyResult = await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+    let alchemyResult = await getOwnedTokenIdsForContractsAlchemy(walletAddress, contractAddresses, chain);
+    alchemyResult = await augmentSquigOwnershipWithDirectScan(walletAddress, alchemyResult, contractAddresses, chain);
     const tokenCount = [...alchemyResult.values()].reduce((sum, tokenIds) => sum + tokenIds.length, 0);
     if (tokenCount > 0) {
       if (openSeaResult) {
@@ -4248,6 +4315,7 @@ async function syncHolderRoles(member, walletAddresses) {
   const fallbackCountsByContract = new Map();
   const unavailableContracts = new Set();
   const unavailableTraitContracts = new Set();
+  const unknownZeroChecksByContract = new Set();
 
   const contractGroups = new Map();
   for (const r of [...rules, ...traitRules]) {
@@ -4260,15 +4328,43 @@ async function syncHolderRoles(member, walletAddresses) {
     if (!tokenIdsByContract.has(key)) tokenIdsByContract.set(key, new Set());
   }
 
+  const hasTraitRuleForKey = (key) => traitRules.some((rule) => collectionKey(rule.chain, rule.contract_address) === key);
+
   for (const [chain, contractMap] of contractGroups.entries()) {
     const contractAddresses = [...contractMap.values()];
     await mapLimit(normalizedAddresses, 1, async (walletAddress) => {
       try {
         const ownedMap = await getOwnedTokenIdsForContracts(walletAddress, contractAddresses, chain);
+        const providerCountsByKey = new Map();
         for (const [key, tokenIds] of ownedMap.entries()) {
           if (!tokenIdsByContract.has(key)) tokenIdsByContract.set(key, new Set());
+          providerCountsByKey.set(key, Array.isArray(tokenIds) ? tokenIds.length : 0);
           for (const tokenId of tokenIds) {
             tokenIdsByContract.get(key).add(String(tokenId));
+          }
+        }
+
+        for (const [key, contractAddress] of contractMap.entries()) {
+          const providerCount = providerCountsByKey.get(key) || 0;
+          try {
+            const balance = await getErc721BalanceOnChain(walletAddress, contractAddress, chain);
+            if (balance > providerCount) {
+              const missingCount = balance - providerCount;
+              fallbackCountsByContract.set(key, (fallbackCountsByContract.get(key) || 0) + missingCount);
+              if (hasTraitRuleForKey(key)) unavailableTraitContracts.add(key);
+              console.warn(
+                `Holder provider returned ${providerCount} token id(s) for ${key}; ` +
+                `on-chain balance is ${balance}. Added ${missingCount} balance fallback count(s).`
+              );
+            }
+          } catch (balanceError) {
+            if (providerCount === 0) {
+              unknownZeroChecksByContract.add(key);
+              console.warn(
+                `Holder zero-balance confirmation unavailable for ${key}: ` +
+                sanitizeProviderErrorDetail(balanceError?.message || balanceError)
+              );
+            }
           }
         }
       } catch (err) {
@@ -4280,7 +4376,7 @@ async function syncHolderRoles(member, walletAddresses) {
           try {
             const balance = await getErc721BalanceOnChain(walletAddress, contractAddress, chain);
             fallbackCountsByContract.set(key, (fallbackCountsByContract.get(key) || 0) + balance);
-            if (traitRules.some((rule) => collectionKey(rule.chain, rule.contract_address) === key)) {
+            if (hasTraitRuleForKey(key)) {
               unavailableTraitContracts.add(key);
             }
             console.warn(`⚠️ Used on-chain balance fallback for ${key}: ${balance}.`);
@@ -4299,6 +4395,11 @@ async function syncHolderRoles(member, walletAddresses) {
 
   for (const [key, tokenIds] of tokenIdsByContract.entries()) {
     byContract.set(key, tokenIds.size + (fallbackCountsByContract.get(key) || 0));
+  }
+  for (const key of unknownZeroChecksByContract) {
+    if ((byContract.get(key) || 0) > 0) continue;
+    unavailableContracts.add(key);
+    if (hasTraitRuleForKey(key)) unavailableTraitContracts.add(key);
   }
 
   const guildPointMappings = traitRules.length ? await getGuildPointMappings(member.guild.id) : new Map();
