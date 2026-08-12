@@ -275,6 +275,14 @@ const DAILY_HOLDER_REFRESH_START_DELAY_MS = Math.max(
   0,
   Number(process.env.DAILY_HOLDER_REFRESH_START_DELAY_MINUTES ?? 5) * 60 * 1000
 );
+const DAILY_HOLDER_REFRESH_OWNER_TIMEOUT_MS = Math.max(
+  30 * 1000,
+  numberFromEnv('DAILY_HOLDER_REFRESH_OWNER_TIMEOUT_MS', 2 * 60 * 1000)
+);
+const DAILY_HOLDER_REFRESH_PROGRESS_EVERY = Math.max(
+  1,
+  Math.floor(numberFromEnv('DAILY_HOLDER_REFRESH_PROGRESS_EVERY', 10))
+);
 
 // ===== CLIENT =====
 const client = new Client({
@@ -426,6 +434,20 @@ async function mapLimit(items, limit, fn) {
   });
   await Promise.all(workers);
   return results;
+}
+
+function withOperationTimeout(promise, timeoutMs, label) {
+  let timeout = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${timeoutMs}ms`);
+      err.code = 'OPERATION_TIMEOUT';
+      reject(err);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 // ===== POSTGRES =====
@@ -6538,7 +6560,7 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
   }
 }
 
-async function runDailyHolderVerificationRefresh() {
+async function runDailyHolderVerificationRefresh(options = {}) {
   if (dailyHolderRefreshRunning) {
     const message = 'Daily holder verification refresh skipped: previous run still active.';
     console.log(message);
@@ -6547,6 +6569,8 @@ async function runDailyHolderVerificationRefresh() {
 
   dailyHolderRefreshRunning = true;
   const startedAt = Date.now();
+  const trigger = String(options.trigger || 'scheduled daily holder refresh');
+  const actorDiscordId = String(options.actorDiscordId || '').trim();
   const summary = {
     owners: 0,
     processed: 0,
@@ -6563,20 +6587,38 @@ async function runDailyHolderVerificationRefresh() {
   try {
     const owners = await getWalletLinkOwners();
     summary.owners = owners.length;
+    console.log(
+      `Daily holder verification refresh started. Trigger: ${trigger}. Owners: ${summary.owners}. ` +
+      `Per-owner timeout: ${DAILY_HOLDER_REFRESH_OWNER_TIMEOUT_MS}ms.`
+    );
+    await postAdminSystemLog({
+      guild: options.guild || null,
+      category: 'Daily Holder Refresh',
+      message:
+        `Daily holder verification refresh started.\n` +
+        `Trigger: ${trigger}\n` +
+        `${actorDiscordId ? `Actor: <@${actorDiscordId}>\n` : ''}` +
+        `Owners found: ${summary.owners}\n` +
+        `Per-owner timeout: ${Math.round(DAILY_HOLDER_REFRESH_OWNER_TIMEOUT_MS / 1000)}s`
+    }).catch(() => {});
 
     await mapLimit(owners, 1, async (owner) => {
       try {
-        const result = await refreshLinkedHolderOwner(owner);
+        const result = await withOperationTimeout(
+          refreshLinkedHolderOwner(owner),
+          DAILY_HOLDER_REFRESH_OWNER_TIMEOUT_MS,
+          `Daily holder refresh ${owner.guildId}/${owner.discordId}`
+        );
         if (result.skipped) {
           summary.skipped++;
-          return;
+        } else {
+          summary.processed++;
+          summary.walletCount += Number(result.walletCount || 0);
+          summary.checkedWalletCount += Number(result.checkedWalletCount || 0);
+          summary.unavailableWalletCount += Number(result.unavailableWalletCount || 0);
+          summary.roleChanges += Number(result.roleChanges || 0);
+          summary.rolesGranted += Number(result.rolesGranted || 0);
         }
-        summary.processed++;
-        summary.walletCount += Number(result.walletCount || 0);
-        summary.checkedWalletCount += Number(result.checkedWalletCount || 0);
-        summary.unavailableWalletCount += Number(result.unavailableWalletCount || 0);
-        summary.roleChanges += Number(result.roleChanges || 0);
-        summary.rolesGranted += Number(result.rolesGranted || 0);
       } catch (err) {
         summary.failed++;
         if (summary.failures.length < 10) {
@@ -6585,11 +6627,21 @@ async function runDailyHolderVerificationRefresh() {
           );
         }
       }
+      const completed = summary.processed + summary.skipped + summary.failed;
+      if (completed === summary.owners || completed % DAILY_HOLDER_REFRESH_PROGRESS_EVERY === 0) {
+        const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+        console.log(
+          `Daily holder verification refresh progress: ${completed}/${summary.owners}; ` +
+          `processed=${summary.processed}, skipped=${summary.skipped}, failed=${summary.failed}, elapsed=${elapsedSeconds}s`
+        );
+      }
     });
 
     const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
     const message =
       `Daily holder verification refresh complete.\n` +
+      `Trigger: ${trigger}\n` +
+      `${actorDiscordId ? `Actor: <@${actorDiscordId}>\n` : ''}` +
       `Owners found: ${summary.owners}\n` +
       `Processed: ${summary.processed}\n` +
       `Skipped: ${summary.skipped}\n` +
@@ -8242,12 +8294,25 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Admin only.', flags: 64 });
           return;
         }
-        await interaction.deferReply({ flags: 64 });
-        const result = await runDailyHolderVerificationRefresh();
-        await interaction.editReply({
+        if (dailyHolderRefreshRunning) {
+          await interaction.reply({
+            content: 'A holder refresh is already running. Watch the Railway deploy logs or the admin log channel for completion.',
+            flags: 64,
+          });
+          return;
+        }
+        runDailyHolderVerificationRefresh({
+          trigger: 'admin /refresh',
+          actorDiscordId: interaction.user.id,
+          guild: interaction.guild,
+        }).catch((err) => {
+          console.error('Daily holder verification refresh background error:', String(err?.message || err || ''));
+        });
+        await interaction.reply({
           content:
-            `${result?.ok ? 'Refresh complete.' : 'Refresh did not complete.'}\n` +
-            `${String(result?.message || 'No refresh summary was returned.').slice(0, 1800)}`
+            `Holder refresh started in the background.\n` +
+            `The final summary will be posted to the admin log, and progress will appear in Railway deploy logs.`,
+          flags: 64,
         });
         return;
       }
