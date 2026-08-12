@@ -2455,10 +2455,14 @@ function pendingWalletReportAttachment(summary) {
   return new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: filename });
 }
 
-async function postRoleSyncFailures(guild, actorDiscordId, syncResult, context) {
-  const failedLines = Array.isArray(syncResult?.applied)
+function roleSyncFailureLines(syncResult) {
+  return Array.isArray(syncResult?.applied)
     ? syncResult.applied.filter((line) => /skipped/i.test(String(line || '')))
     : [];
+}
+
+async function postRoleSyncFailures(guild, actorDiscordId, syncResult, context) {
+  const failedLines = roleSyncFailureLines(syncResult);
   if (!failedLines.length) return;
   await postAdminSystemLog({
     guild,
@@ -6496,7 +6500,7 @@ async function refreshLinkedHolderOwner(owner) {
   );
   const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
   const sync = await syncHolderRoles(member, walletAddresses);
-  await postRoleSyncFailures(guild, discordId, sync, 'daily holder refresh');
+  const roleSyncFailures = roleSyncFailureLines(sync);
 
   return {
     ok: true,
@@ -6508,6 +6512,7 @@ async function refreshLinkedHolderOwner(owner) {
     unavailableWalletCount: verification.checks.filter((x) => x.temporaryUnavailable).length,
     roleChanges: sync.changed || 0,
     rolesGranted: Array.isArray(sync.granted) ? sync.granted.length : 0,
+    roleSyncFailures,
   };
 }
 
@@ -6540,6 +6545,9 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
     unavailableWalletCount: 0,
     roleChanges: 0,
     rolesGranted: 0,
+    roleSyncWarningUsers: 0,
+    roleSyncWarningCount: 0,
+    roleSyncWarnings: [],
     pendingWallets: [],
     failures: [],
   };
@@ -6590,7 +6598,14 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
         );
         const walletAddresses = verification.refreshedLinks.map((x) => x.wallet_address).filter(Boolean);
         const sync = await syncHolderRoles(member, walletAddresses);
-        await postRoleSyncFailures(guild, discordId, sync, 'admin /verifyall');
+        const roleWarnings = roleSyncFailureLines(sync);
+        if (roleWarnings.length) {
+          summary.roleSyncWarningUsers++;
+          summary.roleSyncWarningCount += roleWarnings.length;
+          if (summary.roleSyncWarnings.length < 10) {
+            summary.roleSyncWarnings.push(`<@${discordId}>: ${roleWarnings[0].slice(0, 180)}`);
+          }
+        }
 
         summary.processed++;
         summary.walletCount += walletAddresses.length;
@@ -6632,7 +6647,9 @@ async function runRoleWalletVerificationRefresh(guild, role, actorDiscordId) {
       `DRIP temporarily unavailable: ${summary.unavailableWalletCount}\n` +
       `Role changes: ${summary.roleChanges}\n` +
       `Roles granted: ${summary.rolesGranted}\n` +
+      `Role sync warnings: ${summary.roleSyncWarningCount} across ${summary.roleSyncWarningUsers} user${summary.roleSyncWarningUsers === 1 ? '' : 's'}\n` +
       `Elapsed: ${elapsedSeconds}s` +
+      `${summary.roleSyncWarnings.length ? `\nRole sync warning examples:\n${summary.roleSyncWarnings.map((line) => `- ${line}`).join('\n')}` : ''}` +
       `${summary.failures.length ? `\nFailures:\n${summary.failures.map((line) => `- ${line}`).join('\n')}` : ''}`;
 
     await postAdminSystemLog({
@@ -6682,6 +6699,9 @@ async function runDailyHolderVerificationRefresh(options = {}) {
     unavailableWalletCount: 0,
     roleChanges: 0,
     rolesGranted: 0,
+    roleSyncWarningUsers: 0,
+    roleSyncWarningCount: 0,
+    roleSyncWarnings: [],
     failures: [],
   };
 
@@ -6719,6 +6739,13 @@ async function runDailyHolderVerificationRefresh(options = {}) {
           summary.unavailableWalletCount += Number(result.unavailableWalletCount || 0);
           summary.roleChanges += Number(result.roleChanges || 0);
           summary.rolesGranted += Number(result.rolesGranted || 0);
+          if (Array.isArray(result.roleSyncFailures) && result.roleSyncFailures.length) {
+            summary.roleSyncWarningUsers++;
+            summary.roleSyncWarningCount += result.roleSyncFailures.length;
+            if (summary.roleSyncWarnings.length < 10) {
+              summary.roleSyncWarnings.push(`<@${owner.discordId}>: ${String(result.roleSyncFailures[0] || '').slice(0, 180)}`);
+            }
+          }
         }
       } catch (err) {
         summary.failed++;
@@ -6752,7 +6779,9 @@ async function runDailyHolderVerificationRefresh(options = {}) {
       `DRIP temporarily unavailable: ${summary.unavailableWalletCount}\n` +
       `Role changes: ${summary.roleChanges}\n` +
       `Roles granted: ${summary.rolesGranted}\n` +
+      `Role sync warnings: ${summary.roleSyncWarningCount} across ${summary.roleSyncWarningUsers} user${summary.roleSyncWarningUsers === 1 ? '' : 's'}\n` +
       `Elapsed: ${elapsedSeconds}s` +
+      `${summary.roleSyncWarnings.length ? `\nRole sync warning examples:\n${summary.roleSyncWarnings.map((line) => `- ${line}`).join('\n')}` : ''}` +
       `${summary.failures.length ? `\nFailures:\n${summary.failures.map((line) => `- ${line}`).join('\n')}` : ''}`;
 
     console.log(message);
