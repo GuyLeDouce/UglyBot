@@ -288,9 +288,23 @@ const client = new Client({
 // ===== UTILS =====
 async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const t = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     return await fetch(url, { ...opts, signal: controller.signal });
+  } catch (err) {
+    if (timedOut && (err?.name === 'AbortError' || err?.type === 'aborted')) {
+      const timeoutErr = new Error(`Request timed out after ${timeoutMs}ms`);
+      timeoutErr.name = 'FetchTimeoutError';
+      timeoutErr.code = 'FETCH_TIMEOUT';
+      timeoutErr.type = 'timeout';
+      timeoutErr.cause = err;
+      throw timeoutErr;
+    }
+    throw err;
   } finally {
     clearTimeout(t);
   }
@@ -1497,6 +1511,51 @@ function extractNftImageUrl(metadata) {
   return null;
 }
 
+async function getNftImageUrl(tokenId, contractAddress = SQUIGS_CONTRACT, chain = DEFAULT_NFT_CHAIN, options = {}) {
+  const normalizedChain = normalizeNftChain(chain) || DEFAULT_NFT_CHAIN;
+  const normalizedContract = normalizeEthAddress(contractAddress) || String(contractAddress || '').toLowerCase();
+  const normalizedTokenId = String(tokenId || '').trim();
+  if (!normalizedContract || !normalizedTokenId) return null;
+
+  if (OPENSEA_API_KEY) {
+    try {
+      const metadata = await getNftMetadataOpenSea(normalizedTokenId, normalizedContract, normalizedChain);
+      const imageUrl = extractNftImageUrl(metadata);
+      if (imageUrl) return imageUrl;
+    } catch (err) {
+      if (err?.status !== 404 && options.logFailures) {
+        console.warn(providerFailureSummary('OpenSea image lookup failed', err));
+      }
+    }
+  }
+
+  if (options.fallbackAlchemy !== false && ALCHEMY_API_KEY) {
+    try {
+      const metadata = await getNftMetadataAlchemy(normalizedTokenId, normalizedContract, normalizedChain);
+      const imageUrl = extractNftImageUrl(metadata);
+      if (imageUrl) return imageUrl;
+    } catch (err) {
+      if (options.logFailures) console.warn(providerFailureSummary('Alchemy image fallback failed', err));
+    }
+  }
+
+  if (options.fallbackBaseUrls !== false) {
+    if (isSquigsContract(normalizedContract) && SQUIG_IMAGE_BASE_URL) return `${SQUIG_IMAGE_BASE_URL}/${normalizedTokenId}`;
+    if (isOgSquigsContract(normalizedContract) && OG_SQUIG_IMAGE_BASE_URL) return `${OG_SQUIG_IMAGE_BASE_URL}/${normalizedTokenId}`;
+  }
+
+  return null;
+}
+
+async function loadCanvasImageSource(source) {
+  const value = String(source || '').trim();
+  if (!value) throw new Error('Missing image source.');
+  if (!/^https?:\/\//i.test(value)) return loadImage(value);
+  const res = await fetchWithRetry(value, 2, 700, { timeoutMs: 10000 });
+  const arrayBuffer = await res.arrayBuffer();
+  return loadImage(Buffer.from(arrayBuffer));
+}
+
 function pickRandom(arr) {
   if (!Array.isArray(arr) || !arr.length) return null;
   return arr[Math.floor(Math.random() * arr.length)];
@@ -1505,10 +1564,6 @@ function pickRandom(arr) {
 const LOCAL_SQUIG_METADATA_CANDIDATES = [
   path.join(__dirname, 'metadata.csv'),
   path.join(__dirname, '..', 'metadata.csv'),
-];
-const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
-  path.join(__dirname, 'images'),
-  path.join(__dirname, '..', 'images'),
 ];
 let localSquigMetadataCache = null;
 
@@ -1598,19 +1653,6 @@ function loadLocalSquigMetadata() {
   return byTokenId;
 }
 
-function localSquigImagePath(tokenId) {
-  const tid = String(tokenId || '').trim();
-  if (!/^\d+$/.test(tid)) return null;
-  const localMeta = loadLocalSquigMetadata().get(tid);
-  const fileName = localMeta?.fileName || `${tid}.png`;
-  const safeFileName = path.basename(fileName);
-  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
-    const candidate = path.join(imageDir, safeFileName);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
 function mawRankColor(rarityKey) {
   const key = String(rarityKey || '').trim().toLowerCase();
   if (key === 'legendary') return 0xffc857;
@@ -1620,23 +1662,16 @@ function mawRankColor(rarityKey) {
   return 0xb0deee;
 }
 
-function squigRankImageAttachment(tokenId) {
+async function squigRankImageAttachment(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return { imageUrl: null, files: [] };
-  const imagePath = localSquigImagePath(tid);
-  if (imagePath) {
-    const name = `squig-${tid}${path.extname(imagePath) || '.png'}`;
-    return {
-      imageUrl: `attachment://${name}`,
-      files: [new AttachmentBuilder(imagePath, { name })],
-    };
-  }
-  return { imageUrl: null, files: [] };
+  const imageUrl = await getNftImageUrl(tid, SQUIGS_CONTRACT, SQUIGS_CHAIN, { logFailures: true });
+  return { imageUrl, files: [] };
 }
 
-function buildSquigRankPayload(tokenId) {
+async function buildSquigRankPayload(tokenId) {
   const quote = getMawRewardQuote(tokenId);
-  const image = squigRankImageAttachment(quote.tokenId);
+  const image = await squigRankImageAttachment(quote.tokenId);
   const embed = new EmbedBuilder()
     .setTitle(`Squig #${quote.tokenId}`)
     .setColor(mawRankColor(quote.rarityKey))
@@ -1877,27 +1912,18 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
   }
 
   const chosen = pickRandom(owned);
-  const meta = await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null);
+  const openSeaMeta = OPENSEA_API_KEY
+    ? await getNftMetadataOpenSea(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null)
+    : null;
+  const meta = openSeaMeta || await getNftMetadataAlchemy(chosen.tokenId, chosen.contractAddress, chosen.chain).catch(() => null);
   const collectionName = labelForContract(chosen.contractAddress, chosen.chain);
   const isSquig = isSquigsContract(chosen.contractAddress);
   const localSquigMeta = isSquig ? loadLocalSquigMetadata().get(String(chosen.tokenId)) : null;
   const tokenName = String(meta?.name || localSquigMeta?.name || `${collectionName} #${chosen.tokenId}`);
   const imageUrl =
-    normalizeImageUrl(
-      meta?.image ||
-      meta?.image?.cachedUrl ||
-      meta?.image?.pngUrl ||
-      meta?.image?.thumbnailUrl ||
-      meta?.metadata?.image ||
-      meta?.raw?.metadata?.image
-    ) ||
-    (isSquig && SQUIG_IMAGE_BASE_URL
-      ? `${SQUIG_IMAGE_BASE_URL}/${chosen.tokenId}`
-      : isOgSquigsContract(chosen.contractAddress) && OG_SQUIG_IMAGE_BASE_URL
-      ? `${OG_SQUIG_IMAGE_BASE_URL}/${chosen.tokenId}`
-      : null);
-  const localImagePath = isSquig ? localSquigImagePath(chosen.tokenId) : null;
-  const localImageName = localImagePath ? `squig-${chosen.tokenId}${path.extname(localImagePath) || '.png'}` : null;
+    extractNftImageUrl(openSeaMeta) ||
+    extractNftImageUrl(meta) ||
+    await getNftImageUrl(chosen.tokenId, chosen.contractAddress, chosen.chain);
 
   const embed = new EmbedBuilder()
     .setTitle(tokenName)
@@ -1910,12 +1936,10 @@ async function buildRandomOwnedNftResponse(guildId, discordUserId, username, col
       (isSquig ? `\n[Mint A Squig](https://bueno.art/squigs/mint)` : '')
     )
     .setFooter({ text: `${commandLabel} pull for ${username}` });
-  if (localImagePath) embed.setImage(`attachment://${localImageName}`);
-  else if (imageUrl) embed.setImage(imageUrl);
+  if (imageUrl) embed.setImage(imageUrl);
 
   return {
     embeds: [embed],
-    ...(localImagePath ? { files: [new AttachmentBuilder(localImagePath, { name: localImageName })] } : {}),
   };
 }
 
@@ -1950,9 +1974,11 @@ async function squigsReloadedDetails(guildId, tokenIds, options = {}) {
   return mapLimit(tokenIds, 8, async (tokenId) => {
     const localMeta = loadLocalSquigMetadata().get(String(tokenId));
     let attrs = localSquigTraits(tokenId, SQUIGS_CONTRACT, rewardChain).map(massageTraitKeys).filter(validAttrFilter);
-    let meta = null;
+    let meta = OPENSEA_API_KEY
+      ? await getNftMetadataOpenSea(tokenId, SQUIGS_CONTRACT, rewardChain).catch(() => null)
+      : null;
     if (!attrs.length) {
-      meta = await getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, rewardChain).catch(() => null);
+      meta = meta || await getNftMetadataAlchemy(tokenId, SQUIGS_CONTRACT, rewardChain).catch(() => null);
       ({ attrs } = await getTraitsForToken(meta, tokenId, SQUIGS_CONTRACT, rewardChain));
     }
     attrs = normalizeSquigsReloadedAttrs(attrs, SQUIGS_CONTRACT);
@@ -1986,7 +2012,7 @@ async function squigsReloadedDetails(guildId, tokenIds, options = {}) {
       pointsLabel: getPointsLabel(settings),
       mawRank: squigMawRankText(tokenId),
       traitsText,
-      imagePath: localSquigImagePath(tokenId),
+      imageUrl: extractNftImageUrl(meta) || await getNftImageUrl(tokenId, SQUIGS_CONTRACT, rewardChain),
       chain: rewardChain,
       claimableCharm: Number(claimState.claimableAmount || 0),
     };
@@ -2024,7 +2050,6 @@ async function buildSquigReloadedResponse(guildId, discordUserId, username, requ
   }
 
   const [detail] = await squigsReloadedDetails(guildId, [chosenTokenId]);
-  const imageName = detail.imagePath ? `squig-${detail.tokenId}${path.extname(detail.imagePath) || '.png'}` : null;
   const embed = new EmbedBuilder()
     .setTitle(detail.name)
     .setColor(0x7A83BF)
@@ -2036,12 +2061,10 @@ async function buildSquigReloadedResponse(guildId, discordUserId, username, requ
       `[View On OpenSea](${openseaAssetUrl(detail.chain, SQUIGS_CONTRACT, detail.tokenId)})`
     )
     .setFooter({ text: `${commandLabel}${normalizedRequestedTokenId ? ' lookup' : ' pull'} for ${username}` });
-  if (detail.imagePath) embed.setImage(`attachment://${imageName}`);
-  else if (SQUIG_IMAGE_BASE_URL) embed.setImage(`${SQUIG_IMAGE_BASE_URL}/${detail.tokenId}`);
+  if (detail.imageUrl) embed.setImage(detail.imageUrl);
 
   return {
     embeds: [embed],
-    ...(detail.imagePath ? { files: [new AttachmentBuilder(detail.imagePath, { name: imageName })] } : {}),
   };
 }
 
@@ -2091,9 +2114,9 @@ async function buildSquigGridAttachment(details, username) {
     const y = titleH + row * cell;
     ctx.fillStyle = '#eef5f0';
     ctx.fillRect(x + 8, y + 8, cell - 16, cell - 42);
-    if (item.imagePath) {
+    if (item.imageUrl) {
       try {
-        const img = await loadImage(item.imagePath);
+        const img = await loadCanvasImageSource(item.imageUrl);
         const box = cell - 24;
         const scale = Math.min(box / img.width, (cell - 58) / img.height);
         const w = Math.max(1, Math.round(img.width * scale));
@@ -7377,6 +7400,7 @@ portalEvent.initPortalEvent({
   getGuildPointMappings,
   getOwnedTokenIdsForContractMany,
   getNftMetadataAlchemy,
+  getNftImageUrl,
   getTraitsForToken,
   hpTableForContract,
   resolveDripMemberForDiscordUser,
@@ -7395,6 +7419,7 @@ squigDuels.initSquigDuels({
   getOwnedTokenIdsForContractMany,
   getOwnedSquigsReloadedTokenIds,
   getNftMetadataAlchemy,
+  getNftImageUrl,
   getTraitsForToken,
   normalizeTraits,
   computeHpFromTraits,
@@ -7414,7 +7439,7 @@ mawEvent.initMawEvent({
   getWalletLinks,
   getOwnedTokenIdsForContractMany,
   getOwnedSquigsReloadedTokenIds,
-  localSquigImagePath,
+  getNftImageUrl,
   getMarketplaceSpendableBalance,
   getDripMemberCurrencyBalance,
   extractDripCurrencyAmountFromPayload,
@@ -8381,7 +8406,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
         const tokenId = interaction.options.getInteger('token_id', true);
         try {
-          await interaction.editReply(buildSquigRankPayload(tokenId));
+          await interaction.editReply(await buildSquigRankPayload(tokenId));
         } catch (err) {
           const code = String(err?.code || '');
           const message = code === 'MAW_RANKING_MISSING_TOKEN' || code === 'MAW_RANKING_INVALID_TOKEN'

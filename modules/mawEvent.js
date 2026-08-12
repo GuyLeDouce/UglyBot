@@ -59,10 +59,6 @@ const DEFAULT_BLOCK_CHUNK_SIZE = 2000;
 const MAW_RANKING_FAILURE_MESSAGE = 'The Maw could not determine the value of that Squig. Nothing has been transferred and no timer was started. An admin has been notified.';
 const SQUIG_IMAGE_BASE_URL = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(/\/+$/, '');
 const MAW_PANEL_IMAGE_URL = 'https://i.imgur.com/tjahRQz.png';
-const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
-  path.join(__dirname, '..', 'images'),
-  path.join(__dirname, '..', '..', 'images'),
-];
 
 let deps = null;
 let mawProvider = null;
@@ -504,30 +500,18 @@ function buildMawSquigSelectRows(eventId, userId, squigs, page = 0, selectOption
   ];
 }
 
-function localMawSquigImagePath(tokenId) {
-  const tid = String(tokenId || '').trim();
-  if (!/^\d+$/.test(tid)) return null;
-  if (typeof deps?.localSquigImagePath === 'function') {
-    const injectedPath = deps.localSquigImagePath(tid);
-    if (injectedPath) return injectedPath;
-  }
-  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
-    const candidate = path.join(imageDir, `${tid}.png`);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-function mawSquigImageAttachment(tokenId) {
+async function mawSquigImageAttachment(tokenId) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return { imageUrl: null, files: [] };
-  const imagePath = localMawSquigImagePath(tid);
-  if (imagePath) {
-    const name = `maw-squig-${tid}${path.extname(imagePath) || '.png'}`;
-    return {
-      imageUrl: `attachment://${name}`,
-      files: [new AttachmentBuilder(imagePath, { name })],
-    };
+  if (typeof deps?.getNftImageUrl === 'function') {
+    try {
+      const imageUrl = await deps.getNftImageUrl(tid, DEFAULT_SQUIG_CONTRACT, process.env.SQUIG_COLLECTION_CHAIN || 'ethereum', {
+        logFailures: true,
+      });
+      if (imageUrl) return { imageUrl, files: [] };
+    } catch (err) {
+      console.warn(`[Maw] OpenSea image lookup failed for Squig ${tid}:`, String(err?.message || err || ''));
+    }
   }
   if (SQUIG_IMAGE_BASE_URL) return { imageUrl: `${SQUIG_IMAGE_BASE_URL}/${tid}`, files: [] };
   return { imageUrl: null, files: [] };
@@ -1954,7 +1938,7 @@ async function handleMawReviewSquigPageButton(interaction) {
   selectionState.page = clampMawSquigPage(selectionState.squigs, rawPage);
   const summary = await getMawEventSummary(event);
   await interaction.update({
-    ...buildMawReviewPayload(event, summary, pending.tokenId, token, pending.quote, selectionState, interaction.user.id, pending.sourceWallet),
+    ...(await buildMawReviewPayload(event, summary, pending.tokenId, token, pending.quote, selectionState, interaction.user.id, pending.sourceWallet)),
   });
   return true;
 }
@@ -2032,7 +2016,7 @@ async function handleMawSquigSelect(interaction) {
   });
 
   await interaction.update({
-    ...buildMawReviewPayload(event, summary, tokenId, token, quote, selectionState, interaction.user.id, sourceWallet),
+    ...(await buildMawReviewPayload(event, summary, tokenId, token, quote, selectionState, interaction.user.id, sourceWallet)),
   });
 }
 
@@ -2079,8 +2063,8 @@ function buildMawReviewEmbed(event, summary, tokenId, imageUrl = null, quote = n
   return embed;
 }
 
-function buildMawReviewPayload(event, summary, tokenId, token, quote = null, selectionState = null, userId = null, sourceWallet = null) {
-  const image = mawSquigImageAttachment(tokenId);
+async function buildMawReviewPayload(event, summary, tokenId, token, quote = null, selectionState = null, userId = null, sourceWallet = null) {
+  const image = await mawSquigImageAttachment(tokenId);
   const selectRows = selectionState?.squigs?.length > 1
     ? buildMawSquigSelectRows(event.id, userId || selectionState.userId, selectionState.squigs, selectionState.page, {
         placeholder: 'Choose a different Squig',
@@ -2543,7 +2527,7 @@ async function handleSquigPrizeCommand(interaction) {
     await interaction.editReply({ content: result.reason || 'The Maw could not cough up a Squig.' });
     return;
   }
-  const message = await interaction.channel.send(buildPrizeOfferPayload(result.claim, result.squig));
+  const message = await interaction.channel.send(await buildPrizeOfferPayload(result.claim, result.squig));
   await resolvePool().query(
     `UPDATE squig_prize_claims
      SET offer_channel_id = $2,
@@ -2644,9 +2628,9 @@ async function insertPrizeHistory(db, claimId, poolSquigId, action, charmDelta =
   );
 }
 
-function buildPrizeOfferPayload(claim, squig, disabled = false, options = {}) {
+async function buildPrizeOfferPayload(claim, squig, disabled = false, options = {}) {
   const config = getMawConfig();
-  const image = mawSquigImageAttachment(squig?.token_id);
+  const image = await mawSquigImageAttachment(squig?.token_id);
   const embed = new EmbedBuilder()
     .setTitle('A Squig has crawled out of the Maw')
     .setColor(0x5f3dc4)
@@ -3276,7 +3260,7 @@ async function updatePrizeOfferMessage(claimId, disabled = false) {
     token_id: claim.token_id,
     contract_address: claim.contract_address,
   };
-  await message.edit(buildPrizeOfferPayload(claim, squig, disabled || String(claim.status) !== 'offered', { replaceAttachments: true }));
+  await message.edit(await buildPrizeOfferPayload(claim, squig, disabled || String(claim.status) !== 'offered', { replaceAttachments: true }));
   return true;
 }
 

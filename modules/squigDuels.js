@@ -25,10 +25,6 @@ const SQUIG_IMAGE_BASE = String(process.env.SQUIG_IMAGE_BASE_URL || '').replace(
 const SQUIG_UGLY_POINTS_CSV_PATH = String(
   process.env.SQUIG_DUEL_UGLY_POINTS_CSV || path.join(__dirname, '..', 'Squigs_Reloaded_Token_UglyPoints.csv')
 ).trim();
-const LOCAL_SQUIG_IMAGE_DIR_CANDIDATES = [
-  path.join(__dirname, '..', 'images'),
-  path.join(__dirname, '..', '..', 'images'),
-];
 const SQUIG_DUEL_MENU_IMAGE = 'https://i.imgur.com/UPSglKC.png';
 const SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID = String(
   process.env.SQUIG_DUEL_PUBLIC_LOG_CHANNEL_ID || '1403005536982794371'
@@ -277,24 +273,33 @@ function formatCharm(amount) {
   return new Intl.NumberFormat('en-US').format(Math.floor(Number(amount) || 0));
 }
 
-function localSquigImagePath(tokenId) {
-  const tid = String(tokenId || '').trim();
-  if (!/^\d+$/.test(tid)) return null;
-  for (const imageDir of LOCAL_SQUIG_IMAGE_DIR_CANDIDATES) {
-    const candidate = path.join(imageDir, `${tid}.png`);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
 function squigImageUrl(tokenId, options = {}) {
   const tid = String(tokenId || '').trim();
   if (!/^\d+$/.test(tid)) return null;
-  const localImage = localSquigImagePath(tid);
-  if (options.preferLocal && localImage) return localImage;
-  if (options.localOnly) return null;
   if (SQUIG_IMAGE_BASE) return `${SQUIG_IMAGE_BASE}/${tid}`;
-  return localImage;
+  return null;
+}
+
+async function resolveSquigImageUrl(tokenId, options = {}) {
+  const tid = String(tokenId || '').trim();
+  if (!/^\d+$/.test(tid)) return null;
+  if (typeof deps?.getNftImageUrl === 'function') {
+    try {
+      const imageUrl = await deps.getNftImageUrl(tid, SQUIGS_CONTRACT, SQUIGS_CHAIN, options);
+      if (discordImageUrl(imageUrl)) return discordImageUrl(imageUrl);
+    } catch (err) {
+      if (options.logFailures) {
+        console.warn(`[SquigDuels] OpenSea image lookup failed for #${tid}:`, String(err?.message || err || ''));
+      }
+    }
+  }
+  return discordImageUrl(squigImageUrl(tid));
+}
+
+function duelImageUrlForSide(duel, side) {
+  const stored = side === 'challenger' ? duel?.challengerSquigImageUrl : duel?.opponentSquigImageUrl;
+  if (discordImageUrl(stored)) return discordImageUrl(stored);
+  return discordImageUrl(squigImageUrl(tokenIdForSide(duel, side)));
 }
 
 function discordImageUrl(source) {
@@ -558,6 +563,21 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
 
+async function mapLimit(items, limit, fn) {
+  const list = Array.isArray(items) ? items : [];
+  const out = new Array(list.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < list.length) {
+      const index = nextIndex++;
+      out[index] = await fn(list[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 function isThreadCreatedMessageForThread(message, thread) {
   const threadId = String(thread?.id || '').trim();
   if (!threadId) return false;
@@ -744,21 +764,11 @@ async function postOpenChallengeAcceptedAnnouncement(guild, duel, acceptedByName
 }
 
 function buildOpenChallengeAnnouncementImage(duel) {
-  const tokenId = String(duel?.challengerSquigTokenId || '').trim();
-  const imageSource = squigImageUrl(tokenId);
-  const imageUrl = discordImageUrl(imageSource);
+  const imageUrl = duelImageUrlForSide(duel, 'challenger');
   if (imageUrl) {
     return {
       embeds: [new EmbedBuilder().setColor(0xd4a43b).setImage(imageUrl)],
       files: [],
-    };
-  }
-  if (imageSource && fs.existsSync(imageSource)) {
-    const safeTokenId = tokenId.replace(/[^\w-]/g, '') || 'challenger';
-    const name = `open-squig-duel-${safeTokenId}.png`;
-    return {
-      embeds: [new EmbedBuilder().setColor(0xd4a43b).setImage(`attachment://${name}`)],
-      files: [new AttachmentBuilder(imageSource, { name })],
     };
   }
   return { embeds: [], files: [] };
@@ -1241,6 +1251,8 @@ function createBaseDuel({ interaction, duelId, thread, opponentId = null, wagerA
     opponentSquigTokenId: null,
     challengerSquigName: null,
     opponentSquigName: null,
+    challengerSquigImageUrl: null,
+    opponentSquigImageUrl: null,
     challengerUglyPoints: null,
     opponentUglyPoints: null,
     challengerMaxHp: null,
@@ -1561,26 +1573,26 @@ async function fetchOwnedSquigs(guildId, userId) {
   }
 
   const savedProfiles = await getSavedSquigProfiles(guildId, userId);
-  const squigs = [];
-  for (const tokenId of tokenIds) {
+  const squigs = (await mapLimit(tokenIds, 6, async (tokenId) => {
     try {
       const uglyPoints = await calculateUglyPoints(guildId, tokenId, selectedCollection.chain);
-      if (!Number.isFinite(Number(uglyPoints))) continue;
+      if (!Number.isFinite(Number(uglyPoints))) return null;
       const hp = Math.floor(Number(uglyPoints));
       const savedProfile = savedProfiles.get(String(tokenId));
-      squigs.push({
+      return {
         tokenId: String(tokenId),
         nickname: savedProfile?.nickname || '',
         isFavorite: Boolean(savedProfile?.isFavorite),
         uglyPoints: Math.floor(Number(uglyPoints)),
         maxHp: hp,
         attackPower: baseAttack(uglyPoints),
-        imageUrl: squigImageUrl(tokenId),
-      });
+        imageUrl: await resolveSquigImageUrl(tokenId, { logFailures: true }),
+      };
     } catch (err) {
       console.warn(`[SquigDuels] Squig #${tokenId} point lookup failed:`, String(err?.message || err || ''));
+      return null;
     }
-  }
+  })).filter(Boolean);
 
   if (!squigs.length) {
     return { ok: false, reason: 'No UglyPoints mapping found for your Squigs.' };
@@ -2488,7 +2500,7 @@ function challengeRows(duel) {
 
 function buildChallengeEmbed(duel) {
   const tokenId = duel.challengerSquigTokenId || 'Unknown';
-  const imageUrl = squigImageUrl(tokenId);
+  const imageUrl = duelImageUrlForSide(duel, 'challenger');
   const challengerSquigName = squigNameForSide(duel, 'challenger');
   const embed = new EmbedBuilder()
     .setTitle(duel.openChallenge ? 'Open Squig Duel Challenge' : 'Squig Duel Challenge')
@@ -2590,6 +2602,7 @@ async function switchOpenChallengeToBot(guild, duel) {
   duel.opponentId = botUserId();
   duel.opponentSquigTokenId = duel.challengerSquigTokenId;
   duel.opponentSquigName = duel.challengerSquigName;
+  duel.opponentSquigImageUrl = duel.challengerSquigImageUrl || await resolveSquigImageUrl(duel.challengerSquigTokenId, { logFailures: true });
   duel.opponentUglyPoints = duel.challengerUglyPoints;
   duel.opponentMaxHp = duel.challengerMaxHp;
   duel.opponentCurrentHp = duel.challengerCurrentHp;
@@ -2735,12 +2748,14 @@ async function lockInSquigFighter(interaction, duel, side, pending, chosen, pend
   if (side === 'challenger') {
     duel.challengerSquigTokenId = chosen.tokenId;
     duel.challengerSquigName = chosen.nickname || null;
+    duel.challengerSquigImageUrl = chosen.imageUrl || await resolveSquigImageUrl(chosen.tokenId, { logFailures: true });
     duel.challengerUglyPoints = chosen.uglyPoints;
     duel.challengerMaxHp = chosen.maxHp;
     duel.challengerCurrentHp = chosen.maxHp;
     if (isBotDuel(duel)) {
       duel.opponentSquigTokenId = chosen.tokenId;
       duel.opponentSquigName = chosen.nickname || null;
+      duel.opponentSquigImageUrl = duel.challengerSquigImageUrl;
       duel.opponentUglyPoints = chosen.uglyPoints;
       duel.opponentMaxHp = chosen.maxHp;
       duel.opponentCurrentHp = chosen.maxHp;
@@ -2783,6 +2798,7 @@ async function lockInSquigFighter(interaction, duel, side, pending, chosen, pend
 
   duel.opponentSquigTokenId = chosen.tokenId;
   duel.opponentSquigName = chosen.nickname || null;
+  duel.opponentSquigImageUrl = chosen.imageUrl || await resolveSquigImageUrl(chosen.tokenId, { logFailures: true });
   duel.opponentUglyPoints = chosen.uglyPoints;
   duel.opponentMaxHp = chosen.maxHp;
   duel.opponentCurrentHp = chosen.maxHp;
@@ -2886,7 +2902,7 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
   const maxHp = isChallenger ? duel.challengerMaxHp : duel.opponentMaxHp;
   const currentHp = isChallenger ? duel.challengerCurrentHp : duel.opponentCurrentHp;
   const ready = Boolean(duel.readyUsers?.[side]);
-  const imageUrl = squigImageUrl(tokenId, { preferLocal: true, localOnly: true });
+  const imageUrl = duelImageUrlForSide(duel, side) || await resolveSquigImageUrl(tokenId, { logFailures: true });
   const accent = isChallenger ? '#d4a43b' : '#7ADDC0';
 
   fillReadyRoundRect(ctx, panel.x, panel.y, panel.w, panel.h, 34, 'rgba(13, 17, 16, 0.86)', accent, 6);
@@ -2907,7 +2923,7 @@ async function drawReadySquigPanel(ctx, duel, side, panel) {
       console.warn(`[SquigDuels] ready squig #${tokenId} image failed (${imageUrl}):`, String(err?.message || err || ''));
     }
   } else {
-    console.warn(`[SquigDuels] ready squig #${tokenId} local PNG not found.`);
+    console.warn(`[SquigDuels] ready squig #${tokenId} OpenSea image not found.`);
   }
 
   drawReadyText(ctx, isChallenger ? 'CHALLENGER' : 'OPPONENT', panel.x + 34, panel.y + 30, 24, 900, accent);
@@ -3134,10 +3150,10 @@ async function handleAcceptDecline(interaction) {
 function buildStatusEmbed(duel, title, description, options = {}) {
   const thumbnailUrl = Object.prototype.hasOwnProperty.call(options, 'thumbnailUrl')
     ? options.thumbnailUrl
-    : squigImageUrl(duel.challengerSquigTokenId);
+    : duelImageUrlForSide(duel, 'challenger');
   const imageUrl = Object.prototype.hasOwnProperty.call(options, 'imageUrl')
     ? options.imageUrl
-    : squigImageUrl(duel.opponentSquigTokenId);
+    : duelImageUrlForSide(duel, 'opponent');
   const compact = Boolean(options.compact);
   const embed = new EmbedBuilder()
     .setTitle(title)
@@ -3329,9 +3345,9 @@ function drawCoverClippedImage(ctx, image, rect) {
 
 async function drawRoundSquig(ctx, duel, side, scale) {
   const tokenId = tokenIdForSide(duel, side);
-  const imageUrl = squigImageUrl(tokenId, { preferLocal: true, localOnly: true });
+  const imageUrl = duelImageUrlForSide(duel, side) || await resolveSquigImageUrl(tokenId, { logFailures: true });
   if (!imageUrl) {
-    console.warn(`[SquigDuels] round ${side} local PNG not found for token #${tokenId}.`);
+    console.warn(`[SquigDuels] round ${side} OpenSea image not found for token #${tokenId}.`);
     return;
   }
 
@@ -3456,7 +3472,7 @@ async function drawPunchOverlay(ctx, width, height) {
 async function buildLoserSquigAttachment(duel, winnerId) {
   const side = loserSide(duel, winnerId);
   const loserTokenId = tokenIdForSide(duel, side);
-  const imageUrl = squigImageUrl(loserTokenId);
+  const imageUrl = duelImageUrlForSide(duel, side) || await resolveSquigImageUrl(loserTokenId, { logFailures: true });
   if (!imageUrl) return { imageUrl: null, files: [] };
 
   try {
@@ -3512,8 +3528,8 @@ function actionRows(duel) {
 }
 
 function roundImageUrl(duel) {
-  const challengerImage = discordImageUrl(squigImageUrl(duel.challengerSquigTokenId));
-  const opponentImage = discordImageUrl(squigImageUrl(duel.opponentSquigTokenId));
+  const challengerImage = duelImageUrlForSide(duel, 'challenger');
+  const opponentImage = duelImageUrlForSide(duel, 'opponent');
   return duel.currentRound % 2 === 1
     ? (challengerImage || opponentImage)
     : (opponentImage || challengerImage);
