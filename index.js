@@ -39,6 +39,7 @@ const { renderSquigCardExact } = require('./card_renderer');
 const portalEvent = require('./modules/portalEvent');
 const marketplaceCommand = require('./modules/marketplaceCommand');
 const mawEvent = require('./modules/mawEvent');
+const bountyVault = require('./modules/bountyVault');
 const squigDuels = require('./modules/squigDuels');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
@@ -790,6 +791,7 @@ ensureClaimsSchema().catch(e => console.error('Claims schema error:', e.message)
 ensureMarketplaceSchema().catch(e => console.error('Marketplace schema error:', e.message));
 marketplaceCommand.ensureMarketplaceTables({ marketplacePool: prizesPool }).catch(e => console.error('Malformed marketplace schema error:', e.message));
 mawEvent.ensureMawTables({ mawPool: prizesPool }).catch(e => console.error('Maw schema error:', e.message));
+bountyVault.ensureBountyTables({ bountyPool: prizesPool }).catch(e => console.error('Bounty Vault schema error:', e.message));
 squigDuels.ensureSquigDuelSchema(teamPool).catch(e => console.error('Squig duel schema error:', e.message));
 
 async function setWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
@@ -1275,6 +1277,8 @@ function buildSlashCommands() {
     marketplaceCommand.buildMarketplaceSlashCommand().toJSON(),
     mawEvent.buildMawSlashCommand().toJSON(),
     mawEvent.buildSquigPrizeSlashCommand().toJSON(),
+    bountyVault.buildBountyVaultSlashCommand().toJSON(),
+    bountyVault.buildBountyPoolSlashCommand().toJSON(),
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
   ];
 }
@@ -1316,6 +1320,12 @@ client.once(Events.ClientReady, async (c) => {
     console.log('✅ Maw watchers started.');
   } catch (err) {
     console.warn('⚠️ Maw watchers not started:', err.message);
+  }
+  try {
+    bountyVault.startBountyVaultWorkers();
+    console.log('Bounty Vault workers started.');
+  } catch (err) {
+    console.warn('Bounty Vault workers not started:', err.message);
   }
   startDailyHolderVerificationRefresh();
   if (String(process.env.PORTAL_AUTO_START || '').toLowerCase() === 'true') {
@@ -7630,6 +7640,26 @@ mawEvent.initMawEvent({
   isAdmin,
 });
 
+bountyVault.initBountyVault({
+  client,
+  clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
+  bountyPool: prizesPool,
+  getWalletLinks,
+  getWalletOwnerLink,
+  getWalletScanRows,
+  getNftImageUrl,
+  getNftMetadataAlchemy,
+  getOwnedSquigsReloadedTokenIds,
+  getMarketplaceSpendableBalance,
+  getDripMemberCurrencyBalance,
+  extractDripCurrencyAmountFromPayload,
+  awardDripPoints,
+  postAdminSystemLog,
+  isAdmin,
+  squigsContract: SQUIGS_CONTRACT,
+  squigsChain: SQUIGS_CHAIN,
+});
+
 function getMarketplaceCommandDeps() {
   return {
     clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
@@ -7651,6 +7681,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await mawEvent.handleCommand(interaction)) {
+        return;
+      }
+
+      if (await bountyVault.handleCommand(interaction)) {
         return;
       }
 
@@ -8689,6 +8723,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await mawEvent.handleComponent(interaction)) {
+        return;
+      }
+
+      if (await bountyVault.handleComponent(interaction)) {
         return;
       }
 
@@ -9944,6 +9982,10 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.isStringSelectMenu() && await bountyVault.handleComponent(interaction)) {
+      return;
+    }
+
     if (interaction.isStringSelectMenu() && interaction.customId === 'portal_select') {
       await portalEvent.handlePortalSelect(interaction);
       return;
@@ -10261,6 +10303,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await mawEvent.handleModalSubmit(interaction)) {
+        return;
+      }
+
+      if (await bountyVault.handleModalSubmit(interaction)) {
         return;
       }
 

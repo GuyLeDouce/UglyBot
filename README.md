@@ -81,3 +81,32 @@ npm run sync:maw-ranks
 The sync command downloads the configured Google Sheet to a temporary file, validates token IDs 1–4444 and required headers, prints the SHA-256 hash and tier distribution, then replaces the local CSV only after validation succeeds. Restart the bot after replacing the CSV unless a separate safe reload mechanism is added.
 
 Regurgitated Squigs become Maw Pool NFT inventory and can later be awarded through `/squigprize`. Swallowed Squigs remain audit-only digestion records and are never available for prize selection. The Maw Pool is separate from the $CHARM jackpot: the pool contains NFTs, while the jackpot is paid in $CHARM. NFT delivery remains manual/admin-confirmed; the bot does not store private keys or auto-transfer NFTs. `/marketplace` remains separate from Feed the Maw and keeps its existing pricing, stock, flow, and UI.
+# The Bounty Vault
+
+The Bounty Vault is an additive community prize system. An administrator posts the public panel with `/bountyvault`; holders submit an NFT before transferring it from a linked wallet. Confirmed inbound transfers receive team review and then a 24-hour community vote. A submission is accepted only when ✅ strictly beats ❌, and its submitter receives 3,000 `$CHARM` through the existing DRIP integration.
+
+The team-only `/bountypool` panel manages the unique Squigs Reloaded Token IDs eligible for the current monthly draw. At 8:00 PM America/Toronto on the final calendar day, every unassigned accepted Vault NFT plus prizes of 2,500, 5,000, 5,000, 10,000, and 10,000 `$CHARM` are matched to different eligible Token IDs. Owners are snapshotted on-chain before results are persisted and revealed one at a time.
+
+Required configuration:
+
+- `BOUNTY_VAULT_CHANNEL` — public submission/voting channel.
+- An Ethereum RPC source: `BOUNTY_ETH_RPC_URL`, `ETH_RPC_URL`, `ALCHEMY_RPC_URL`, or `ALCHEMY_API_KEY`.
+
+Optional configuration and defaults:
+
+- `BOUNTY_VAULT_WALLET_ADDRESS` — `0x192907Db190A47d963450e17471e05Af99F65808`.
+- `BOUNTY_REVIEW_CHANNEL_ID` — `1477463175665287410`.
+- `BOUNTY_REVIEWER_USER_IDS` — `826581856400179210,1288107772248064044`.
+- `BOUNTY_DRAW_CHANNEL_ID` — falls back to `BOUNTY_VAULT_CHANNEL`.
+- `BOUNTY_ACCEPT_REWARD_CHARM` — `3000`.
+- `BOUNTY_VOTE_HOURS` — `24`.
+- `BOUNTY_POLL_INTERVAL_SECONDS` — `30`.
+- `BOUNTY_MIN_CONFIRMATIONS` — `2`.
+- `BOUNTY_SUBMISSION_TTL_MINUTES` — `60`.
+- `BOUNTY_DRAW_TIME_ZONE` — `America/Toronto`.
+- `BOUNTY_DRAW_HOUR` / `BOUNTY_DRAW_MINUTE` — `20` / `0`.
+- `BOUNTY_POOL_ENTRY_CONTRACT` / `BOUNTY_POOL_ENTRY_CHAIN` — fall back to the configured Squigs Reloaded collection and chain.
+
+Inbound ERC-721 and straightforward ERC-1155 transfers are detected automatically with confirmation depth, persisted cursors, and permanent log de-duplication. Ambiguous transfers and ERC-1155 batches go to team review rather than being guessed. Rejected NFTs and NFT prizes use manual team return/delivery panels whose outbound transaction receipts are verified on-chain.
+
+UglyBot does **not** store a Vault private key and never signs outbound NFT transactions. Configure the review and draw channels so the bot can view channels, send messages, embed links, add reactions, read message history, and use external emojis/reactions as applicable. DRIP must already be configured for automatic `$CHARM` rewards and draw payouts.
