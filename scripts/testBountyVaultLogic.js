@@ -93,6 +93,7 @@ try {
   assert.strictEqual(bounty.isBlockBeyondHeadError({ message: 'server response 503 Service Unavailable' }), false);
   assert.strictEqual(bounty.isTransientRpcError({ info: { responseStatus: 503 } }), true);
   assert.strictEqual(bounty.isTransientRpcError({ error: { code: -32000, message: 'Internal error' } }), true);
+  assert.strictEqual(bounty.isTransientRpcError({ code: 'BAD_DATA', value: [{ code: -32005, message: 'Too Many Requests' }] }), true);
   assert.strictEqual(bounty.isTransientRpcError({ code: 'INVALID_ARGUMENT', message: 'bad address' }), false);
   assert.strictEqual(bounty.transferBackoffMs(1), 15000);
   assert.strictEqual(bounty.transferBackoffMs(6), 300000);
