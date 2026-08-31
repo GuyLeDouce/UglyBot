@@ -91,6 +91,11 @@ try {
   assert.throws(() => bounty.assertTransition('awaiting_transfer', 'vaulted'), /Illegal/);
   assert.strictEqual(bounty.isBlockBeyondHeadError({ error: { code: -32602, message: 'block range extends beyond current head block' } }), true);
   assert.strictEqual(bounty.isBlockBeyondHeadError({ message: 'server response 503 Service Unavailable' }), false);
+  assert.strictEqual(bounty.isTransientRpcError({ info: { responseStatus: 503 } }), true);
+  assert.strictEqual(bounty.isTransientRpcError({ error: { code: -32000, message: 'Internal error' } }), true);
+  assert.strictEqual(bounty.isTransientRpcError({ code: 'INVALID_ARGUMENT', message: 'bad address' }), false);
+  assert.strictEqual(bounty.transferBackoffMs(1), 15000);
+  assert.strictEqual(bounty.transferBackoffMs(6), 300000);
 
   // Database-level unique constraints cover duplicate transfer logs, active submissions,
   // monthly entries, guild/month draws, NFT reuse, winners, and payout state claims.
