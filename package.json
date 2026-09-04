@@ -12,7 +12,7 @@
     "test:maw": "node scripts/testMawLogic.js",
     "test:maw-rarity": "node scripts/testMawRarityLogic.js",
     "test:maw-disposition": "node scripts/testMawDispositionLogic.js",
-    "test:bounty": "node scripts/testBountyVaultLogic.js",
+    "test:bounty": "node scripts/testBountyVaultLogic.js && node scripts/testBountyRecovery.js",
     "sync:maw-ranks": "node scripts/syncMawRankings.js"
   },
   "engines": {

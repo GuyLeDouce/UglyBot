@@ -36,7 +36,7 @@ const STATES = Object.freeze({
   team_rejected: ['return_pending'], vote_rejected: ['return_pending'],
   return_pending: ['returned', 'manual_review'], drawn_pending_delivery: ['delivered', 'manual_review'],
   manual_review: ['team_review', 'return_pending', 'vaulted'],
-  returned: [], delivered: [], expired: [],
+  returned: [], delivered: [], expired: ['team_review'],
 });
 
 let deps = null;
@@ -261,11 +261,12 @@ async function poolPanel(guildId) {
     {name:'Month',value:month,inline:true},{name:'Entry contract',value:`\`${cfg.entryContract}\``},{name:'Entry network',value:chainLabel(cfg.entryChain,cfg),inline:true},{name:'Entries',value:String(rows.length),inline:true},{name:'Vault NFTs',value:String(vault),inline:true},{name:'Total prizes',value:String(vault+5),inline:true},{name:'Draw time',value:scheduledLocalLabel(month,cfg)},{name:'Token IDs',value:(rows.map(x=>`#${x.token_id}`).join(', ')||'None').slice(0,1024)}
   )],components:[new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('bounty_pool_add').setLabel('Add Token ID').setStyle(ButtonStyle.Success),new ButtonBuilder().setCustomId('bounty_pool_remove').setLabel('Remove Token ID').setStyle(ButtonStyle.Danger),new ButtonBuilder().setCustomId('bounty_pool_view').setLabel('View Pool').setStyle(ButtonStyle.Secondary),new ButtonBuilder().setCustomId('bounty_pool_status').setLabel('Draw Status').setStyle(ButtonStyle.Secondary),new ButtonBuilder().setCustomId('bounty_pool_refresh').setLabel('Refresh').setStyle(ButtonStyle.Secondary)
-  )]};
+  ),new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('bounty_recover').setLabel('Recover Transfer').setStyle(ButtonStyle.Primary))]};
 }
 
 async function handleComponent(interaction) {
   const id=String(interaction.customId||''); if(!id.startsWith('bounty_')) return false;
+  if(id==='bounty_recover'){if(!authorized(interaction))await friendly(interaction,'Team only.');else await showRecoveryModal(interaction);return true;}
   if(id==='bounty_submit') return showSubmissionModal(interaction).then(()=>true);
   if(id==='bounty_how'){await friendly(interaction,'Submit an exact OpenSea NFT link first, transfer that NFT from a linked wallet on the same network, pass team review, then win a strict 24-hour community vote. Rejected NFTs are manually returned and the bot verifies the outbound transaction on that NFT’s network.');return true;}
   if(id.startsWith('bounty_view:')){await showVault(interaction,Number(id.split(':')[1])||0);return true;}
@@ -287,12 +288,86 @@ async function showSubmissionModal(interaction){
 async function handleModalSubmit(interaction){
   const id=String(interaction.customId||''); if(!id.startsWith('bounty_')) return false;
   if(id==='bounty_submit_modal') await createSubmission(interaction);
+  else if(id==='bounty_recover_modal') await recoverTransfer(interaction);
   else if(id.startsWith('bounty_pool_add_modal')) await addPoolEntry(interaction);
   else if(id.startsWith('bounty_pool_remove_modal')) await removePoolEntry(interaction);
   else if(id.startsWith('bounty_return_modal:')) await confirmOutbound(interaction,'return',id.split(':')[1]);
   else if(id.startsWith('bounty_deliver_modal:')) await confirmOutbound(interaction,'deliver',id.split(':')[1]);
   return true;
 }
+async function showRecoveryModal(interaction) {
+  const modal = new ModalBuilder().setCustomId('bounty_recover_modal').setTitle('Recover Bounty Transfer');
+  for (const [id, label, max] of [['submission_id', 'Existing submission ID (expired is OK)', 20], ['tx_hash', 'Inbound transaction hash', 66]]) {
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setMaxLength(max).setRequired(true).setStyle(TextInputStyle.Short)));
+  }
+  await interaction.showModal(modal);
+}
+
+// Explicit recovery only: never guess the donor or silently bypass linked-wallet checks.
+async function recoverTransfer(interaction) {
+  if (!authorized(interaction) || !interaction.guildId) { await friendly(interaction, 'Team only.'); return; }
+  const id = interaction.fields.getTextInputValue('submission_id').trim();
+  const txHash = interaction.fields.getTextInputValue('tx_hash').trim().toLowerCase();
+  if (!/^[1-9]\d{0,18}$/.test(id) || !/^0x[0-9a-f]{64}$/.test(txHash)) {
+    await friendly(interaction, 'Enter a valid submission ID and inbound transaction hash.'); return;
+  }
+  await interaction.deferReply({flags: EPHEMERAL});
+  const pool = resolvePool(), cfg = getBountyConfig();
+  let db, recovered = false;
+  try {
+    const s = (await pool.query('SELECT * FROM bounty_submissions WHERE id=$1 AND guild_id=$2', [id, interaction.guildId])).rows[0];
+    if (!s || !['awaiting_transfer', 'expired'].includes(s.status) || s.transfer_tx_hash) throw new Error('Use an awaiting or expired submission without an assigned transfer.');
+    if (!s.contract_address || !s.token_id) throw new Error('The donor must submit an exact NFT link first. Do not transfer the NFT again.');
+    const chain = normalizeChain(s.chain), p = await getProvider(chain, cfg);
+    const network = await p.getNetwork();
+    if (Number(network.chainId) !== getBountyChainConfig(chain, cfg).chainId) throw new Error('RPC network does not match the submission.');
+    const receipt = await p.getTransactionReceipt(txHash);
+    if (!receipt || receipt.status !== 1) throw new Error('A successful transaction was not found on the submission network.');
+    if (receipt.blockNumber > (await p.getBlockNumber()) - cfg.minConfirmations) throw new Error('Wait for the required confirmations.');
+    const matches = [];
+    for (const log of receipt.logs || []) {
+      // The scanner filters recipients in getLogs; receipt recovery must do it explicitly.
+      if (log.topics?.[0] !== TRANSFER_TOPIC || log.topics.length !== 4) continue;
+      if (normalizeAddress(`0x${log.topics[2].slice(-40)}`) !== cfg.vaultWalletAddress) continue;
+      for (const t of parseInboundLog({...log, transactionHash: txHash, blockNumber: receipt.blockNumber}, cfg.vaultWalletAddress, chain)) {
+        if (t.contractAddress === normalizeAddress(s.contract_address) && t.tokenId === String(s.token_id)) matches.push(t);
+      }
+    }
+    if (matches.length !== 1) throw new Error('The receipt must contain exactly one matching ERC-721 transfer into the Vault.');
+    const t = matches[0];
+    const links = await deps.getWalletLinks(s.guild_id, s.sender_discord_id);
+    if (!links.some(x => normalizeAddress(x.wallet_address) === t.sourceWallet)) throw new Error('The source wallet is not linked to this submission’s donor.');
+    if (normalizeAddress(await new ethers.Contract(t.contractAddress, ERC721_ABI, p).ownerOf(BigInt(t.tokenId))) !== cfg.vaultWalletAddress) throw new Error('The NFT is no longer owned by the Vault.');
+    db = await pool.connect();
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock($1::bigint)', [advisoryLockKey(`bounty-log:${t.chain}:${t.txHash}:${t.logIndex}:${t.contractAddress}:${t.tokenId}`)]);
+    const locked = (await db.query('SELECT * FROM bounty_submissions WHERE id=$1 AND guild_id=$2 FOR UPDATE', [id, interaction.guildId])).rows[0];
+    if (!locked || !['awaiting_transfer', 'expired'].includes(locked.status) || locked.transfer_tx_hash || locked.sender_discord_id !== s.sender_discord_id || locked.chain !== s.chain || locked.contract_address !== s.contract_address || locked.token_id !== s.token_id) throw new Error('Submission changed during verification. Refresh and try again.');
+    const key = [t.chain, t.txHash, t.logIndex, t.contractAddress, t.tokenId];
+    const detected = (await db.query('SELECT * FROM bounty_detected_transfers WHERE chain=$1 AND tx_hash=$2 AND log_index=$3 AND contract_address=$4 AND token_id=$5 FOR UPDATE', key)).rows[0];
+    if (!detected || detected.submission_id) throw new Error('Transfer has not been detected yet or is already assigned.');
+    const unmatched = (await db.query("SELECT * FROM bounty_unmatched_transfers WHERE chain=$1 AND tx_hash=$2 AND log_index=$3 AND contract_address=$4 AND token_id=$5 AND status='manual_review' FOR UPDATE", key)).rows[0];
+    if (!unmatched) throw new Error('This transfer is not pending manual review.');
+    const duplicate = await db.query("SELECT id FROM bounty_submissions WHERE chain=$1 AND contract_address=$2 AND token_id=$3 AND id<>$4 AND status NOT IN ('awaiting_transfer','expired','returned','delivered') LIMIT 1", [t.chain, t.contractAddress, t.tokenId, id]);
+    if (duplicate.rowCount) throw new Error('This NFT already has another review or Vault record.');
+    assertTransition(locked.status, 'team_review');
+    await db.query("UPDATE bounty_submissions SET sender_wallet=$2,token_standard='erc721',quantity=1,transfer_tx_hash=$3,transfer_log_index=$4,transfer_block_number=$5,status='team_review',updated_at=NOW() WHERE id=$1", [id, t.sourceWallet, txHash, t.logIndex, t.blockNumber]);
+    await db.query('UPDATE bounty_detected_transfers SET submission_id=$2 WHERE id=$1', [detected.id, id]);
+    await db.query("UPDATE bounty_unmatched_transfers SET status='resolved',guild_id=$2,updated_at=NOW() WHERE id=$1", [unmatched.id, s.guild_id]);
+    await audit(db, {guildId: s.guild_id, submissionId: id, eventType: 'unmatched_transfer_recovered', actorId: interaction.user.id, details: {...t, previousStatus: locked.status, donorDiscordId: s.sender_discord_id, unmatchedId: unmatched.id}});
+    await db.query('COMMIT');
+    recovered = true;
+  } catch (e) {
+    if (db) await db.query('ROLLBACK').catch(() => null);
+    await interaction.editReply({content: `Recovery could not be completed: ${e.message}`});
+  } finally { db?.release(); }
+  if (recovered) {
+    try { await postReviewPanel(id); }
+    catch (e) { await interaction.editReply({content: `Submission #${id} recovered into team review, but the review panel could not be posted. Check the review channel configuration.`}); await logError('Recovery review panel', e, interaction.guildId); return; }
+    await interaction.editReply({content: `Submission #${id} recovered into team review. The unmatched transfer is resolved. Normal team approval and community voting still apply.`});
+  }
+}
+
 async function createSubmission(interaction){
   const project=cleanText(interaction.fields.getTextInputValue('project'),100), description=cleanText(interaction.fields.getTextInputValue('description'),500), parsed=validateAndParseOpenSeaUrl(interaction.fields.getTextInputValue('opensea'));
   if(!project||!parsed.ok){await friendly(interaction,parsed.error||'Project name is required.');return;}
