@@ -5,6 +5,7 @@ const originalLoad = Module._load;
 Module._load = function loadWithStubs(request, parent, isMain) {
   if (request === 'discord.js') {
     class ChainableStub {
+      static from() { return new ChainableStub(); }
       setName() { return this; } setDescription() { return this; } setDefaultMemberPermissions() { return this; }
       setCustomId() { return this; } setTitle() { return this; } setLabel() { return this; } setMaxLength() { return this; }
       setRequired() { return this; } setStyle() { return this; } addComponents() { return this; } addFields() { return this; }
@@ -71,16 +72,63 @@ try {
   assert.strictEqual(config.voteHours, 24);
   assert.strictEqual(config.drawHour, 20);
   assert.strictEqual(config.drawMinute, 0);
+  assert.strictEqual(config.entryChain, 'ethereum');
+  assert.strictEqual(config.chains.ethereum.chainId, 1);
+  assert.strictEqual(config.chains.base.chainId, 8453);
+  assert.strictEqual(config.chains.apechain.chainId, 33139);
+  assert.strictEqual(config.chains.robinhood.chainId, 4663);
+
+  assert.strictEqual(bounty.normalizeChain('eth'), 'ethereum');
+  assert.strictEqual(bounty.normalizeChain('base'), 'base');
+  assert.strictEqual(bounty.normalizeChain('ape_chain'), 'apechain');
+  assert.strictEqual(bounty.normalizeChain('ApeChain'), 'apechain');
+  assert.strictEqual(bounty.normalizeChain('robinhood_chain'), 'robinhood');
+  assert.strictEqual(bounty.normalizeChain('polygon'), null);
 
   const valid = bounty.validateAndParseOpenSeaUrl('https://opensea.io/assets/ethereum/0x8C9A02c0585200c4c65608df6b8Def543D33792A/00123');
   assert.strictEqual(valid.ok, true);
   assert.strictEqual(valid.contractAddress, '0x8c9a02c0585200c4c65608df6b8def543d33792a');
   assert.strictEqual(valid.tokenId, '123');
   assert.strictEqual(valid.chain, 'ethereum');
+  assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io/item/base/0x8C9A02c0585200c4c65608df6b8Def543D33792A/123').chain, 'base');
+  assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io/item/ape_chain/0x8C9A02c0585200c4c65608df6b8Def543D33792A/123').chain, 'apechain');
+  assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io/item/robinhood/0x8C9A02c0585200c4c65608df6b8Def543D33792A/123').chain, 'robinhood');
+  assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io/item/polygon/0x8C9A02c0585200c4c65608df6b8Def543D33792A/123').chain, 'polygon');
   assert.strictEqual(bounty.validateAndParseOpenSeaUrl('http://opensea.io/assets/ethereum/x/1').ok, false);
   assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io.evil.example/assets/ethereum/x/1').ok, false);
   assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://evil-opensea.io/item/ethereum/x/1').ok, false);
   assert.strictEqual(bounty.validateAndParseOpenSeaUrl('https://opensea.io/collection/a').ok, true);
+
+  const multi = bounty.getBountyConfig({
+    BOUNTY_ETH_RPC_URL: 'https://eth.example',
+    BOUNTY_BASE_RPC_URL: 'https://base.example',
+    BOUNTY_APECHAIN_RPC_URL: 'https://ape.example',
+    BOUNTY_ROBINHOOD_RPC_URL: 'https://robinhood.example',
+  });
+  assert.deepStrictEqual(bounty.getEnabledBountyChains(multi), ['ethereum', 'base', 'apechain', 'robinhood']);
+  assert.strictEqual(multi.chains.base.rpcUrl, 'https://base.example');
+  assert.strictEqual(multi.chains.apechain.rpcUrl, 'https://ape.example');
+  assert.strictEqual(multi.chains.robinhood.rpcUrl, 'https://robinhood.example');
+  assert.strictEqual(bounty.getBountyChainConfig('ape_chain', multi).chainId, 33139);
+  assert.deepStrictEqual(bounty.getEnabledBountyChains(bounty.getBountyConfig({ BOUNTY_BASE_RPC_URL: 'https://base.example' })), ['base']);
+
+  const from = '0x2222222222222222222222222222222222222222';
+  const vault = '0x1111111111111111111111111111111111111111';
+  const transfer = bounty.parseInboundLog({
+    topics: [
+      'topic:Transfer(address,address,uint256)',
+      `0x${from.slice(2).padStart(64, '0')}`,
+      `0x${vault.slice(2).padStart(64, '0')}`,
+      `0x${BigInt(42).toString(16).padStart(64, '0')}`,
+    ],
+    transactionHash: `0x${'a'.repeat(64)}`,
+    index: 3,
+    blockNumber: 100,
+    address: '0x8C9A02c0585200c4c65608df6b8Def543D33792A',
+  }, vault, 'base')[0];
+  assert.strictEqual(transfer.chain, 'base');
+  assert.strictEqual(transfer.tokenId, '42');
+  assert.strictEqual(transfer.sourceWallet, from);
 
   assert.strictEqual(bounty.canTransition('awaiting_transfer', 'team_review'), true);
   assert.strictEqual(bounty.canTransition('awaiting_transfer', 'vaulted'), false);
