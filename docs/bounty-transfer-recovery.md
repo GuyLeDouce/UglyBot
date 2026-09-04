@@ -4,6 +4,10 @@ An unmatched warning means the scanner saw an NFT arrive but could not select on
 
 After deploying this change:
 
+New **UNMATCHED BOUNTY TRANSFER** messages include a team-only **Retry Matching** button. This checks again for exactly one active, unexpired submission for the NFT and linked source wallet in the current server, then runs the same verified recovery. If nothing matches or matching is ambiguous, the transfer remains in manual review. Use the explicit recovery flow below for expired submissions. Existing Discord messages are not edited automatically.
+
+Bounty team-review, unmatched-transfer, return, delivery and operational-summary messages are sent to `BOUNTY_TEAM_VOTE_CHANNEL_ID` first. If it is unset, inaccessible or sending fails, they fall back to `BOUNTY_REVIEW_CHANNEL_ID` (or the existing default review channel). Public voting/draw messages and the generic system-error logger retain their existing routes.
+
 1. Get the donor's submission ID from their submission confirmation and copy the transaction hash from **View transaction** in the unmatched warning.
 2. Run `/bountypool` as a bot admin or configured reviewer and click **Recover Transfer**.
 3. Enter the submission ID and inbound transaction hash. An expired submission is supported.

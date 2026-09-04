@@ -36,7 +36,9 @@ process.env.BOUNTY_MIN_CONFIRMATIONS = '2';
 async function run(options = {}) {
   scenario = options;
   let committed = false, rolledBack = false, released = false, panelCount = 0;
-  const writes = [], replies = [];
+  const writes = [], replies = [], channels = [];
+  process.env.BOUNTY_TEAM_VOTE_CHANNEL_ID = options.primary ? 'primary' : '';
+  process.env.BOUNTY_REVIEW_CHANNEL_ID = 'backup';
   const submission = {id: '42', guild_id: 'guild', sender_discord_id: '949454958426742804',
     chain: 'ethereum', contract_address: contract, token_id: '3157', status: options.status ?? 'expired',
     project_name: 'Squigs', opensea_url: `https://opensea.io/item/ethereum/${contract}/3157`, ...options.submission};
@@ -44,6 +46,8 @@ async function run(options = {}) {
     if (sql === 'BEGIN' || sql.startsWith('SELECT pg_advisory')) return {rows: []};
     if (sql === 'COMMIT') { committed = true; return {rows: []}; }
     if (sql === 'ROLLBACK') { rolledBack = true; return {rows: []}; }
+    if (sql.startsWith('SELECT * FROM bounty_unmatched_transfers WHERE id=')) return {rows: [{id: 6, status: options.resolved ? 'resolved' : 'manual_review', token_standard: 'erc721', chain: 'ethereum', contract_address: contract, token_id: '3157', source_wallet: wallet, tx_hash: tx}]};
+    if (sql.includes('expires_at>NOW()')) return {rows: options.noMatch ? [] : options.ambiguous ? [submission, {...submission, id: '43'}] : [submission]};
     if (sql.startsWith('SELECT * FROM bounty_submissions')) return {rows: options.missing ? [] : [{...submission, ...(sql.includes('FOR UPDATE') ? options.locked : {})}]};
     if (sql.startsWith('SELECT * FROM bounty_detected')) return {rows: [{id: 5, submission_id: options.assigned ? '99' : null}]};
     if (sql.startsWith('SELECT * FROM bounty_unmatched')) return {rows: options.resolved ? [] : [{id: 6}]};
@@ -57,13 +61,13 @@ async function run(options = {}) {
       assert.equal(guild, 'guild'); assert.equal(donor, '949454958426742804');
       return options.unlinked ? [] : [{wallet_address: wallet.toUpperCase().replace('0X', '0x')}];
     },
-    client: {channels: {async fetch() { return {async send() { panelCount++; return {id: 'message', channelId: 'review'}; }}; }}},
+    client: {channels: {async fetch(id) { channels.push(id); if (options.fetchFailure && id === 'primary') throw new Error('Unavailable'); return {async send() { if (options.sendFailure && id === 'primary') throw new Error('Missing permission'); panelCount++; return {id: 'message', channelId: id}; }}; }}},
   });
-  await bounty.handleModalSubmit({customId: 'bounty_recover_modal', guildId: 'guild', user: {id: 'admin'},
+  await bounty[options.retry ? 'handleComponent' : 'handleModalSubmit']({customId: options.retry ? 'bounty_retry:6' : 'bounty_recover_modal', guildId: 'guild', user: {id: 'admin'},
     fields: {getTextInputValue: key => key === 'submission_id' ? '42' : tx},
     async deferReply() {}, async reply(p) { replies.push(p.content); }, async editReply(p) { replies.push(p.content); },
   });
-  return {committed, rolledBack, released, writes, panelCount, reply: replies.join('\n')};
+  return {committed, rolledBack, released, writes, panelCount, channels, reply: replies.join('\n')};
 }
 
 (async () => {
@@ -85,5 +89,13 @@ async function run(options = {}) {
     assert(!r.committed, JSON.stringify(options)); assert.equal(r.panelCount, 0);
     assert.equal(r.writes.length, 0, JSON.stringify(options));
   }
-  console.log('Bounty recovery tests passed (2 recovery paths, 15 rejection cases).');
+  for (const options of [{primary: true}, {primary: true, fetchFailure: true}, {primary: true, sendFailure: true}]) {
+    const r = await run(options); assert(r.committed, r.reply);
+    assert.deepEqual(r.channels, options.fetchFailure || options.sendFailure ? ['primary', 'backup'] : ['primary']);
+  }
+  const retried = await run({retry: true}); assert(retried.committed, retried.reply);
+  for (const options of [{noMatch: true}, {ambiguous: true}, {unlinked: true}, {resolved: true}, {unauthorized: true}, {assigned: true}]) {
+    const r = await run({...options, retry: true}); assert(!r.committed, JSON.stringify(options)); assert.equal(r.writes.length, 0);
+  }
+  console.log('Bounty recovery, retry matching and admin channel fallback tests passed.');
 })().catch(e => { console.error(e); process.exitCode = 1; });
