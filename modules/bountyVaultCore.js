@@ -1,0 +1,429 @@
+const crypto = require('crypto');
+const { ethers } = require('ethers');
+const {
+  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle, PermissionFlagsBits,
+} = require('discord.js');
+
+const DEFAULT_VAULT_WALLET = '0x192907db190a47d963450e17471e05af99f65808';
+const DEFAULT_REVIEW_CHANNEL = '1477463175665287410';
+const DEFAULT_REVIEWERS = ['826581856400179210', '1288107772248064044'];
+const DEFAULT_ENTRY_CONTRACT = '0x8c9a02c0585200c4c65608df6b8def543d33792a';
+const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
+const TRANSFER_BATCH_TOPIC = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
+const ERC721_ABI = ['function ownerOf(uint256) view returns (address)'];
+const EPHEMERAL = 64;
+const CHARM_PRIZES = Object.freeze([2500, 5000, 5000, 10000, 10000]);
+
+const BOUNTY_CHAINS = Object.freeze({
+  ethereum: Object.freeze({ chainId: 1, label: 'Ethereum', explorerBaseUrl: 'https://etherscan.io', initialScanBlocks: 7200 }),
+  base: Object.freeze({ chainId: 8453, label: 'Base', explorerBaseUrl: 'https://basescan.org', initialScanBlocks: 10000 }),
+  apechain: Object.freeze({ chainId: 33139, label: 'ApeChain', explorerBaseUrl: 'https://apechain.calderaexplorer.xyz', initialScanBlocks: 30000 }),
+  robinhood: Object.freeze({ chainId: 4663, label: 'Robinhood Chain', explorerBaseUrl: 'https://robinhoodchain.blockscout.com', initialScanBlocks: 30000 }),
+});
+
+const CHAIN_ALIASES = Object.freeze({
+  eth: 'ethereum', ethereum: 'ethereum', base: 'base', apechain: 'apechain', ape_chain: 'apechain',
+  robinhood: 'robinhood', robinhood_chain: 'robinhood',
+});
+
+const STATES = Object.freeze({
+  awaiting_transfer: ['team_review', 'manual_review', 'expired'],
+  team_review: ['community_vote', 'return_pending', 'manual_review'],
+  community_vote: ['vaulted', 'return_pending', 'manual_review'],
+  vaulted: ['drawn_pending_delivery', 'manual_review'],
+  team_rejected: ['return_pending'], vote_rejected: ['return_pending'],
+  return_pending: ['returned', 'manual_review'], drawn_pending_delivery: ['delivered', 'manual_review'],
+  manual_review: ['team_review', 'return_pending', 'vaulted'],
+  returned: [], delivered: [], expired: [],
+});
+
+let deps = null;
+const providers = new Map();
+const transferRpcState = new Map();
+let workerTimer = null;
+let workersRunning = false;
+let tickRunning = false;
+
+function initBountyVault(injected = {}) { deps = injected || {}; }
+function resolvePool(input = null) {
+  const pool = input?.query ? input : input?.bountyPool || input?.prizesPool || deps?.bountyPool || deps?.prizesPool;
+  if (!pool?.query) throw new Error('Bounty Vault database pool is not configured.');
+  return pool;
+}
+function intEnv(name, fallback, min = 0) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? Math.max(min, Math.floor(value)) : fallback;
+}
+function intEnvFrom(env, name, fallback, min) {
+  const value = Number(env[name]); return Number.isFinite(value) ? Math.max(min, Math.floor(value)) : fallback;
+}
+function normalizeAddress(value) {
+  const text = String(value || '').trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(text) ? text.toLowerCase() : null;
+}
+function normalizeChain(value) { return CHAIN_ALIASES[String(value || '').trim().toLowerCase()] || null; }
+function parseIds(value, fallback) {
+  const ids = String(value || '').split(',').map(x => x.trim()).filter(x => /^\d{15,22}$/.test(x));
+  return ids.length ? [...new Set(ids)] : [...fallback];
+}
+function cleanBaseUrl(value, fallback) { return String(value || fallback || '').trim().replace(/\/+$/, ''); }
+function buildChainConfigs(env = process.env) {
+  const alchemyKey = String(env.ALCHEMY_API_KEY || '').trim();
+  const ethereumRpc = String(env.BOUNTY_ETHEREUM_RPC_URL || env.BOUNTY_ETH_RPC_URL || env.ETH_RPC_URL || env.ALCHEMY_RPC_URL ||
+    (alchemyKey ? `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}` : '')).trim();
+  return {
+    ethereum: { ...BOUNTY_CHAINS.ethereum, rpcUrl: ethereumRpc, explorerBaseUrl: cleanBaseUrl(env.BOUNTY_ETHEREUM_EXPLORER_BASE_URL || env.ETH_EXPLORER_BASE_URL || env.ETHERSCAN_BASE_URL, BOUNTY_CHAINS.ethereum.explorerBaseUrl) },
+    base: { ...BOUNTY_CHAINS.base, rpcUrl: String(env.BOUNTY_BASE_RPC_URL || '').trim(), explorerBaseUrl: cleanBaseUrl(env.BOUNTY_BASE_EXPLORER_BASE_URL, BOUNTY_CHAINS.base.explorerBaseUrl) },
+    apechain: { ...BOUNTY_CHAINS.apechain, rpcUrl: String(env.BOUNTY_APECHAIN_RPC_URL || '').trim(), explorerBaseUrl: cleanBaseUrl(env.BOUNTY_APECHAIN_EXPLORER_BASE_URL, BOUNTY_CHAINS.apechain.explorerBaseUrl) },
+    robinhood: { ...BOUNTY_CHAINS.robinhood, rpcUrl: String(env.BOUNTY_ROBINHOOD_RPC_URL || '').trim(), explorerBaseUrl: cleanBaseUrl(env.BOUNTY_ROBINHOOD_EXPLORER_BASE_URL, BOUNTY_CHAINS.robinhood.explorerBaseUrl) },
+  };
+}
+function getBountyConfig(env = process.env) {
+  const entryContract = normalizeAddress(env.BOUNTY_POOL_ENTRY_CONTRACT || env.SQUIG_COLLECTION_CONTRACT || DEFAULT_ENTRY_CONTRACT) || DEFAULT_ENTRY_CONTRACT;
+  const vaultChannelId = String(env.BOUNTY_VAULT_CHANNEL || '').trim() || null;
+  const chains = buildChainConfigs(env);
+  const entryChain = normalizeChain(env.BOUNTY_POOL_ENTRY_CHAIN || env.SQUIG_COLLECTION_CHAIN || env.SQUIG_CHAIN || 'ethereum') || 'ethereum';
+  return {
+    vaultWalletAddress: normalizeAddress(env.BOUNTY_VAULT_WALLET_ADDRESS || DEFAULT_VAULT_WALLET) || DEFAULT_VAULT_WALLET,
+    reviewChannelId: String(env.BOUNTY_REVIEW_CHANNEL_ID || DEFAULT_REVIEW_CHANNEL).trim(),
+    reviewerUserIds: parseIds(env.BOUNTY_REVIEWER_USER_IDS, DEFAULT_REVIEWERS),
+    vaultChannelId,
+    drawChannelId: String(env.BOUNTY_DRAW_CHANNEL_ID || vaultChannelId || '').trim() || null,
+    acceptRewardCharm: intEnvFrom(env, 'BOUNTY_ACCEPT_REWARD_CHARM', 3000, 0),
+    voteHours: intEnvFrom(env, 'BOUNTY_VOTE_HOURS', 24, 1),
+    pollIntervalSeconds: intEnvFrom(env, 'BOUNTY_POLL_INTERVAL_SECONDS', 30, 5),
+    minConfirmations: intEnvFrom(env, 'BOUNTY_MIN_CONFIRMATIONS', 2, 0),
+    submissionTtlMinutes: intEnvFrom(env, 'BOUNTY_SUBMISSION_TTL_MINUTES', 60, 1),
+    drawTimeZone: String(env.BOUNTY_DRAW_TIME_ZONE || 'America/Toronto').trim(),
+    drawHour: intEnvFrom(env, 'BOUNTY_DRAW_HOUR', 20, 0),
+    drawMinute: intEnvFrom(env, 'BOUNTY_DRAW_MINUTE', 0, 0),
+    entryContract, entryChain, chains,
+    explorerBaseUrl: chains.ethereum.explorerBaseUrl,
+    rpcUrl: chains.ethereum.rpcUrl,
+    alchemyKey: String(env.ALCHEMY_API_KEY || '').trim(),
+  };
+}
+function getBountyChainConfig(chain, config = getBountyConfig()) {
+  const normalized = normalizeChain(chain); return normalized ? config.chains?.[normalized] || null : null;
+}
+function getEnabledBountyChains(config = getBountyConfig()) { return Object.keys(BOUNTY_CHAINS).filter(chain => Boolean(config.chains?.[chain]?.rpcUrl)); }
+function chainLabel(chain, config = getBountyConfig()) { return getBountyChainConfig(chain, config)?.label || String(chain || 'Unknown'); }
+function advisoryLockKey(value) { return crypto.createHash('sha256').update(String(value)).digest().readBigInt64BE(0).toString(); }
+function canTransition(from, to) { return Boolean(STATES[String(from)]?.includes(String(to))); }
+function assertTransition(from, to) { if (!canTransition(from, to)) throw new Error(`Illegal Bounty Vault transition: ${from} -> ${to}`); return true; }
+function isBlockBeyondHeadError(error) {
+  const messages = [error?.message, error?.shortMessage, error?.error?.message, error?.info?.error?.message];
+  return messages.some(message => /block range extends beyond current head block/i.test(String(message || '')));
+}
+function isTransientRpcError(error) {
+  if (isBlockBeyondHeadError(error)) return true;
+  const status = Number(error?.info?.responseStatus || error?.status || error?.response?.status);
+  const rpcCode = Number(error?.error?.code ?? error?.info?.error?.code);
+  const valueCodes = Array.isArray(error?.value) ? error.value.map(x => Number(x?.code)) : [];
+  const detail = [error?.code, error?.message, error?.shortMessage, error?.error?.message,
+    error?.info?.error?.message, error?.info?.responseBody,
+    ...(Array.isArray(error?.value) ? error.value.map(x => x?.message) : [])].map(x => String(x || '')).join(' ');
+  return [429, 502, 503, 504].includes(status) || [-32000, -32005].includes(rpcCode) || valueCodes.includes(-32005) ||
+    /SERVER_ERROR|NETWORK_ERROR|TIMEOUT|ECONNRESET|ETIMEDOUT|Service Unavailable|connection timeout|Internal error|Too Many Requests|rate.?limit/i.test(detail);
+}
+function transferBackoffMs(failures) { return Math.min(300000, 15000 * (2 ** Math.min(5, Math.max(0, failures - 1)))); }
+function decideVote(yes, no) { return Number(yes) > Number(no) ? 'accepted' : 'rejected'; }
+function countVoteUsers(yesUsers = [], noUsers = [], botIds = []) {
+  const bots = new Set(botIds.map(String));
+  const yes = new Set(yesUsers.filter(x => !x?.bot && !bots.has(String(x?.id))).map(x => String(x.id)));
+  const no = new Set(noUsers.filter(x => !x?.bot && !bots.has(String(x?.id))).map(x => String(x.id)));
+  for (const id of [...yes]) if (no.has(id)) { yes.delete(id); no.delete(id); }
+  return { yes: yes.size, no: no.size, yesUserIds: [...yes], noUserIds: [...no], result: decideVote(yes.size, no.size) };
+}
+function secureSampleWithoutReplacement(items, count, rng = crypto.randomInt) {
+  if (!Number.isInteger(count) || count < 0 || items.length < count) throw new Error(`Insufficient unique entries: need ${count}, have ${items.length}.`);
+  const copy = [...items];
+  for (let i = 0; i < count; i++) { const j = i + rng(copy.length - i); [copy[i], copy[j]] = [copy[j], copy[i]]; }
+  return copy.slice(0, count);
+}
+function buildDrawPlan(vaultNfts, entries, rng = crypto.randomInt) {
+  const unique = [...new Map(entries.map(x => [`${normalizeAddress(x.contract_address)}:${String(x.token_id)}`, x])).values()];
+  const prizes = [...vaultNfts.map(nft => ({ prizeType: 'nft', bountySubmission: nft })), ...CHARM_PRIZES.map(charmAmount => ({ prizeType: 'charm', charmAmount }))];
+  const winners = secureSampleWithoutReplacement(unique, prizes.length, rng);
+  return prizes.map((prize, index) => ({ ...prize, revealOrder: index + 1, winningEntry: winners[index] }));
+}
+function zonedParts(date = new Date(), timeZone = 'America/Toronto') {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+  return Object.fromEntries(parts.filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
+}
+function getMonthKey(date = new Date(), timeZone = 'America/Toronto') { const p = zonedParts(date, timeZone); return `${p.year}-${String(p.month).padStart(2, '0')}`; }
+function isFinalCalendarDay(date = new Date(), timeZone = 'America/Toronto') { const p = zonedParts(date, timeZone); return p.day === new Date(Date.UTC(p.year, p.month, 0)).getUTCDate(); }
+function isMonthlyDrawDue(date = new Date(), config = getBountyConfig()) { const p = zonedParts(date, config.drawTimeZone); return isFinalCalendarDay(date, config.drawTimeZone) && (p.hour > config.drawHour || (p.hour === config.drawHour && p.minute >= config.drawMinute)); }
+function scheduledLocalLabel(monthKey, config = getBountyConfig()) { const [year, month] = monthKey.split('-').map(Number); const day = new Date(Date.UTC(year, month, 0)).getUTCDate(); return `${monthKey}-${String(day).padStart(2, '0')} ${String(config.drawHour).padStart(2, '0')}:${String(config.drawMinute).padStart(2, '0')} ${config.drawTimeZone}`; }
+function zonedLocalToDate(year, month, day, hour, minute, timeZone) {
+  let guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  for (let i = 0; i < 3; i++) {
+    const p = zonedParts(new Date(guess), timeZone);
+    const represented = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second || 0);
+    guess += Date.UTC(year, month - 1, day, hour, minute, 0) - represented;
+  }
+  return new Date(guess);
+}
+function getScheduledDrawDate(monthKey, config = getBountyConfig()) { const [year, month] = monthKey.split('-').map(Number); return zonedLocalToDate(year, month, new Date(Date.UTC(year, month, 0)).getUTCDate(), config.drawHour, config.drawMinute, config.drawTimeZone); }
+function previousMonthKey(monthKey) { const [year, month] = monthKey.split('-').map(Number); const d = new Date(Date.UTC(year, month - 2, 1)); return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`; }
+
+const OPEN_SEA_HOSTS = new Set(['opensea.io', 'www.opensea.io', 'testnets.opensea.io']);
+function validateAndParseOpenSeaUrl(value) {
+  let url; try { url = new URL(String(value || '').trim()); } catch { return { ok: false, error: 'Enter a valid OpenSea URL.' }; }
+  const host = url.hostname.toLowerCase().replace(/\.$/, '');
+  if (url.protocol !== 'https:' || !OPEN_SEA_HOSTS.has(host)) return { ok: false, error: 'The link must use HTTPS on the official opensea.io domain.' };
+  const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  let chain = null; let contractAddress = null; let tokenId = null;
+  for (let i = 0; i < segments.length; i++) {
+    const contract = normalizeAddress(segments[i]);
+    if (contract && segments[i + 1] && /^\d+$/.test(segments[i + 1])) {
+      contractAddress = contract; tokenId = BigInt(segments[i + 1]).toString();
+      const prior = String(segments[i - 1] || '').toLowerCase();
+      const rawChain = prior && !['assets', 'item'].includes(prior) ? prior : 'ethereum';
+      chain = normalizeChain(rawChain) || rawChain; break;
+    }
+  }
+  return { ok: true, url: url.toString(), chain, contractAddress, tokenId, exact: Boolean(contractAddress && tokenId) };
+}
+function cleanText(value, max) { return String(value || '').replace(/<@&?!?\d+>/g, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max); }
+function buildBountyVaultSlashCommand() { return new SlashCommandBuilder().setName('bountyvault').setDescription('Post The Bounty Vault community panel').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild); }
+function buildBountyPoolSlashCommand() { return new SlashCommandBuilder().setName('bountypool').setDescription('Manage The Bounty Vault monthly entry pool').setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild); }
+
+async function ensureBountyTables(input = null) {
+  const pool = resolvePool(input);
+  const statements = [
+`CREATE TABLE IF NOT EXISTS bounty_submissions (
+ id BIGSERIAL PRIMARY KEY, guild_id TEXT NOT NULL, sender_discord_id TEXT NOT NULL, sender_wallet TEXT,
+ project_name TEXT NOT NULL, opensea_url TEXT NOT NULL, description TEXT, chain TEXT NOT NULL DEFAULT 'ethereum',
+ contract_address TEXT, token_id TEXT, token_standard TEXT, quantity NUMERIC NOT NULL DEFAULT 1, image_url TEXT,
+ transfer_tx_hash TEXT, transfer_log_index INT, transfer_block_number BIGINT, status TEXT NOT NULL DEFAULT 'awaiting_transfer',
+ team_review_channel_id TEXT, team_review_message_id TEXT, reviewed_by TEXT, reviewed_at TIMESTAMPTZ, review_decision TEXT,
+ vote_channel_id TEXT, vote_message_id TEXT, vote_started_at TIMESTAMPTZ, vote_ends_at TIMESTAMPTZ, yes_votes INT, no_votes INT,
+ accepted_at TIMESTAMPTZ, rejected_at TIMESTAMPTZ, charm_payout_status TEXT, charm_payout_reference TEXT,
+ return_status TEXT, return_tx_hash TEXT, returned_by TEXT, returned_at TIMESTAMPTZ, draw_id BIGINT,
+ expires_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_submission_active_user_uidx ON bounty_submissions(guild_id,sender_discord_id) WHERE status='awaiting_transfer';`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_submission_transfer_uidx ON bounty_submissions(chain,transfer_tx_hash,transfer_log_index,contract_address,token_id) WHERE transfer_tx_hash IS NOT NULL;`,
+`CREATE INDEX IF NOT EXISTS bounty_submission_status_idx ON bounty_submissions(guild_id,status,created_at);`,
+`CREATE TABLE IF NOT EXISTS bounty_chain_cursors (id BIGSERIAL PRIMARY KEY, chain TEXT NOT NULL, vault_wallet_address TEXT NOT NULL, last_processed_block BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_chain_cursor_uidx ON bounty_chain_cursors(chain,vault_wallet_address);`,
+`CREATE TABLE IF NOT EXISTS bounty_detected_transfers (id BIGSERIAL PRIMARY KEY, chain TEXT NOT NULL, tx_hash TEXT NOT NULL, log_index INT NOT NULL, block_number BIGINT NOT NULL, contract_address TEXT NOT NULL, token_id TEXT NOT NULL, token_standard TEXT NOT NULL, quantity NUMERIC NOT NULL DEFAULT 1, source_wallet TEXT NOT NULL, vault_wallet TEXT NOT NULL, submission_id BIGINT REFERENCES bounty_submissions(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_detected_transfer_uidx ON bounty_detected_transfers(chain,tx_hash,log_index,contract_address,token_id);`,
+`CREATE TABLE IF NOT EXISTS bounty_unmatched_transfers (id BIGSERIAL PRIMARY KEY, guild_id TEXT, chain TEXT NOT NULL, tx_hash TEXT NOT NULL, log_index INT NOT NULL, block_number BIGINT NOT NULL, contract_address TEXT NOT NULL, token_id TEXT NOT NULL, token_standard TEXT NOT NULL, quantity NUMERIC NOT NULL DEFAULT 1, source_wallet TEXT NOT NULL, vault_wallet TEXT NOT NULL, image_url TEXT, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'manual_review', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_unmatched_transfer_uidx ON bounty_unmatched_transfers(chain,tx_hash,log_index,contract_address,token_id);`,
+`CREATE TABLE IF NOT EXISTS bounty_pool_entries (id BIGSERIAL PRIMARY KEY, guild_id TEXT NOT NULL, month_key TEXT NOT NULL, chain TEXT NOT NULL, contract_address TEXT NOT NULL, token_id TEXT NOT NULL, added_by TEXT NOT NULL, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), status TEXT NOT NULL DEFAULT 'active', removed_by TEXT, removed_at TIMESTAMPTZ);`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_pool_entry_month_uidx ON bounty_pool_entries(guild_id,month_key,chain,contract_address,token_id);`,
+`CREATE TABLE IF NOT EXISTS bounty_draws (id BIGSERIAL PRIMARY KEY, guild_id TEXT NOT NULL, month_key TEXT NOT NULL, scheduled_for TIMESTAMPTZ NOT NULL, status TEXT NOT NULL DEFAULT 'pending', started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, entry_count INT NOT NULL DEFAULT 0, prize_count INT NOT NULL DEFAULT 0, current_reveal_index INT NOT NULL DEFAULT 0, kickoff_message_id TEXT, summary_message_id TEXT, last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_draw_guild_month_uidx ON bounty_draws(guild_id,month_key);`,
+`CREATE TABLE IF NOT EXISTS bounty_draw_results (id BIGSERIAL PRIMARY KEY, draw_id BIGINT NOT NULL REFERENCES bounty_draws(id), reveal_order INT NOT NULL, prize_type TEXT NOT NULL, bounty_submission_id BIGINT REFERENCES bounty_submissions(id), charm_amount NUMERIC, winning_entry_token_id TEXT NOT NULL, winning_entry_contract TEXT NOT NULL, winner_wallet TEXT NOT NULL, winner_discord_id TEXT, payout_status TEXT, payout_reference TEXT, delivery_status TEXT, delivery_tx_hash TEXT, delivery_admin_id TEXT, delivered_at TIMESTAMPTZ, reveal_message_id TEXT, revealed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_draw_result_order_uidx ON bounty_draw_results(draw_id,reveal_order);`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_draw_result_winner_uidx ON bounty_draw_results(draw_id,winning_entry_contract,winning_entry_token_id);`,
+`CREATE UNIQUE INDEX IF NOT EXISTS bounty_draw_result_nft_uidx ON bounty_draw_results(bounty_submission_id) WHERE bounty_submission_id IS NOT NULL;`,
+`CREATE TABLE IF NOT EXISTS bounty_audit_log (id BIGSERIAL PRIMARY KEY, guild_id TEXT, submission_id BIGINT, draw_id BIGINT, event_type TEXT NOT NULL, actor_discord_id TEXT, details JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`,
+  ];
+  for (const sql of statements) await pool.query(sql);
+  const additions = [['sender_wallet','TEXT'],['draw_id','BIGINT'],['expires_at','TIMESTAMPTZ']];
+  for (const [name,type] of additions) await pool.query(`ALTER TABLE bounty_submissions ADD COLUMN IF NOT EXISTS ${name} ${type};`);
+}
+
+async function audit(db, data) { await db.query(`INSERT INTO bounty_audit_log(guild_id,submission_id,draw_id,event_type,actor_discord_id,details) VALUES($1,$2,$3,$4,$5,$6::jsonb)`, [data.guildId || null, data.submissionId || null, data.drawId || null, data.eventType, data.actorId || null, JSON.stringify(data.details || {})]); }
+function authorized(interaction) { const cfg=getBountyConfig(); return cfg.reviewerUserIds.includes(String(interaction.user?.id)) || (typeof deps?.isAdmin==='function' ? deps.isAdmin(interaction) : interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)); }
+async function channel(id) { return id ? deps.client.channels.fetch(id).catch(() => null) : null; }
+async function friendly(interaction, content) { const payload={content,flags:EPHEMERAL}; return interaction.replied||interaction.deferred ? interaction.followUp(payload) : interaction.reply(payload); }
+
+function publicPanel() {
+  const c=getBountyConfig();
+  return { embeds:[new EmbedBuilder().setColor(0x7f39fb).setTitle('THE BOUNTY VAULT').setDescription('Community powered.\nHolder curated.\nUgly approved.\n\nDonate an NFT from another collection and help build future Squigs community prizes.').addFields(
+    {name:'How it works',value:'1. Submit through the bot **before** sending.\n2. Send one submitted NFT from a linked wallet.\n3. Team approval happens first.\n4. The community votes for 24 hours.\n5. The NFT enters the Vault only when ✅ beats ❌.'},
+    {name:'Supported networks',value:'Ethereum • Base • ApeChain • Robinhood Chain'},
+    {name:'Vault wallet',value:`\`${c.vaultWalletAddress}\``},
+    {name:'Important',value:`Use an exact OpenSea NFT link so the bot knows which network to watch. Do not send native currency. Send only the NFT associated with your submission. An accepted bounty earns **${c.acceptRewardCharm.toLocaleString()} $CHARM**.`}
+  ).setFooter({text:'One NFT per submission • Send only from a connected wallet'})], components:[new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('bounty_submit').setLabel('Submit a Bounty').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('bounty_how').setLabel('How It Works').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('bounty_view:0').setLabel('View The Vault').setStyle(ButtonStyle.Secondary)
+  )]};
+}
+async function handleCommand(interaction) {
+  if (!['bountyvault','bountypool'].includes(interaction.commandName)) return false;
+  if (!authorized(interaction)) { await friendly(interaction,'The Bounty Vault management commands are team-only.'); return true; }
+  if (interaction.commandName==='bountyvault') { await interaction.channel.send(publicPanel()); await friendly(interaction,'The Bounty Vault panel is live.'); }
+  else { await interaction.deferReply({flags:EPHEMERAL}); await interaction.editReply(await poolPanel(interaction.guildId)); }
+  return true;
+}
+async function poolPanel(guildId) {
+  const cfg=getBountyConfig(), month=getMonthKey();
+  const rows=(await resolvePool().query(`SELECT token_id FROM bounty_pool_entries WHERE guild_id=$1 AND month_key=$2 AND status='active' ORDER BY token_id::numeric`,[guildId,month])).rows;
+  const vault=(await resolvePool().query(`SELECT COUNT(*)::int count FROM bounty_submissions WHERE guild_id=$1 AND status='vaulted'`,[guildId])).rows[0].count;
+  return {embeds:[new EmbedBuilder().setColor(0x7f39fb).setTitle('THE BOUNTY VAULT — DRAW POOL').addFields(
+    {name:'Month',value:month,inline:true},{name:'Entry contract',value:`\`${cfg.entryContract}\``},{name:'Entry network',value:chainLabel(cfg.entryChain,cfg),inline:true},{name:'Entries',value:String(rows.length),inline:true},{name:'Vault NFTs',value:String(vault),inline:true},{name:'Total prizes',value:String(vault+5),inline:true},{name:'Draw time',value:scheduledLocalLabel(month,cfg)},{name:'Token IDs',value:(rows.map(x=>`#${x.token_id}`).join(', ')||'None').slice(0,1024)}
+  )],components:[new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('bounty_pool_add').setLabel('Add Token ID').setStyle(ButtonStyle.Success),new ButtonBuilder().setCustomId('bounty_pool_remove').setLabel('Remove Token ID').setStyle(ButtonStyle.Danger),new ButtonBuilder().setCustomId('bounty_pool_view').setLabel('View Pool').setStyle(ButtonStyle.Secondary),new ButtonBuilder().setCustomId('bounty_pool_status').setLabel('Draw Status').setStyle(ButtonStyle.Secondary),new ButtonBuilder().setCustomId('bounty_pool_refresh').setLabel('Refresh').setStyle(ButtonStyle.Secondary)
+  )]};
+}
+
+async function handleComponent(interaction) {
+  const id=String(interaction.customId||''); if(!id.startsWith('bounty_')) return false;
+  if(id==='bounty_submit') return showSubmissionModal(interaction).then(()=>true);
+  if(id==='bounty_how'){await friendly(interaction,'Submit an exact OpenSea NFT link first, transfer that NFT from a linked wallet on the same network, pass team review, then win a strict 24-hour community vote. Rejected NFTs are manually returned and the bot verifies the outbound transaction on that NFT’s network.');return true;}
+  if(id.startsWith('bounty_view:')){await showVault(interaction,Number(id.split(':')[1])||0);return true;}
+  if(id.startsWith('bounty_review_')){await reviewSubmission(interaction,id.includes('approve')?'approve':'deny',id.split(':')[1]);return true;}
+  if(id.startsWith('bounty_return:')){if(!authorized(interaction))await friendly(interaction,'Team only.');else await showTxModal(interaction,'return',id.split(':')[1]);return true;}
+  if(id.startsWith('bounty_deliver:')){if(!authorized(interaction))await friendly(interaction,'Team only.');else await showTxModal(interaction,'deliver',id.split(':')[1]);return true;}
+  if(id.startsWith('bounty_pool_')){if(!authorized(interaction)){await friendly(interaction,'Team only.');return true;} await handlePoolButton(interaction,id);return true;}
+  return true;
+}
+async function showSubmissionModal(interaction){
+  const links=await deps.getWalletLinks(interaction.guildId,interaction.user.id); if(!links?.some(x=>normalizeAddress(x.wallet_address))){await friendly(interaction,'Connect a wallet through the existing wallet-link workflow before submitting a bounty.');return;}
+  const active=await resolvePool().query(`SELECT id FROM bounty_submissions WHERE guild_id=$1 AND sender_discord_id=$2 AND status='awaiting_transfer' LIMIT 1`,[interaction.guildId,interaction.user.id]); if(active.rowCount){await friendly(interaction,'You already have a Bounty submission waiting for a transfer. Finish or let it expire first.');return;}
+  const modal=new ModalBuilder().setCustomId('bounty_submit_modal').setTitle('Submit a Bounty').addComponents(
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('project').setLabel('NFT Project Name').setMaxLength(100).setRequired(true).setStyle(TextInputStyle.Short)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('opensea').setLabel('Exact OpenSea NFT link').setMaxLength(400).setRequired(true).setStyle(TextInputStyle.Short)),
+    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Brief description (your own words)').setMaxLength(500).setRequired(false).setStyle(TextInputStyle.Paragraph))
+  ); await interaction.showModal(modal);
+}
+async function handleModalSubmit(interaction){
+  const id=String(interaction.customId||''); if(!id.startsWith('bounty_')) return false;
+  if(id==='bounty_submit_modal') await createSubmission(interaction);
+  else if(id.startsWith('bounty_pool_add_modal')) await addPoolEntry(interaction);
+  else if(id.startsWith('bounty_pool_remove_modal')) await removePoolEntry(interaction);
+  else if(id.startsWith('bounty_return_modal:')) await confirmOutbound(interaction,'return',id.split(':')[1]);
+  else if(id.startsWith('bounty_deliver_modal:')) await confirmOutbound(interaction,'deliver',id.split(':')[1]);
+  return true;
+}
+async function createSubmission(interaction){
+  const project=cleanText(interaction.fields.getTextInputValue('project'),100), description=cleanText(interaction.fields.getTextInputValue('description'),500), parsed=validateAndParseOpenSeaUrl(interaction.fields.getTextInputValue('opensea'));
+  if(!project||!parsed.ok){await friendly(interaction,parsed.error||'Project name is required.');return;}
+  if(!parsed.exact){await friendly(interaction,'Use the exact OpenSea link for the NFT you are donating so the bot can identify its network, contract, and Token ID before you transfer it.');return;}
+  const bountyChain=normalizeChain(parsed.chain);
+  if(!bountyChain||!BOUNTY_CHAINS[bountyChain]){await friendly(interaction,`That OpenSea NFT is on an unsupported network (${parsed.chain||'unknown'}). The Bounty Vault currently supports Ethereum, Base, ApeChain, and Robinhood Chain.`);return;}
+  const cfg=getBountyConfig(), chainCfg=getBountyChainConfig(bountyChain,cfg);
+  if(!chainCfg?.rpcUrl){await friendly(interaction,`${chainCfg?.label||bountyChain} is supported by The Bounty Vault, but its RPC is not configured yet. Do not transfer the NFT until the team enables that network.`);return;}
+  const wallets=(await deps.getWalletLinks(interaction.guildId,interaction.user.id)).map(x=>normalizeAddress(x.wallet_address)).filter(Boolean); if(!wallets.length){await friendly(interaction,'Your linked wallet could not be resolved. Please reconnect it.');return;}
+  const pool=resolvePool(), db=await pool.connect(); let row;
+  try{await db.query('BEGIN');await db.query('SELECT pg_advisory_xact_lock($1::bigint)',[advisoryLockKey(`bounty-submit:${interaction.guildId}:${interaction.user.id}`)]);
+    row=(await db.query(`INSERT INTO bounty_submissions(guild_id,sender_discord_id,project_name,opensea_url,description,chain,contract_address,token_id,status,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'awaiting_transfer',NOW()+($9||' minutes')::interval) RETURNING *`,[interaction.guildId,interaction.user.id,project,parsed.url,description||null,bountyChain,parsed.contractAddress,parsed.tokenId,String(cfg.submissionTtlMinutes)])).rows[0];
+    await audit(db,{guildId:interaction.guildId,submissionId:row.id,eventType:'submission_created',actorId:interaction.user.id,details:{exact:parsed.exact,chain:bountyChain}});await db.query('COMMIT');
+  }catch(e){await db.query('ROLLBACK').catch(()=>null); if(e.code==='23505'){await friendly(interaction,'You already have a submission waiting for transfer.');return;} throw e;}finally{db.release();}
+  await interaction.reply({flags:EPHEMERAL,embeds:[new EmbedBuilder().setColor(0x7f39fb).setTitle('The Bounty Vault is watching').setDescription(`Submission **#${row.id}** created for **${project}**.\n[OpenSea](${parsed.url})`).addFields({name:'Network',value:chainCfg.label},{name:'Send from one of these linked wallets',value:wallets.map(x=>`\`${x}\``).join('\n').slice(0,1024)},{name:'Send exactly one NFT to',value:`\`${cfg.vaultWalletAddress}\``},{name:'Deadline',value:`<t:${Math.floor(new Date(row.expires_at).getTime()/1000)}:R>`},{name:'Reminder',value:`Send the submitted NFT on **${chainCfg.label}** only. Do not send native currency.`})]});
+}
+async function showVault(interaction,page=0){const cfg=getBountyConfig(),rows=(await resolvePool().query(`SELECT * FROM bounty_submissions WHERE guild_id=$1 AND status='vaulted' ORDER BY accepted_at,id LIMIT 10 OFFSET $2`,[interaction.guildId,page*10])).rows; const embed=new EmbedBuilder().setColor(0x7f39fb).setTitle('THE BOUNTY VAULT').setDescription(rows.length?rows.map(x=>`**${cleanText(x.project_name,100)} #${x.token_id}** • ${chainLabel(x.chain,cfg)} — [OpenSea](${x.opensea_url})`).join('\n'):'The Vault is waiting for its first accepted bounty.'); if(rows[0]?.image_url)embed.setThumbnail(rows[0].image_url); await interaction.reply({embeds:[embed],flags:EPHEMERAL});}
+async function reviewSubmission(interaction,decision,id){
+  if(!authorized(interaction)){await friendly(interaction,'Only configured Bounty reviewers or bot admins can decide this submission.');return;}
+  const db=await resolvePool().connect();let row;
+  try{await db.query('BEGIN');row=(await db.query(`SELECT * FROM bounty_submissions WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(!row||row.status!=='team_review'){await db.query('ROLLBACK');await friendly(interaction,'This submission has already been decided or is no longer in team review.');return;}
+    if(decision==='approve'){assertTransition(row.status,'community_vote');await db.query(`UPDATE bounty_submissions SET status='community_vote',reviewed_by=$2,reviewed_at=NOW(),review_decision='approved',vote_started_at=NOW(),vote_ends_at=NOW()+($3||' hours')::interval,updated_at=NOW() WHERE id=$1`,[id,interaction.user.id,String(getBountyConfig().voteHours)]);}
+    else{assertTransition(row.status,'return_pending');await db.query(`UPDATE bounty_submissions SET status='return_pending',reviewed_by=$2,reviewed_at=NOW(),review_decision='denied',rejected_at=NOW(),return_status='pending',updated_at=NOW() WHERE id=$1`,[id,interaction.user.id]);}
+    await audit(db,{guildId:row.guild_id,submissionId:id,eventType:decision==='approve'?'team_approved':'team_denied',actorId:interaction.user.id});await db.query('COMMIT');
+  }catch(e){await db.query('ROLLBACK').catch(()=>null);throw e;}finally{db.release();}
+  await interaction.update({content:`Decision recorded by <@${interaction.user.id}>: **${decision.toUpperCase()}**`,components:[]}); if(decision==='approve')await postCommunityVote(id);else await postReturnPanel(id,'Team denied');
+}
+async function postCommunityVote(id){const pool=resolvePool(),s=(await pool.query(`SELECT * FROM bounty_submissions WHERE id=$1`,[id])).rows[0],cfg=getBountyConfig(),ch=await channel(cfg.vaultChannelId);if(!ch)throw new Error('BOUNTY_VAULT_CHANNEL is not configured or accessible.');const embed=new EmbedBuilder().setColor(0x7f39fb).setTitle('BOUNTY SUBMISSION').setDescription(`**Should this NFT enter The Bounty Vault?**\n\nVoting closes <t:${Math.floor(new Date(s.vote_ends_at).getTime()/1000)}:R>. ✅ must beat ❌.`).addFields({name:'Project',value:cleanText(s.project_name,100)},{name:'Network',value:chainLabel(s.chain,cfg),inline:true},{name:'Token ID',value:String(s.token_id),inline:true},{name:'Submitted by',value:`<@${s.sender_discord_id}>`},{name:'OpenSea',value:`[View NFT](${s.opensea_url})`},{name:"Submitter's description",value:cleanText(s.description||'No description provided.',500)});if(s.image_url)embed.setImage(s.image_url);const msg=await ch.send({embeds:[embed],allowedMentions:{users:[s.sender_discord_id]}});await msg.react('✅');await msg.react('❌');await pool.query(`UPDATE bounty_submissions SET vote_channel_id=$2,vote_message_id=$3,updated_at=NOW() WHERE id=$1 AND vote_message_id IS NULL`,[id,msg.channelId,msg.id]);await audit(pool,{guildId:s.guild_id,submissionId:id,eventType:'community_vote_started',details:{messageId:msg.id,chain:s.chain}});}
+
+async function handlePoolButton(interaction,id){
+  if(id==='bounty_pool_add'||id==='bounty_pool_remove'){const action=id.endsWith('add')?'add':'remove';const modal=new ModalBuilder().setCustomId(`bounty_pool_${action}_modal`).setTitle(`${action==='add'?'Add':'Remove'} Draw Token ID`).addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('token_id').setLabel('Squigs Reloaded Token ID').setRequired(true).setMaxLength(78).setStyle(TextInputStyle.Short)));await interaction.showModal(modal);return;}
+  if(id==='bounty_pool_refresh'||id==='bounty_pool_view'){await interaction.update(await poolPanel(interaction.guildId));return;}
+  if(id==='bounty_pool_status'){const month=getMonthKey(),draw=(await resolvePool().query(`SELECT * FROM bounty_draws WHERE guild_id=$1 AND month_key=$2`,[interaction.guildId,month])).rows[0];await friendly(interaction,draw?`Draw #${draw.id}: **${draw.status}**, ${draw.current_reveal_index}/${draw.prize_count} revealed.`:'No draw has been generated for this month.');}
+}
+function resetProvider(chain){const normalized=normalizeChain(chain);if(!normalized)return;providers.get(normalized)?.destroy?.();providers.delete(normalized);}
+async function getProvider(chain='ethereum',config=getBountyConfig()){
+  const normalized=normalizeChain(chain);
+  if(!normalized||!BOUNTY_CHAINS[normalized])throw new Error(`Unsupported Bounty Vault chain: ${chain}`);
+  if(providers.has(normalized))return providers.get(normalized);
+  const chainCfg=getBountyChainConfig(normalized,config);
+  if(!chainCfg?.rpcUrl){
+    const envName={ethereum:'BOUNTY_ETHEREUM_RPC_URL / BOUNTY_ETH_RPC_URL / ETH_RPC_URL / ALCHEMY_RPC_URL / ALCHEMY_API_KEY',base:'BOUNTY_BASE_RPC_URL',apechain:'BOUNTY_APECHAIN_RPC_URL',robinhood:'BOUNTY_ROBINHOOD_RPC_URL'}[normalized];
+    throw new Error(`Configure ${envName} to enable ${chainCfg?.label||normalized}.`);
+  }
+  const p=new ethers.JsonRpcProvider(chainCfg.rpcUrl,undefined,{batchMaxCount:1}); providers.set(normalized,p); return p;
+}
+async function addPoolEntry(interaction){if(!authorized(interaction)){await friendly(interaction,'Team only.');return;}const token=String(interaction.fields.getTextInputValue('token_id')).trim();if(!/^\d+$/.test(token)){await friendly(interaction,'Token ID must be a non-negative integer.');return;}const cfg=getBountyConfig();try{await new ethers.Contract(cfg.entryContract,ERC721_ABI,await getProvider(cfg.entryChain,cfg)).ownerOf(BigInt(token));}catch{await friendly(interaction,'That Token ID does not exist in the configured entry contract.');return;}try{const pool=resolvePool();await pool.query(`INSERT INTO bounty_pool_entries(guild_id,month_key,chain,contract_address,token_id,added_by) VALUES($1,$2,$3,$4,$5,$6)`,[interaction.guildId,getMonthKey(),cfg.entryChain,cfg.entryContract,BigInt(token).toString(),interaction.user.id]);await audit(pool,{guildId:interaction.guildId,eventType:'pool_entry_added',actorId:interaction.user.id,details:{monthKey:getMonthKey(),tokenId:BigInt(token).toString(),chain:cfg.entryChain}});await friendly(interaction,`Squig #${BigInt(token)} added to the ${getMonthKey()} Bounty Draw.`);}catch(e){if(e.code==='23505')await friendly(interaction,'That Token ID is already recorded for this month.');else throw e;}}
+async function removePoolEntry(interaction){if(!authorized(interaction)){await friendly(interaction,'Team only.');return;}const token=String(interaction.fields.getTextInputValue('token_id')).trim();if(!/^\d+$/.test(token)){await friendly(interaction,'Token ID must be an integer.');return;}const pool=resolvePool(),result=await pool.query(`UPDATE bounty_pool_entries e SET status='removed',removed_by=$4,removed_at=NOW() WHERE guild_id=$1 AND month_key=$2 AND token_id=$3 AND status='active' AND NOT EXISTS(SELECT 1 FROM bounty_draws d WHERE d.guild_id=e.guild_id AND d.month_key=e.month_key AND d.status NOT IN('pending','waiting_entries')) RETURNING *`,[interaction.guildId,getMonthKey(),BigInt(token).toString(),interaction.user.id]);if(result.rowCount)await audit(pool,{guildId:interaction.guildId,eventType:'pool_entry_removed',actorId:interaction.user.id,details:{monthKey:getMonthKey(),tokenId:BigInt(token).toString()}});await friendly(interaction,result.rowCount?`Squig #${BigInt(token)} removed from this month's pool.`:'That active entry was not found, or the draw has already started.');}
+
+function startBountyVaultWorkers(){if(workersRunning)return;workersRunning=true;const seconds=Math.min(60,getBountyConfig().pollIntervalSeconds);const jobs=[['Expire submissions',expireSubmissions],['Review post recovery',recoverTeamReviewPosts],['Vote post recovery',recoverCommunityVotePosts],['Transfer check',runBountyTransferCheck],['Vote settlement',runBountyVoteSettlement],['Monthly draw check',runBountyMonthlyDrawCheck],['Pending payouts',retryPendingPayouts],['Draw reveals',resumeDrawReveals]];const tick=async()=>{if(tickRunning)return;tickRunning=true;try{for(const [name,job] of jobs)await job().catch(e=>logError(name,e));}finally{tickRunning=false;}};tick();workerTimer=setInterval(tick,seconds*1000);workerTimer.unref?.();}
+async function expireSubmissions(){return (await resolvePool().query(`UPDATE bounty_submissions SET status='expired',updated_at=NOW() WHERE status='awaiting_transfer' AND expires_at<=NOW() RETURNING id`)).rowCount;}
+async function recoverTeamReviewPosts(){const rows=(await resolvePool().query(`SELECT id FROM bounty_submissions WHERE status='team_review' AND team_review_message_id IS NULL ORDER BY updated_at LIMIT 5`)).rows;for(const row of rows)await postReviewPanel(row.id).catch(e=>logError('Review post recovery',e));return rows.length;}
+async function recoverCommunityVotePosts(){const rows=(await resolvePool().query(`SELECT id FROM bounty_submissions WHERE status='community_vote' AND vote_message_id IS NULL ORDER BY reviewed_at LIMIT 5`)).rows;for(const row of rows)await postCommunityVote(row.id).catch(e=>logError('Vote post recovery',e));return rows.length;}
+function getRpcState(chain){const normalized=normalizeChain(chain);if(!transferRpcState.has(normalized))transferRpcState.set(normalized,{failures:0,retryAfter:0});return transferRpcState.get(normalized);}
+async function runBountyTransferCheck(){
+  const cfg=getBountyConfig();
+  if(!cfg.vaultChannelId)return {skipped:'BOUNTY_VAULT_CHANNEL missing'};
+  const enabled=getEnabledBountyChains(cfg);
+  if(!enabled.length)return {skipped:'No Bounty Vault chain RPCs configured'};
+  const chains={};let matched=0,unmatched=0;
+  for(const chainName of enabled){const r=await runBountyTransferCheckForChain(chainName,cfg);chains[chainName]=r;matched+=Number(r?.matched||0);unmatched+=Number(r?.unmatched||0);}
+  return {matched,unmatched,chains};
+}
+async function runBountyTransferCheckForChain(chainName,cfg=getBountyConfig()){
+  const state=getRpcState(chainName),chainCfg=getBountyChainConfig(chainName,cfg);
+  if(Date.now()<state.retryAfter)return {skipped:`${chainCfg.label} RPC backoff`,retryAt:new Date(state.retryAfter)};
+  try{const result=await runBountyTransferCheckCore(chainName,cfg);state.failures=0;state.retryAfter=0;return result;}
+  catch(e){if(!isTransientRpcError(e))throw e;state.failures++;const retryMs=transferBackoffMs(state.failures);state.retryAfter=Date.now()+retryMs;resetProvider(chainName);console.warn(`[Bounty Vault] Transfer check deferred: ${chainCfg.label} RPC temporarily unavailable; retrying in ${Math.ceil(retryMs/1000)}s.`);return {deferred:true,retryMs};}
+}
+async function runBountyTransferCheckCore(chainName,cfg=getBountyConfig()){
+  const chain=normalizeChain(chainName),chainCfg=getBountyChainConfig(chain,cfg);if(!chainCfg?.rpcUrl)return {skipped:`${chainCfg?.label||chain} RPC missing`};
+  const p=await getProvider(chain,cfg),safe=Math.max(0,(await p.getBlockNumber())-cfg.minConfirmations),pool=resolvePool();
+  let cursor=(await pool.query(`INSERT INTO bounty_chain_cursors(chain,vault_wallet_address,last_processed_block) VALUES($1,$2,GREATEST(0::bigint,$3::bigint-$4::bigint)) ON CONFLICT(chain,vault_wallet_address) DO UPDATE SET vault_wallet_address=EXCLUDED.vault_wallet_address RETURNING *`,[chain,cfg.vaultWalletAddress,safe,chainCfg.initialScanBlocks])).rows[0],from=Number(cursor.last_processed_block)+1,matched=0,unmatched=0;
+  const toTopic=`0x${cfg.vaultWalletAddress.slice(2).padStart(64,'0')}`;
+  while(from<=safe){const to=Math.min(safe,from+999);const queries=[{topics:[TRANSFER_TOPIC,null,toTopic]},{topics:[TRANSFER_SINGLE_TOPIC,null,null,toTopic]},{topics:[TRANSFER_BATCH_TOPIC,null,null,toTopic]}];for(const q of queries){for(const log of await p.getLogs({...q,fromBlock:from,toBlock:to})){const transfers=parseInboundLog(log,cfg.vaultWalletAddress,chain);for(const t of transfers){const r=await processInboundTransfer(t);if(r==='matched')matched++;else if(r==='unmatched')unmatched++;}}await delay(350);}await pool.query(`UPDATE bounty_chain_cursors SET last_processed_block=$3,updated_at=NOW() WHERE chain=$1 AND vault_wallet_address=$2`,[chain,cfg.vaultWalletAddress,to]);from=to+1;}
+  return {matched,unmatched,safeBlock:safe};
+}
+function parseInboundLog(log,vault,chain='ethereum'){const normalizedChain=normalizeChain(chain)||String(chain||'ethereum').toLowerCase(),topics=log.topics||[],base={chain:normalizedChain,txHash:log.transactionHash,logIndex:Number(log.index??log.logIndex),blockNumber:Number(log.blockNumber),contractAddress:normalizeAddress(log.address),sourceWallet:normalizeAddress(`0x${String(topics[topics[0]===TRANSFER_TOPIC?1:2]||'').slice(-40)}`),vaultWallet:vault};if(topics[0]===TRANSFER_TOPIC&&topics.length>=4)return [{...base,tokenId:BigInt(topics[3]).toString(),tokenStandard:'erc721',quantity:'1'}];const iface=new ethers.Interface(['event TransferSingle(address indexed operator,address indexed from,address indexed to,uint256 id,uint256 value)','event TransferBatch(address indexed operator,address indexed from,address indexed to,uint256[] ids,uint256[] values)']);try{const p=iface.parseLog(log);if(p.name==='TransferSingle')return [{...base,tokenId:p.args.id.toString(),tokenStandard:'erc1155',quantity:p.args.value.toString()}];return p.args.ids.map((id,i)=>({...base,tokenId:id.toString(),tokenStandard:'erc1155',quantity:p.args.values[i].toString(),batch:true}));}catch{return [];}}
+async function processInboundTransfer(t){const pool=resolvePool(),db=await pool.connect();let outcome='duplicate',submission=null;try{await db.query('BEGIN');await db.query('SELECT pg_advisory_xact_lock($1::bigint)',[advisoryLockKey(`bounty-log:${t.chain}:${t.txHash}:${t.logIndex}:${t.contractAddress}:${t.tokenId}`)]);const ins=await db.query(`INSERT INTO bounty_detected_transfers(chain,tx_hash,log_index,block_number,contract_address,token_id,token_standard,quantity,source_wallet,vault_wallet) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING RETURNING id`,[t.chain,t.txHash,t.logIndex,t.blockNumber,t.contractAddress,t.tokenId,t.tokenStandard,t.quantity,t.sourceWallet,t.vaultWallet]);if(!ins.rowCount){await db.query('ROLLBACK');return outcome;}
+    const candidates=(await db.query(`SELECT * FROM bounty_submissions WHERE status='awaiting_transfer' AND expires_at>NOW() ORDER BY created_at FOR UPDATE`)).rows;const safe=[];for(const s of candidates){if((normalizeChain(s.chain)||'ethereum')!==t.chain)continue;const links=(await deps.getWalletLinks(s.guild_id,s.sender_discord_id)).map(x=>normalizeAddress(x.wallet_address)).filter(Boolean);if(!links.includes(t.sourceWallet))continue;const exact=s.contract_address&&s.token_id;if(exact&&normalizeAddress(s.contract_address)===t.contractAddress&&String(s.token_id)===t.tokenId)safe.push({...s,priority:1});else if(!exact)safe.push({...s,priority:2});}
+    const best=safe.filter(x=>x.priority===Math.min(...safe.map(y=>y.priority)));if(best.length===1&&!t.batch){submission=best[0];const image=await deps.getNftImageUrl?.(t.tokenId,t.contractAddress,t.chain).catch(()=>null);await db.query(`UPDATE bounty_submissions SET sender_wallet=$2,chain=$3,contract_address=$4,token_id=$5,token_standard=$6,quantity=$7,image_url=$8,transfer_tx_hash=$9,transfer_log_index=$10,transfer_block_number=$11,status='team_review',updated_at=NOW() WHERE id=$1`,[submission.id,t.sourceWallet,t.chain,t.contractAddress,t.tokenId,t.tokenStandard,t.quantity,image,t.txHash,t.logIndex,t.blockNumber]);await db.query(`UPDATE bounty_detected_transfers SET submission_id=$2 WHERE id=$1`,[ins.rows[0].id,submission.id]);await audit(db,{guildId:submission.guild_id,submissionId:submission.id,eventType:'nft_detected',details:t});outcome='matched';}
+    else{const reason=t.batch?'ERC-1155 batch requires manual review':best.length?'Ambiguous active submissions':'No safe active submission matched source wallet, chain, and NFT';await db.query(`INSERT INTO bounty_unmatched_transfers(guild_id,chain,tx_hash,log_index,block_number,contract_address,token_id,token_standard,quantity,source_wallet,vault_wallet,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`,[candidates[0]?.guild_id||null,t.chain,t.txHash,t.logIndex,t.blockNumber,t.contractAddress,t.tokenId,t.tokenStandard,t.quantity,t.sourceWallet,t.vaultWallet,reason]);outcome='unmatched';}
+    await db.query('COMMIT');}catch(e){await db.query('ROLLBACK').catch(()=>null);throw e;}finally{db.release();}if(submission)await postReviewPanel(submission.id);else if(outcome==='unmatched')await postUnmatchedWarning(t);return outcome;}
+async function postReviewPanel(id){const s=(await resolvePool().query(`SELECT * FROM bounty_submissions WHERE id=$1`,[id])).rows[0],cfg=getBountyConfig(),chainCfg=getBountyChainConfig(s.chain,cfg),ch=await channel(cfg.reviewChannelId);if(!ch)return;const embed=new EmbedBuilder().setColor(0xf2a900).setTitle('THE BOUNTY VAULT — TEAM REVIEW').addFields({name:'Project',value:cleanText(s.project_name,100)},{name:'Network',value:chainCfg?.label||s.chain,inline:true},{name:'Token',value:`#${s.token_id}`,inline:true},{name:'Contract',value:`\`${s.contract_address}\``},{name:'Sender',value:`<@${s.sender_discord_id}> • \`${s.sender_wallet}\``},{name:'OpenSea',value:`[View NFT](${s.opensea_url})`},{name:'Transaction',value:`[View transaction](${chainCfg?.explorerBaseUrl}/tx/${s.transfer_tx_hash})`},{name:'Description',value:cleanText(s.description||'None provided.',500)},{name:'Submission ID',value:String(s.id)});if(s.image_url)embed.setImage(s.image_url);const msg=await ch.send({content:cfg.reviewerUserIds.map(x=>`<@${x}>`).join(' '),embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`bounty_review_approve:${s.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),new ButtonBuilder().setCustomId(`bounty_review_deny:${s.id}`).setLabel('Deny').setStyle(ButtonStyle.Danger))],allowedMentions:{users:cfg.reviewerUserIds}});await resolvePool().query(`UPDATE bounty_submissions SET team_review_channel_id=$2,team_review_message_id=$3 WHERE id=$1`,[id,msg.channelId,msg.id]);}
+async function postUnmatchedWarning(t){const cfg=getBountyConfig(),chainCfg=getBountyChainConfig(t.chain,cfg),ch=await channel(cfg.reviewChannelId);if(ch)await ch.send({embeds:[new EmbedBuilder().setColor(0xcc3333).setTitle('UNMATCHED BOUNTY TRANSFER').setDescription('An inbound NFT could not be safely matched and remains in manual review.').addFields({name:'Network',value:chainCfg?.label||t.chain},{name:'Contract / Token',value:`\`${t.contractAddress}\` / #${t.tokenId}`},{name:'Source wallet',value:`\`${t.sourceWallet}\``},{name:'Transaction',value:chainCfg?.explorerBaseUrl?`[View transaction](${chainCfg.explorerBaseUrl}/tx/${t.txHash})`:`\`${t.txHash}\``},{name:'Reason',value:t.batch?'ERC-1155 batch requires manual review':'No single safe active submission matched.'})]});}
+
+async function runBountyVoteSettlement(){const rows=(await resolvePool().query(`SELECT id FROM bounty_submissions WHERE status='community_vote' AND vote_ends_at<=NOW() ORDER BY vote_ends_at LIMIT 20`)).rows;for(const r of rows)await settleVote(r.id).catch(e=>logError('Vote settlement',e));return rows.length;}
+async function settleVote(id){const pool=resolvePool();let s=(await pool.query(`SELECT * FROM bounty_submissions WHERE id=$1`,[id])).rows[0];if(!s||s.status!=='community_vote')return false;const ch=await channel(s.vote_channel_id),msg=await ch?.messages.fetch(s.vote_message_id),yesUsers=msg?await msg.reactions.resolve('✅')?.users.fetch():new Map(),noUsers=msg?await msg.reactions.resolve('❌')?.users.fetch():new Map();if(!msg)throw new Error(`Vote message unavailable for submission ${id}`);const counts=countVoteUsers([...yesUsers.values()],[...noUsers.values()],[deps.client.user.id]);const db=await pool.connect();try{await db.query('BEGIN');s=(await db.query(`SELECT * FROM bounty_submissions WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(s.status!=='community_vote'){await db.query('ROLLBACK');return false;}const accepted=counts.result==='accepted';assertTransition(s.status,accepted?'vaulted':'return_pending');await db.query(`UPDATE bounty_submissions SET status=$2,yes_votes=$3,no_votes=$4,accepted_at=CASE WHEN $5 THEN NOW() ELSE accepted_at END,rejected_at=CASE WHEN $5 THEN rejected_at ELSE NOW() END,charm_payout_status=CASE WHEN $5 THEN 'pending' ELSE charm_payout_status END,return_status=CASE WHEN $5 THEN return_status ELSE 'pending' END,updated_at=NOW() WHERE id=$1`,[id,accepted?'vaulted':'return_pending',counts.yes,counts.no,accepted]);await audit(db,{guildId:s.guild_id,submissionId:id,eventType:'vote_settled',details:counts});await db.query('COMMIT');}catch(e){await db.query('ROLLBACK').catch(()=>null);throw e;}finally{db.release();}const embed=EmbedBuilder.from(msg.embeds[0]).setTitle('VOTING CLOSED').addFields({name:'Official result',value:`✅ ${counts.yes} • ❌ ${counts.no}\n**${counts.result.toUpperCase()}**`});await msg.edit({embeds:[embed]});if(counts.result==='accepted'){await ch.send(`**BOUNTY ACCEPTED**\n\nThe community has spoken. **${cleanText(s.project_name,100)} #${s.token_id}** on **${chainLabel(s.chain)}** has officially entered **The Bounty Vault**.`);await paySubmissionReward(id);}else await postReturnPanel(id,'Community vote rejected');return true;}
+async function awardCharm(guildId,userId,amount,context){const spend=await deps.getMarketplaceSpendableBalance(guildId,userId);if(!spend.ok)throw new Error(spend.reason||'Could not resolve DRIP member.');return deps.awardDripPoints(spend.settings.drip_realm_id,spend.memberIds,amount,spend.settings.currency_id,spend.settings,{context,initiatorDiscordId:userId,recipientDiscordId:userId,senderMemberIdOverride:spend.botMemberId});}
+function payoutRef(r){return [r?.endpoint||r?.method||'drip',r?.usedMemberId?`recipient:${r.usedMemberId}`:''].filter(Boolean).join('|');}
+async function paySubmissionReward(id){const pool=resolvePool(),db=await pool.connect();let s;try{await db.query('BEGIN');s=(await db.query(`SELECT * FROM bounty_submissions WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(!s||s.status!=='vaulted'||s.charm_payout_status!=='pending'){await db.query('ROLLBACK');return false;}await db.query(`UPDATE bounty_submissions SET charm_payout_status='processing',updated_at=NOW() WHERE id=$1`,[id]);await db.query('COMMIT');}finally{db.release();}try{const result=await awardCharm(s.guild_id,s.sender_discord_id,getBountyConfig().acceptRewardCharm,`bounty_accept:${id}`);await pool.query(`UPDATE bounty_submissions SET charm_payout_status='paid',charm_payout_reference=$2,updated_at=NOW() WHERE id=$1 AND charm_payout_status='processing'`,[id,payoutRef(result)]);return true;}catch(e){await pool.query(`UPDATE bounty_submissions SET charm_payout_status='pending',charm_payout_reference=$2,updated_at=NOW() WHERE id=$1 AND charm_payout_status='processing'`,[id,String(e.message).slice(0,500)]);await logError('Acceptance payout',e);return false;}}
+async function retryPendingPayouts(){for(const x of (await resolvePool().query(`SELECT id FROM bounty_submissions WHERE status='vaulted' AND charm_payout_status='pending' ORDER BY updated_at LIMIT 5`)).rows)await paySubmissionReward(x.id);for(const x of (await resolvePool().query(`SELECT id FROM bounty_draw_results WHERE prize_type='charm' AND payout_status='pending' ORDER BY id LIMIT 5`)).rows)await payDrawCharm(x.id);}
+
+async function postReturnPanel(id,reason){const s=(await resolvePool().query(`SELECT * FROM bounty_submissions WHERE id=$1`,[id])).rows[0],cfg=getBountyConfig(),ch=await channel(cfg.reviewChannelId);if(!ch)return;const embed=new EmbedBuilder().setColor(0xcc3333).setTitle('BOUNTY RETURN REQUIRED').addFields({name:'NFT',value:`${cleanText(s.project_name,100)} #${s.token_id}`},{name:'Network',value:chainLabel(s.chain,cfg)},{name:'Contract',value:`\`${s.contract_address}\``},{name:'Return wallet',value:`\`${s.sender_wallet}\``},{name:'Reason',value:reason},{name:'Submission ID',value:String(id)});if(s.image_url)embed.setImage(s.image_url);await ch.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`bounty_return:${id}`).setLabel('Mark Returned').setStyle(ButtonStyle.Success))]});}
+async function showTxModal(interaction,type,id){const modal=new ModalBuilder().setCustomId(`bounty_${type}_modal:${id}`).setTitle(type==='return'?'Confirm Bounty Return':'Confirm Bounty Delivery').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tx_hash').setLabel('Outbound transaction hash').setRequired(true).setMaxLength(66).setStyle(TextInputStyle.Short)));await interaction.showModal(modal);}
+async function validateOutbound({chain='ethereum',txHash,contract,tokenId,to,quantity='1'}){const normalized=normalizeChain(chain);if(!normalized||!BOUNTY_CHAINS[normalized])throw new Error(`Unsupported Bounty Vault chain: ${chain}`);if(!/^0x[0-9a-fA-F]{64}$/.test(txHash))throw new Error('Enter a valid EVM transaction hash.');const receipt=await (await getProvider(normalized)).getTransactionReceipt(txHash);if(!receipt||!(receipt.status===1||receipt.status==='0x1'||receipt.status===true))throw new Error(`A successful ${chainLabel(normalized)} receipt was not found.`);const vault=getBountyConfig().vaultWalletAddress,target=normalizeAddress(to),expected=String(tokenId);for(const log of receipt.logs||[]){if(normalizeAddress(log.address)!==normalizeAddress(contract))continue;for(const t of parseInboundLog({...log,transactionHash:receipt.hash},target,normalized)){if(t.sourceWallet===vault&&t.tokenId===expected&&BigInt(t.quantity)>=BigInt(quantity))return true;}}throw new Error(`The ${chainLabel(normalized)} transaction does not transfer the expected NFT from the Vault to the stored wallet.`);}
+async function confirmOutbound(interaction,type,id){if(!authorized(interaction)){await friendly(interaction,'Team only.');return;}const tx=interaction.fields.getTextInputValue('tx_hash').trim();let row;if(type==='return')row=(await resolvePool().query(`SELECT * FROM bounty_submissions WHERE id=$1`,[id])).rows[0];else row=(await resolvePool().query(`SELECT r.*,s.contract_address,s.token_id,s.quantity,s.chain,s.id submission_id FROM bounty_draw_results r JOIN bounty_submissions s ON s.id=r.bounty_submission_id WHERE r.id=$1`,[id])).rows[0];if(!row){await friendly(interaction,'This Bounty record no longer exists.');return;}try{await validateOutbound({chain:row.chain,txHash:tx,contract:row.contract_address,tokenId:row.token_id,to:type==='return'?row.sender_wallet:row.winner_wallet,quantity:row.quantity});}catch(e){await friendly(interaction,`Could not verify delivery: ${e.message} The item remains in manual review.`);return;}const pool=resolvePool(),db=await pool.connect();try{await db.query('BEGIN');if(type==='return'){const locked=(await db.query(`SELECT * FROM bounty_submissions WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(locked.status!=='return_pending')throw new Error('This submission is no longer pending return.');await db.query(`UPDATE bounty_submissions SET status='returned',return_status='returned',return_tx_hash=$2,returned_by=$3,returned_at=NOW(),updated_at=NOW() WHERE id=$1`,[id,tx,interaction.user.id]);}else{const locked=(await db.query(`SELECT * FROM bounty_draw_results WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(locked.delivery_status!=='pending')throw new Error('This prize is no longer pending delivery.');await db.query(`UPDATE bounty_draw_results SET delivery_status='delivered',delivery_tx_hash=$2,delivery_admin_id=$3,delivered_at=NOW() WHERE id=$1`,[id,tx,interaction.user.id]);await db.query(`UPDATE bounty_submissions SET status='delivered',updated_at=NOW() WHERE id=$1`,[row.submission_id]);}await audit(db,{guildId:interaction.guildId,submissionId:type==='return'?id:row.submission_id,eventType:type==='return'?'returned':'nft_delivered',actorId:interaction.user.id,details:{tx,chain:row.chain}});await db.query('COMMIT');}catch(e){await db.query('ROLLBACK').catch(()=>null);await friendly(interaction,e.message);return;}finally{db.release();}await interaction.reply({content:`On-chain ${type} verified on ${chainLabel(row.chain)} and recorded.`,flags:EPHEMERAL});}
+
+async function runBountyMonthlyDrawCheck(now=new Date()){
+  const cfg=getBountyConfig(),current=getMonthKey(now,cfg.drawTimeZone),prior=previousMonthKey(current),guildIds=[...deps.client.guilds.cache.keys()],results=[],pool=resolvePool();
+  for(const guildId of guildIds){
+    const catchup=(await pool.query(`SELECT EXISTS(
+      SELECT 1 FROM bounty_draws d
+      WHERE d.guild_id=$1 AND d.month_key=$2 AND d.status IN('pending','waiting_entries')
+        AND (EXISTS(SELECT 1 FROM bounty_pool_entries e WHERE e.guild_id=d.guild_id AND e.month_key=d.month_key AND e.status='active')
+          OR EXISTS(SELECT 1 FROM bounty_submissions s WHERE s.guild_id=d.guild_id AND s.status='vaulted' AND s.draw_id IS NULL))
+    ) OR (
+      NOT EXISTS(SELECT 1 FROM bounty_draws WHERE guild_id=$1 AND month_key=$2)
+      AND EXISTS(SELECT 1 FROM bounty_pool_entries WHERE guild_id=$1 AND month_key=$2 AND status='active')
+    ) AS due`,[guildId,prior])).rows[0]?.due;
+    if(catchup)results.push(await generateDraw(guildId,prior));
+    if(isMonthlyDrawDue(now,cfg)){
+      const active=(await pool.query(`SELECT EXISTS(SELECT 1 FROM bounty_pool_entries WHERE guild_id=$1 AND month_key=$2 AND status='active')
+        OR EXISTS(SELECT 1 FROM bounty_submissions WHERE guild_id=$1 AND status='vaulted' AND draw_id IS NULL) AS active`,[guildId,current])).rows[0]?.active;
+      if(active)results.push(await generateDraw(guildId,current));
+    }
+  }
+  return {due:results.length>0,results};
+}
+async function generateDraw(guildId,monthKey){const cfg=getBountyConfig(),pool=resolvePool(),db=await pool.connect();let draw;try{await db.query('BEGIN');await db.query('SELECT pg_advisory_xact_lock($1::bigint)',[advisoryLockKey(`bounty-draw:${guildId}:${monthKey}`)]);draw=(await db.query(`INSERT INTO bounty_draws(guild_id,month_key,scheduled_for) VALUES($1,$2,$3) ON CONFLICT(guild_id,month_key) DO UPDATE SET updated_at=NOW() RETURNING *`,[guildId,monthKey,getScheduledDrawDate(monthKey,cfg)])).rows[0];if(['generated','revealing','completed'].includes(draw.status)){await db.query('COMMIT');return draw;}const entries=(await db.query(`SELECT * FROM bounty_pool_entries WHERE guild_id=$1 AND month_key=$2 AND status='active' ORDER BY id FOR UPDATE`,[guildId,monthKey])).rows,valid=[];const contract=new ethers.Contract(cfg.entryContract,ERC721_ABI,await getProvider(cfg.entryChain,cfg));for(const e of entries){try{const owner=normalizeAddress(await contract.ownerOf(BigInt(e.token_id)));if(owner)valid.push({...e,owner});}catch{}}
+    const nfts=(await db.query(`SELECT * FROM bounty_submissions WHERE guild_id=$1 AND status='vaulted' AND draw_id IS NULL ORDER BY accepted_at,id FOR UPDATE`,[guildId])).rows,needed=nfts.length+5;if(valid.length<needed){await db.query(`UPDATE bounty_draws SET status='waiting_entries',entry_count=$2,prize_count=$3,last_error=$4,updated_at=NOW() WHERE id=$1`,[draw.id,valid.length,needed,`Need ${needed-valid.length} additional valid entries.`]);await db.query('COMMIT');await logError('Draw waiting',new Error(`${monthKey}: ${needed} prizes, ${valid.length} valid entries, ${needed-valid.length} additional required.`),guildId);return {status:'waiting_entries',needed,valid:valid.length};}
+    const plan=buildDrawPlan(nfts,valid);for(const x of plan){const owner=x.winningEntry.owner,link=await deps.getWalletOwnerLink?.(guildId,owner).catch(()=>null),discordId=link?.discord_id||link?.discordId||link?.discord_user_id||null;await db.query(`INSERT INTO bounty_draw_results(draw_id,reveal_order,prize_type,bounty_submission_id,charm_amount,winning_entry_token_id,winning_entry_contract,winner_wallet,winner_discord_id,payout_status,delivery_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[draw.id,x.revealOrder,x.prizeType,x.bountySubmission?.id||null,x.charmAmount||null,x.winningEntry.token_id,x.winningEntry.contract_address,owner,discordId,x.prizeType==='charm'?(discordId?'pending':'manual_review'):null,x.prizeType==='nft'?'pending':null]);}
+    await db.query(`UPDATE bounty_submissions SET status='drawn_pending_delivery',draw_id=$2,updated_at=NOW() WHERE id=ANY($1::bigint[])`,[nfts.map(x=>x.id),draw.id]);await db.query(`UPDATE bounty_draws SET status='generated',started_at=NOW(),entry_count=$2,prize_count=$3,last_error=NULL,updated_at=NOW() WHERE id=$1`,[draw.id,valid.length,needed]);await audit(db,{guildId,drawId:draw.id,eventType:'draw_generated',details:{entries:valid.length,prizes:needed,entryChain:cfg.entryChain}});await db.query('COMMIT');return {id:draw.id,status:'generated'};}catch(e){await db.query('ROLLBACK').catch(()=>null);throw e;}finally{db.release();}}
+async function resumeDrawReveals(){const draws=(await resolvePool().query(`SELECT * FROM bounty_draws WHERE status IN('generated','revealing') ORDER BY started_at LIMIT 2`)).rows;for(const d of draws)await revealDraw(d.id).catch(e=>logError('Draw reveal',e,d.guild_id));}
+const delay=ms=>new Promise(r=>setTimeout(r,ms));
+async function revealDraw(drawId){const lockClient=await resolvePool().connect(),key=advisoryLockKey(`bounty-reveal:${drawId}`);try{const locked=(await lockClient.query('SELECT pg_try_advisory_lock($1::bigint) AS locked',[key])).rows[0]?.locked;if(!locked)return false;return await revealDrawLocked(drawId);}finally{await lockClient.query('SELECT pg_advisory_unlock($1::bigint)',[key]).catch(()=>null);lockClient.release();}}
+async function revealDrawLocked(drawId){const pool=resolvePool(),draw=(await pool.query(`SELECT * FROM bounty_draws WHERE id=$1`,[drawId])).rows[0],cfg=getBountyConfig(),ch=await channel(cfg.drawChannelId);if(!draw||!ch)return false;if(!draw.kickoff_message_id){const m=await ch.send({content:'@everyone — **THE BOUNTY VAULT IS OPENING**\n\nA month of sweeps. A Vault full of community bounties. A pile of `$CHARM`.\n\nEvery eligible Token ID is locked in. **It’s time to draw.**',allowedMentions:{parse:['everyone']}});await pool.query(`UPDATE bounty_draws SET kickoff_message_id=$2,status='revealing',updated_at=NOW() WHERE id=$1 AND kickoff_message_id IS NULL`,[drawId,m.id]);await delay(5000);}const results=(await pool.query(`SELECT r.*,s.project_name,s.token_id bounty_token_id,s.opensea_url,s.image_url,s.contract_address,s.chain FROM bounty_draw_results r LEFT JOIN bounty_submissions s ON s.id=r.bounty_submission_id WHERE r.draw_id=$1 ORDER BY r.reveal_order`,[drawId])).rows;for(const r of results){if(r.revealed_at)continue;const embed=new EmbedBuilder().setColor(r.prize_type==='nft'?0x7f39fb:0xf2a900);if(r.prize_type==='nft'){embed.setTitle(`BOUNTY #${r.reveal_order}`).setDescription(`**${cleanText(r.project_name,100)} #${r.bounty_token_id}** • ${chainLabel(r.chain,cfg)}\n[View on OpenSea](${r.opensea_url})\n\n**WINNING SQUIG: #${r.winning_entry_token_id}**${r.winner_discord_id?`\n<@${r.winner_discord_id}>`:''}`);if(r.image_url)embed.setImage(r.image_url);}else embed.setTitle(r.reveal_order===results.length?'FINAL BOUNTY':'$CHARM BOUNTY').setDescription(`**${Number(r.charm_amount).toLocaleString()} $CHARM**\n\nAnd the winning Token ID is...\n\n**SQUIG #${r.winning_entry_token_id}**${r.winner_discord_id?`\n<@${r.winner_discord_id}>`:''}`);const m=await ch.send({embeds:[embed],allowedMentions:{users:r.winner_discord_id?[r.winner_discord_id]:[]}});await pool.query(`UPDATE bounty_draw_results SET reveal_message_id=$2,revealed_at=NOW() WHERE id=$1 AND revealed_at IS NULL`,[r.id,m.id]);await pool.query(`UPDATE bounty_draws SET current_reveal_index=GREATEST(current_reveal_index,$2),updated_at=NOW() WHERE id=$1`,[drawId,r.reveal_order]);if(r.prize_type==='nft')await postDeliveryPanel(r.id);else if(r.payout_status==='pending')await payDrawCharm(r.id);await delay(r.charm_amount>=10000?5500:4000);}
+  const fresh=(await pool.query(`SELECT COUNT(*)::int count FROM bounty_draw_results WHERE draw_id=$1 AND revealed_at IS NOT NULL`,[drawId])).rows[0].count;if(fresh===results.length){const lines=results.map(r=>`${r.prize_type==='nft'?`${cleanText(r.project_name,80)} #${r.bounty_token_id} (${chainLabel(r.chain,cfg)})`:`${Number(r.charm_amount).toLocaleString()} $CHARM`} → Squig #${r.winning_entry_token_id}${r.winner_discord_id?` (<@${r.winner_discord_id}>)`:''}`);const messages=[];for(let i=0;i<lines.length;i+=20)messages.push(new EmbedBuilder().setColor(0x7f39fb).setTitle(`THE BOUNTY VAULT — ${draw.month_key} RESULTS${i?' (continued)':''}`).setDescription(`${lines.slice(i,i+20).join('\n')}\n\n**Stay Ugly.**`));const sent=await ch.send({embeds:messages.slice(0,10),allowedMentions:{users:[...new Set(results.map(r=>r.winner_discord_id).filter(Boolean))]}});await pool.query(`UPDATE bounty_draws SET status='completed',completed_at=NOW(),summary_message_id=$2,updated_at=NOW() WHERE id=$1`,[drawId,sent.id]);await postOperationalSummary(drawId);}return true;}
+async function payDrawCharm(id){const pool=resolvePool(),db=await pool.connect();let r;try{await db.query('BEGIN');r=(await db.query(`SELECT * FROM bounty_draw_results WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(!r||r.payout_status!=='pending'){await db.query('ROLLBACK');return false;}if(!r.winner_discord_id){await db.query(`UPDATE bounty_draw_results SET payout_status='manual_review' WHERE id=$1`,[id]);await db.query('COMMIT');return false;}await db.query(`UPDATE bounty_draw_results SET payout_status='processing' WHERE id=$1`,[id]);await db.query('COMMIT');}finally{db.release();}try{const draw=(await pool.query(`SELECT * FROM bounty_draws WHERE id=$1`,[r.draw_id])).rows[0],result=await awardCharm(draw.guild_id,r.winner_discord_id,Number(r.charm_amount),`bounty_draw:${id}`);await pool.query(`UPDATE bounty_draw_results SET payout_status='paid',payout_reference=$2 WHERE id=$1 AND payout_status='processing'`,[id,payoutRef(result)]);return true;}catch(e){await pool.query(`UPDATE bounty_draw_results SET payout_status='pending',payout_reference=$2 WHERE id=$1 AND payout_status='processing'`,[id,String(e.message).slice(0,500)]);await logError('Draw payout',e);return false;}}
+async function postDeliveryPanel(resultId){const r=(await resolvePool().query(`SELECT r.*,s.project_name,s.contract_address,s.token_id,s.quantity,s.image_url,s.opensea_url,s.chain FROM bounty_draw_results r JOIN bounty_submissions s ON s.id=r.bounty_submission_id WHERE r.id=$1`,[resultId])).rows[0],cfg=getBountyConfig(),ch=await channel(cfg.reviewChannelId);if(!ch)return;const embed=new EmbedBuilder().setColor(0xf2a900).setTitle('BOUNTY NFT DELIVERY').addFields({name:'Prize',value:`${cleanText(r.project_name,100)} #${r.token_id}`},{name:'Network',value:chainLabel(r.chain,cfg)},{name:'Contract',value:`\`${r.contract_address}\``},{name:'Winning Squig',value:`#${r.winning_entry_token_id}`},{name:'Winner wallet',value:`\`${r.winner_wallet}\``},{name:'Discord winner',value:r.winner_discord_id?`<@${r.winner_discord_id}>`:'Unlinked wallet — manual handling required'},{name:'OpenSea',value:`[View NFT](${r.opensea_url})`});if(r.image_url)embed.setImage(r.image_url);await ch.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`bounty_deliver:${r.id}`).setLabel('Mark Delivered').setStyle(ButtonStyle.Success))],allowedMentions:{users:r.winner_discord_id?[r.winner_discord_id]:[]}});}
+async function postOperationalSummary(drawId){const pool=resolvePool(),d=(await pool.query(`SELECT * FROM bounty_draws WHERE id=$1`,[drawId])).rows[0],stats=(await pool.query(`SELECT COUNT(*) FILTER(WHERE prize_type='nft' AND delivery_status='pending')::int nft_pending,COUNT(*) FILTER(WHERE prize_type='charm' AND payout_status='paid')::int paid,COUNT(*) FILTER(WHERE prize_type='charm' AND payout_status IN('pending','processing'))::int pending,COUNT(*) FILTER(WHERE winner_discord_id IS NULL)::int unlinked,COUNT(*) FILTER(WHERE payout_status='manual_review')::int manual FROM bounty_draw_results WHERE draw_id=$1`,[drawId])).rows[0],ch=await channel(getBountyConfig().reviewChannelId);if(ch)await ch.send({embeds:[new EmbedBuilder().setTitle('THE BOUNTY VAULT — OPERATIONS').addFields({name:'Draw',value:`#${drawId} • ${d.month_key}`},{name:'NFT deliveries pending',value:String(stats.nft_pending),inline:true},{name:'$CHARM paid',value:String(stats.paid),inline:true},{name:'$CHARM pending',value:String(stats.pending),inline:true},{name:'Unlinked winners',value:String(stats.unlinked),inline:true},{name:'Manual review',value:String(stats.manual),inline:true})]});}
+async function logError(category,error,guildId=null){console.error(`[Bounty Vault] ${category}:`,error);if(typeof deps?.postAdminSystemLog==='function')await deps.postAdminSystemLog({guildId,category:`Bounty Vault: ${category}`,message:String(error?.stack||error?.message||error).slice(0,1800)}).catch(()=>null);}
+
+module.exports={initBountyVault,buildBountyVaultSlashCommand,buildBountyPoolSlashCommand,handleCommand,handleComponent,handleModalSubmit,ensureBountyTables,startBountyVaultWorkers,runBountyTransferCheck,runBountyVoteSettlement,runBountyMonthlyDrawCheck,getBountyConfig,getBountyChainConfig,getEnabledBountyChains,normalizeAddress,normalizeChain,validateAndParseOpenSeaUrl,decideVote,countVoteUsers,secureSampleWithoutReplacement,buildDrawPlan,getMonthKey,zonedParts,isFinalCalendarDay,isMonthlyDrawDue,scheduledLocalLabel,getScheduledDrawDate,previousMonthKey,canTransition,assertTransition,isBlockBeyondHeadError,isTransientRpcError,transferBackoffMs,CHARM_PRIZES,STATES,BOUNTY_CHAINS,parseInboundLog};
