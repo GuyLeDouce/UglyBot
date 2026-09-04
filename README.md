@@ -83,18 +83,23 @@ The sync command downloads the configured Google Sheet to a temporary file, vali
 Regurgitated Squigs become Maw Pool NFT inventory and can later be awarded through `/squigprize`. Swallowed Squigs remain audit-only digestion records and are never available for prize selection. The Maw Pool is separate from the $CHARM jackpot: the pool contains NFTs, while the jackpot is paid in $CHARM. NFT delivery remains manual/admin-confirmed; the bot does not store private keys or auto-transfer NFTs. `/marketplace` remains separate from Feed the Maw and keeps its existing pricing, stock, flow, and UI.
 # The Bounty Vault
 
-The Bounty Vault is an additive community prize system. An administrator posts the public panel with `/bountyvault`; holders submit an NFT before transferring it from a linked wallet. Confirmed inbound transfers receive team review and then a 24-hour community vote. A submission is accepted only when ✅ strictly beats ❌, and its submitter receives 3,000 `$CHARM` through the existing DRIP integration.
+The Bounty Vault is an additive community prize system. An administrator posts the public panel with `/bountyvault`; holders submit an exact OpenSea NFT link before transferring it from a linked wallet. The Vault can watch Ethereum, Base, ApeChain, and Robinhood Chain independently while using the same EVM Vault address on each network. Confirmed inbound transfers receive team review and then a 24-hour community vote. A submission is accepted only when ✅ strictly beats ❌, and its submitter receives 3,000 `$CHARM` through the existing DRIP integration.
 
-The team-only `/bountypool` panel manages the unique Squigs Reloaded Token IDs eligible for the current monthly draw. At 8:00 PM America/Toronto on the final calendar day, every unassigned accepted Vault NFT plus prizes of 2,500, 5,000, 5,000, 10,000, and 10,000 `$CHARM` are matched to different eligible Token IDs. Owners are snapshotted on-chain before results are persisted and revealed one at a time.
+The team-only `/bountypool` panel manages the unique Squigs Reloaded Token IDs eligible for the current monthly draw. The draw-entry collection remains on `BOUNTY_POOL_ENTRY_CHAIN` (Ethereum by default) even when Vault prize NFTs live on other supported EVM chains. At 8:00 PM America/Toronto on the final calendar day, every unassigned accepted Vault NFT plus prizes of 2,500, 5,000, 5,000, 10,000, and 10,000 `$CHARM` are matched to different eligible Token IDs. Owners are snapshotted on-chain before results are persisted and revealed one at a time.
 
 Required configuration:
 
 - `BOUNTY_VAULT_CHANNEL` — public submission/voting channel.
-- An Ethereum RPC source: `BOUNTY_ETH_RPC_URL`, `ETH_RPC_URL`, `ALCHEMY_RPC_URL`, or `ALCHEMY_API_KEY`.
+- At least one supported chain RPC. Ethereum keeps the existing fallbacks: `BOUNTY_ETHEREUM_RPC_URL`, `BOUNTY_ETH_RPC_URL`, `ETH_RPC_URL`, `ALCHEMY_RPC_URL`, or `ALCHEMY_API_KEY`.
+- `BOUNTY_BASE_RPC_URL` — enables Base deposits, returns, and prize-delivery verification.
+- `BOUNTY_APECHAIN_RPC_URL` — enables ApeChain deposits, returns, and prize-delivery verification.
+- `BOUNTY_ROBINHOOD_RPC_URL` — enables Robinhood Chain deposits, returns, and prize-delivery verification.
+
+Only networks with an RPC configured are enabled for new submissions. A supported but unconfigured network is rejected before the holder is told to transfer the NFT.
 
 Optional configuration and defaults:
 
-- `BOUNTY_VAULT_WALLET_ADDRESS` — `0x192907Db190A47d963450e17471e05Af99F65808`.
+- `BOUNTY_VAULT_WALLET_ADDRESS` — `0x192907Db190A47d963450e17471e05Af99F65808`. The same address is used independently on each enabled EVM network.
 - `BOUNTY_REVIEW_CHANNEL_ID` — `1477463175665287410`.
 - `BOUNTY_REVIEWER_USER_IDS` — `826581856400179210,1288107772248064044`.
 - `BOUNTY_DRAW_CHANNEL_ID` — falls back to `BOUNTY_VAULT_CHANNEL`.
@@ -106,7 +111,10 @@ Optional configuration and defaults:
 - `BOUNTY_DRAW_TIME_ZONE` — `America/Toronto`.
 - `BOUNTY_DRAW_HOUR` / `BOUNTY_DRAW_MINUTE` — `20` / `0`.
 - `BOUNTY_POOL_ENTRY_CONTRACT` / `BOUNTY_POOL_ENTRY_CHAIN` — fall back to the configured Squigs Reloaded collection and chain.
+- `BOUNTY_ETHEREUM_EXPLORER_BASE_URL`, `BOUNTY_BASE_EXPLORER_BASE_URL`, `BOUNTY_APECHAIN_EXPLORER_BASE_URL`, and `BOUNTY_ROBINHOOD_EXPLORER_BASE_URL` — optional explorer overrides for transaction links.
 
-Inbound ERC-721 and straightforward ERC-1155 transfers are detected automatically with confirmation depth, persisted cursors, and permanent log de-duplication. Ambiguous transfers and ERC-1155 batches go to team review rather than being guessed. Rejected NFTs and NFT prizes use manual team return/delivery panels whose outbound transaction receipts are verified on-chain.
+Inbound ERC-721 and straightforward ERC-1155 transfers are detected automatically with per-chain confirmation depth, persisted per-chain cursors, permanent log de-duplication, and independent RPC retry/backoff. Transfer matching includes the chain so an NFT transfer on one network cannot satisfy a submission created for another network. Ambiguous transfers and ERC-1155 batches go to team review rather than being guessed.
 
-UglyBot does **not** store a Vault private key and never signs outbound NFT transactions. Configure the review and draw channels so the bot can view channels, send messages, embed links, add reactions, read message history, and use external emojis/reactions as applicable. DRIP must already be configured for automatic `$CHARM` rewards and draw payouts.
+Rejected NFTs and NFT prizes continue to use manual team return/delivery panels. The admin performs the transaction from the Vault wallet and pastes the transaction hash; UglyBot verifies the receipt on the NFT's stored chain before marking the return or delivery complete. UglyBot does **not** store a Vault private key and never signs outbound NFT transactions.
+
+Configure the review and draw channels so the bot can view channels, send messages, embed links, add reactions, read message history, and use external emojis/reactions as applicable. DRIP must already be configured for automatic `$CHARM` rewards and draw payouts.
