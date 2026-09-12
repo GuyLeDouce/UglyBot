@@ -4,15 +4,7 @@ on:
     branches: [feature/squig-madlibs]
   pull_request:
     branches: [main]
-    paths:
-      - 'modules/madlib*.js'
-      - 'modules/data/squigMadlibTemplates.json'
-      - 'scripts/testMadlib*.js'
-      - 'scripts/runMadlibChecks.js'
-      - 'docs/squig-madlibs*.md'
-      - 'index.js'
-      - 'package.json'
-      - '.github/workflows/madlibs-check.yml'
+    paths: ['modules/madlib*.js', 'modules/data/squigMadlibTemplates.json', 'scripts/*Madlib*.js', 'docs/squig-madlibs*', 'index.js', '.github/workflows/madlibs-check.yml']
 permissions:
   contents: read
 concurrency:
@@ -47,22 +39,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Install the declared compatibility baseline without altering manifests
-        if: ${{ hashFiles('scripts/runMadlibChecks.js') != '' }}
+      - name: Install unchanged dependency baseline
         run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
-      - name: Feature, PostgreSQL, and existing regression checks (no bot startup or live services)
+      - name: Feature and legacy checks (never start bot)
         if: ${{ hashFiles('scripts/runMadlibChecks.js') != '' }}
         run: node scripts/runMadlibChecks.js
-      - name: Snapshot reviewed source and verification reports only
+      - name: Snapshot source and reports (no credentials)
         if: always()
         shell: bash
         run: |
           mkdir -p madlib-ci
-          if test -f scripts/runMadlibChecks.js; then
-            tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js modules/data/squigMadlibTemplates.json scripts/test*.js scripts/runMadlibChecks.js docs/squig-madlibs*.md
-          else
-            tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js scripts/test*.js
-          fi
+          tar -czf madlib-ci/source.tgz index.js package.json README.md modules scripts docs
+          tar -czf madlib-ci/dependencies.tgz node_modules
           git rev-parse HEAD > madlib-ci/commit.txt
           node --version > madlib-ci/runtime.txt
           npm ls --depth=0 > madlib-ci/packages.txt 2>&1 || true
@@ -71,4 +59,4 @@ jobs:
         with:
           name: madlib-reviewed-source-and-results
           path: madlib-ci/
-          retention-days: 7
+          retention-days: 3
