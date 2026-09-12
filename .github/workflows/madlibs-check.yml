@@ -8,7 +8,10 @@ on:
       - 'modules/madlib*.js'
       - 'modules/data/squigMadlibTemplates.json'
       - 'scripts/testMadlib*.js'
+      - 'scripts/runMadlibChecks.js'
+      - 'docs/squig-madlibs*.md'
       - 'index.js'
+      - 'package.json'
       - '.github/workflows/madlibs-check.yml'
 permissions:
   contents: read
@@ -36,6 +39,7 @@ jobs:
       MADLIB_ENABLED: 'false'
       MADLIB_TEST_DATABASE_URL: postgres://madlib_test:isolated_test_only@localhost:5432/madlib_test
       MADLIB_TEST_DATABASE_ALLOW_RESET: 'true'
+      MADLIB_REPORT_DIR: madlib-ci
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,26 +47,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Snapshot reviewed source only (never credentials or assets)
+      - name: Install the declared compatibility baseline without altering manifests
+        if: ${{ hashFiles('scripts/runMadlibChecks.js') != '' }}
+        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
+      - name: Feature, PostgreSQL, and existing regression checks (no bot startup or live services)
+        if: ${{ hashFiles('scripts/runMadlibChecks.js') != '' }}
+        run: node scripts/runMadlibChecks.js
+      - name: Snapshot reviewed source and verification reports only
+        if: always()
         shell: bash
         run: |
           mkdir -p madlib-ci
-          tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js scripts/test*.js
+          if test -f scripts/runMadlibChecks.js; then
+            tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js modules/data/squigMadlibTemplates.json scripts/test*.js scripts/runMadlibChecks.js docs/squig-madlibs*.md
+          else
+            tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js scripts/test*.js
+          fi
           git rev-parse HEAD > madlib-ci/commit.txt
           node --version > madlib-ci/runtime.txt
+          npm ls --depth=0 > madlib-ci/packages.txt 2>&1 || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: madlib-reviewed-source
+          name: madlib-reviewed-source-and-results
           path: madlib-ci/
-          retention-days: 3
-      - name: Install the declared compatibility baseline without altering manifests
-        if: ${{ hashFiles('scripts/testMadlibLogic.js') != '' }}
-        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
-      - name: Mad Libs verification (no bot startup or live services)
-        if: ${{ hashFiles('scripts/testMadlibLogic.js') != '' }}
-        run: |
-          set -o pipefail
-          node scripts/testMadlibLogic.js
-          node scripts/testMadlibTemplates.js
-          node scripts/testMadlibIntegration.js
-          node scripts/testMadlibDatabase.js
+          retention-days: 7
