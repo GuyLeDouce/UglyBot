@@ -1,0 +1,68 @@
+name: Mad Libs isolated checks
+on:
+  push:
+    branches: [feature/squig-madlibs]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'modules/madlib*.js'
+      - 'modules/data/squigMadlibTemplates.json'
+      - 'scripts/testMadlib*.js'
+      - 'index.js'
+      - '.github/workflows/madlibs-check.yml'
+permissions:
+  contents: read
+concurrency:
+  group: madlib-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  isolated-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: madlib_test
+          POSTGRES_PASSWORD: isolated_test_only
+          POSTGRES_DB: madlib_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MADLIB_ENABLED: 'false'
+      MADLIB_TEST_DATABASE_URL: postgres://madlib_test:isolated_test_only@localhost:5432/madlib_test
+      MADLIB_TEST_DATABASE_ALLOW_RESET: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Snapshot reviewed source only (never credentials or assets)
+        shell: bash
+        run: |
+          mkdir -p madlib-ci
+          tar -czf madlib-ci/source.tgz index.js package.json README.md modules/*.js scripts/test*.js
+          git rev-parse HEAD > madlib-ci/commit.txt
+          node --version > madlib-ci/runtime.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: madlib-reviewed-source
+          path: madlib-ci/
+          retention-days: 3
+      - name: Install the declared compatibility baseline without altering manifests
+        if: ${{ hashFiles('scripts/testMadlibLogic.js') != '' }}
+        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
+      - name: Mad Libs verification (no bot startup or live services)
+        if: ${{ hashFiles('scripts/testMadlibLogic.js') != '' }}
+        run: |
+          set -o pipefail
+          node scripts/testMadlibLogic.js
+          node scripts/testMadlibTemplates.js
+          node scripts/testMadlibIntegration.js
+          node scripts/testMadlibDatabase.js
