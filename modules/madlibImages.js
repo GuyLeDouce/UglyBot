@@ -27,7 +27,9 @@ function validateAttachment(a,maxBytes=8388608){
   check(a&&typeof a.url==='string'&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=maxBytes,'IMAGE_SIZE',`Attach one image no larger than ${Math.floor(maxBytes/1048576)} MiB.`);
   check(MIME.has(String(a.contentType||'').split(';')[0].toLowerCase()),'IMAGE_TYPE','Upload a PNG, JPEG or WebP as a Discord attachment.');
   let u;try{u=new URL(a.url);}catch(_){throw new MadlibError('IMAGE_URL','Invalid Discord attachment URL.');}
-  check(u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&['cdn.discordapp.com','media.discordapp.net'].includes(u.hostname)&&/^\/attachments\/\d{17,20}\/\d{17,20}\/[^/]+$/.test(u.pathname),'IMAGE_URL','Only direct Discord attachment downloads are allowed.');return u.toString();
+  // Slash-command uploads can use /ephemeral-attachments/ rather than /attachments/.
+  // Keep the exact Discord hosts and signed query string; do not rewrite paths or follow redirects.
+  check(u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&['cdn.discordapp.com','media.discordapp.net'].includes(u.hostname)&&/^\/(?:ephemeral-)?attachments\/\d{17,20}\/\d{17,20}\/[^/]+$/.test(u.pathname),'IMAGE_URL','Only direct Discord attachment downloads are allowed.');return u.toString();
 }
 let activeDecodes=0;
 async function normalizeImage(bytes,info,maxBytes){
