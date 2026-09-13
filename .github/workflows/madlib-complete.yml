@@ -1,0 +1,140 @@
+name: Mad Libs branch completion (no deployment)
+on:
+  push:
+    branches: [feature/squig-madlibs]
+    paths:
+      - '.github/workflows/madlib-complete.yml'
+      - 'modules/madlib*'
+      - 'modules/data/madlibScenes*.js'
+      - 'scripts/*Madlib*.js'
+      - 'scripts/madlibTestUtils.js'
+      - 'docs/squig-madlibs.md'
+permissions:
+  contents: read
+concurrency:
+  group: madlib-branch-completion
+  cancel-in-progress: true
+jobs:
+  complete_feature_branch:
+    if: github.repository == 'GuyLeDouce/UglyBot' && github.ref == 'refs/heads/feature/squig-madlibs' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: madlib_test
+          POSTGRES_PASSWORD: isolated_test_only
+          POSTGRES_DB: madlib_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MADLIB_ENABLED: 'false'
+      MADLIB_TEST_DATABASE_URL: postgres://madlib_test:isolated_test_only@localhost:5432/madlib_test
+      MADLIB_TEST_DATABASE_ALLOW_RESET: 'true'
+      MADLIB_REPORT_DIR: madlib-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Record the exact source revision and require complete deliverables
+        run: |
+          set -euo pipefail
+          mkdir -p madlib-ci
+          git rev-parse HEAD > madlib-ci/source-commit.txt
+          test -s docs/squig-madlibs.md
+          test -s scripts/testMadlibLogic.js
+          test -s scripts/testMadlibTemplates.js
+          test -s scripts/testMadlibIntegration.js
+          test -s scripts/testMadlibDatabase.js
+          test -s scripts/runMadlibChecks.js
+          test -s modules/madlibSchema.sql
+      - name: Apply only the original-blob-verified integration hunks in this test checkout
+        run: node scripts/installMadlibIntegration.js
+      - name: Install unchanged dependency compatibility baseline without package scripts
+        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
+      - name: Require all feature PostgreSQL and regression checks before any repository write
+        run: node scripts/runMadlibChecks.js
+      - name: Commit only the verified index integration to the existing feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'GuyLeDouce/UglyBot'
+          test "$GITHUB_REF" = 'refs/heads/feature/squig-madlibs'
+          node -e 'const r=require("./madlib-ci/verification.json");if(r.featureVerification!=="passed"||!/^passed/.test(r.status))process.exit(1)'
+          git diff --exit-code -- package.json modules scripts docs
+          original_head="$(cat madlib-ci/source-commit.txt)"
+          auth="$(node -e 'process.stdout.write(Buffer.from("x-access-token:"+process.env.GH_TOKEN).toString("base64"))')"
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          git fetch --no-tags origin refs/heads/feature/squig-madlibs
+          test "$(git rev-parse FETCH_HEAD)" = "$original_head" || { echo 'The feature branch changed during verification. No commit was pushed.'; exit 1; }
+          git add -- index.js
+          while IFS= read -r changed; do
+            test "$changed" = 'index.js' || { echo 'Unexpected staged path; refusing repository write.'; exit 1; }
+          done < <(git diff --cached --name-only)
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(madlib): wire isolated feature after complete verification'
+            git push origin HEAD:refs/heads/feature/squig-madlibs
+          fi
+          git rev-parse HEAD > madlib-ci/integrated-commit.txt
+          git diff "$original_head" HEAD --stat > madlib-ci/integration-diff-stat.txt
+      - name: Open a draft review PR without merging or deploying
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'JS'
+          const fs=require('node:fs');
+          (async()=>{
+            const repo='GuyLeDouce/UglyBot';
+            if(process.env.GITHUB_REPOSITORY!==repo||process.env.GITHUB_REF!=='refs/heads/feature/squig-madlibs')throw Error('Unexpected repository or branch');
+            const api=async(route,method='GET',body)=>{
+              const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{method,headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+              if(!r.ok)throw Error(`GitHub returned HTTP ${r.status}; no merge or deployment was attempted.`);
+              return r.json();
+            };
+            const existing=await api('/pulls?state=open&head=GuyLeDouce%3Afeature%2Fsquig-madlibs&base=main');
+            let pr=existing[0];
+            if(!pr){
+              const verification=fs.readFileSync('madlib-ci/verification.md','utf8');
+              const commit=fs.readFileSync('madlib-ci/integrated-commit.txt','utf8').trim();
+              pr=await api('/pulls','POST',{title:'Add Squig Mad Libs with persistent plays, safe CHARM accounting and SHOW publishing',head:'feature/squig-madlibs',base:'main',draft:true,body:`## Scope\nAdd the isolated Squig Mad Libs feature with 60 static authored scenes, durable private sessions, explicit paid-play confirmation, one-time image publishing, deduplicated author rewards, and evidence-driven recovery. Seven verified additive index hunks; existing feature modules, dependency ranges, prices and package scripts unchanged.\n\nVerified integration commit: ${commit}\n\n${verification}\n\n## Owner acceptance still required\nKeep MADLIB_ENABLED=false until the separately authorized sandbox run in docs/squig-madlibs.md. Automated checks used fake Discord/DRIP adapters and disposable PostgreSQL only, not production credentials or live transfers. No Railway variables, deployment or production database was changed. This PR is not authorization to merge or deploy.\n\nRemove the branch-authoring madlib-complete.yml workflow and retired setup-only madlibs-check.yml before final merge; retain the read-only madlib-verification.yml workflow. No automatic merge is configured.`});
+            }
+            fs.writeFileSync('madlib-ci/pull-request.txt',pr.html_url+'\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,`\nDraft review PR: ${pr.html_url}\n`);
+            console.log(`Review PR #${pr.number} is open. No merge or deployment was attempted.`);
+          })().catch(e=>{
+            fs.writeFileSync('madlib-ci/pr-creation-status.txt',e.message+'\n');
+            console.warn(`::warning::${e.message} The verified feature-branch commit, if pushed, remains separate from main.`);
+          });
+          JS
+      - name: Preserve exact source and verification results without credentials
+        if: always()
+        run: |
+          mkdir -p madlib-ci
+          node --version > madlib-ci/runtime.txt
+          git rev-parse HEAD > madlib-ci/checkout-commit.txt
+          if test -f madlib-ci/verification.md; then cat madlib-ci/verification.md >> "$GITHUB_STEP_SUMMARY"; fi
+          tar -czf madlib-ci/reviewed-source.tgz index.js package.json README.md modules scripts docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: madlib-completion-source-and-verification
+          path: madlib-ci/
+          retention-days: 7
