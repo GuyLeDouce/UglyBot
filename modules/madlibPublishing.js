@@ -1,19 +1,19 @@
 'use strict';
 const {EmbedBuilder,AttachmentBuilder,PermissionFlagsBits,ChannelType}=require('discord.js');
-const {check,nonce,safeDiscord,rewardRules}=require('./madlibCore');
+const {check,nonce,safeDiscord}=require('./madlibCore');
 const NO_MENTIONS=Object.freeze({parse:[],users:[],roles:[],repliedUser:false});
 function marker(p){return `Mad Lib reference: ${p.id}`;}
-function publicationConfig(p){return {MADLIB_REACTION_REWARD_CHARM:p.reward,MADLIB_REACTOR_ROLE_IDS:p.reactor_roles,MADLIB_REWARD_CAP_PER_POST:p.reward_cap};}
 function storyEmbeds(s,title=s.template.title){
   const text=safeDiscord(s.story);check(text.length<=5200,'SIZE','This story is too large to display safely. Use its complete text export.');
   const parts=[];for(let i=0;i<text.length;){let end=Math.min(i+3500,text.length);if(end<text.length&&/[\uD800-\uDBFF]/.test(text[end-1])&&/[\uDC00-\uDFFF]/.test(text[end]))end--;parts.push(text.slice(i,end));i=end;}
   return parts.map((part,i)=>new EmbedBuilder().setTitle(i?`${title} — continued`:title).setDescription(part));
 }
-function publicPayload(p,s,image,totals={eligible:0,paid:'0',pending:'0',review:'0'}){
-  const embeds=storyEmbeds(s),summary=`${totals.eligible} eligible reactions · ${totals.paid} $CHARM paid · ${totals.pending} pending (${totals.review} under review)`;
-  embeds[0].setAuthor({name:s.display_name.slice(0,80)}).setImage(`attachment://${p.filename}`).setFooter({text:marker(p)});
-  embeds[embeds.length-1].addFields({name:'Ugly Love',value:summary+(p.suspended?' · Future rewards suspended by moderation.':'')});
-  return {content:rewardRules(publicationConfig(p)),embeds,files:image?[new AttachmentBuilder(image.bytes,{name:p.filename})]:undefined,allowedMentions:NO_MENTIONS,nonce:nonce(p.id),enforceNonce:true};
+function publicPayload(p,s,image){
+  const embeds=storyEmbeds(s);
+  // Keep the public post about the creation. Accounting stays in the existing records/admin views.
+  const content=`**Author of this ugly creation:** ${safeDiscord(s.display_name.slice(0,80))}\n\nReact below if you think it's **UGLY**! 💜`;
+  embeds[0].setImage(`attachment://${p.filename}`).setFooter({text:marker(p)});
+  return {content,embeds,files:image?[new AttachmentBuilder(image.bytes,{name:p.filename})]:undefined,allowedMentions:NO_MENTIONS,nonce:nonce(p.id),enforceNonce:true};
 }
 class MadlibPublishing{
   constructor(store,deps,cfg){this.store=store;this.deps=deps;this.cfg=cfg;}
@@ -49,7 +49,7 @@ class MadlibPublishing{
   async refresh(p,message){
     if(p.last_display_at&&Date.now()-p.last_display_at.getTime()<60000)return;
     if(!p.display_dirty&&p.last_display_at&&Date.now()-p.last_display_at.getTime()<3600000)return;
-    const s=await this.store.owned(p.guild_id,p.user_id,p.session_id),totals=await this.store.totals(p.id),payload=publicPayload(p,s,null,totals);
+    const s=await this.store.owned(p.guild_id,p.user_id,p.session_id),payload=publicPayload(p,s,null);
     delete payload.files;delete payload.nonce;delete payload.enforceNonce;
     const attachment=message.attachments.find(a=>a.id===p.attachment_id)||message.attachments.first();if(attachment)payload.embeds[0].setImage(attachment.url);
     await message.edit(payload);await this.store.query('UPDATE madlib_publications SET display_dirty=FALSE,last_display_at=now() WHERE id=$1',[p.id]);

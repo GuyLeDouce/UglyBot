@@ -62,6 +62,49 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
     const s=session(templates[0]);Object.assign(s,core.render(s.template,Object.fromEntries(s.template.questions.map(q=>[q.key,q.example]))));const p={id:core.id(),filename:'image.png',reward:100,reward_cap:0,reactor_roles:[]},payload=publicPayload(p,s,{bytes:Buffer.from('png')}),json=JSON.stringify(payload.embeds.map(e=>e.toJSON()));
     assert(json.includes(marker(p)));assert(!json.includes('SINGLE FROZEN MOMENT'));assert(!json.includes('drip_member_id'));assert.equal(payload.enforceNonce,true);assert(payload.nonce.length<=25);assert.deepEqual(payload.allowedMentions.parse,[]);
   });
+  await run.test('main menu explains word game image steps and Publish-only privacy without reaction accounting',async()=>{
+    const f=await feature(null,{env:{...env,MADLIB_FREE_COOLDOWN_HOURS:'12',MADLIB_EXTRA_PLAY_COST_CHARM:'2345',MADLIB_REACTION_REWARD_CHARM:'777',MADLIB_REWARD_CAP_PER_POST:'9000',MADLIB_REACTOR_ROLE_IDS:IDS.role}});
+    const i=interaction({command:'madlib'});await f.app.handleInteraction(i);const payload=f.messages[0],menu=payload.embeds[0].toJSON().description;
+    assert(menu.includes('fill-in-the-blanks'));assert(menu.includes('before seeing the story'));assert(menu.includes('matching image prompt'));
+    assert(menu.includes('your image generator'));assert(menu.includes('attach your Squig as the reference'));assert(menu.includes('Upload Image'));
+    assert(menu.includes('Your answers, story, prompt and image preview stay private in Discord.'));assert(menu.includes('Only **Publish** shares your finished story and image'));
+    assert(menu.includes('One free play every 12 hours'));assert(menu.includes('2,345 $CHARM'));assert(menu.length<1000);
+    assert(!/reaction|reactor|reward|treasury|paid rewards|pending|offline|777|9,000/i.test(menu));
+    assert.deepEqual(payload.components[0].toJSON().components.map(b=>b.label),['PLAY','SHOW']);assert.deepEqual(payload.allowedMentions.parse,[]);
+    assert.equal(f.messages.length,1);assert.equal(i.calls[0][1].ephemeral,true);f.app.stop();
+  });
+  await run.test('public creation uses escaped author and UGLY invitation with intact story image marker and no reward fields',()=>{
+    const s=session(templates[0]);Object.assign(s,core.render(s.template,Object.fromEntries(s.template.questions.map(q=>[q.key,q.example]))));
+    s.display_name='Guy @everyone **UGLY** <@200000000000000002>';s.prompt='PRIVATE_PROMPT_SENTINEL';s.answers={private:'PRIVATE_ANSWER_SENTINEL'};
+    const p={id:core.id(),filename:'image.png',reward:777,reward_cap:9000,reactor_roles:[IDS.role],suspended:true};
+    const bytes=Buffer.from('approved-image'),payload=publicPayload(p,s,{bytes},{eligible:12345,paid:'REWARD_TOTAL_SENTINEL',pending:'PENDING_TOTAL_SENTINEL',review:'REVIEW_TOTAL_SENTINEL'});
+    assert.equal(payload.content,`**Author of this ugly creation:** ${core.safeDiscord(s.display_name)}
+
+React below if you think it's **UGLY**! 💜`);
+    assert(!payload.content.includes('@everyone'));assert(!payload.content.includes('<@200000000000000002>'));
+    assert.equal(payload.embeds.map(e=>e.toJSON().description).join(''),core.safeDiscord(s.story));assert(payload.embeds.every(e=>!e.toJSON().fields?.length));
+    assert.equal(payload.embeds[0].toJSON().title,s.template.title);assert.equal(payload.embeds[0].toJSON().image.url,'attachment://image.png');assert.equal(payload.embeds[0].toJSON().footer.text,marker(p));
+    assert.equal(payload.files.length,1);assert.deepEqual(payload.files[0].attachment,bytes);assert.equal(payload.enforceNonce,true);assert.equal(payload.nonce,core.nonce(p.id));
+    assert.deepEqual(payload.allowedMentions,{parse:[],users:[],roles:[],repliedUser:false});
+    assert(!/PRIVATE_|TOTAL_SENTINEL|eligible reactions|Future rewards|under review|No default cap/.test(JSON.stringify({content:payload.content,embeds:payload.embeds.map(e=>e.toJSON())})));
+  });
+  await run.test('refresh replaces old public reward copy without reposting reattaching or touching reward records',async()=>{
+    const f=fakeDiscord(),s=session(templates[0]);Object.assign(s,core.render(s.template,Object.fromEntries(s.template.questions.map(q=>[q.key,q.example]))));
+    const p={id:core.id(),guild_id:IDS.guild,user_id:IDS.user,session_id:s.id,filename:'image.png',attachment_id:'saved-image',status:'published',display_dirty:true,last_display_at:new Date(Date.now()-61000),reward:100,reward_cap:0,reactor_roles:[]};
+    const updates=[],edits=[],store={owned:async(g,u,id)=>{assert.equal(g,p.guild_id);assert.equal(u,p.user_id);assert.equal(id,p.session_id);return s;},totals:async()=>{throw Error('Public copy no longer needs a ledger lookup');},query:async(sql,args)=>{updates.push({sql,args});}};
+    const old={content:core.rewardRules(core.config({})),embeds:[{fields:[{name:'Ugly Love',value:'100 paid / 200 pending'}]}]};
+    const message={attachments:new Collection([['saved-image',{id:'saved-image',url:'https://cdn.discordapp.com/attachments/preserved.png'}]]),edit:async payload=>{edits.push(payload);Object.assign(old,payload);}};
+    await new MadlibPublishing(store,f.deps,core.config({})).refresh(p,message);
+    assert.equal(edits.length,1);assert.equal(f.messages.length,0);assert(old.content.includes('Author of this ugly creation'));assert(old.content.includes('**UGLY**'));assert(old.embeds.every(e=>!e.toJSON().fields?.length));
+    assert.equal(old.embeds[0].toJSON().image.url,message.attachments.first().url);assert.equal(old.embeds[0].toJSON().footer.text,marker(p));
+    for(const key of ['files','attachments','nonce','enforceNonce'])assert.equal(Object.hasOwn(edits[0],key),false);
+    assert.deepEqual(updates,[{sql:'UPDATE madlib_publications SET display_dirty=FALSE,last_display_at=now() WHERE id=$1',args:[p.id]}]);
+  });
+  await run.test('simple public-copy refresh retains existing rate limits',async()=>{
+    let edits=0;const store={owned:async()=>{throw Error('Throttled refresh must do no work');}},publishing=new MadlibPublishing(store,{},{}),message={edit:async()=>{edits++;}};
+    await publishing.refresh({last_display_at:new Date(),display_dirty:true},message);
+    await publishing.refresh({last_display_at:new Date(Date.now()-120000),display_dirty:false},message);assert.equal(edits,0);
+  });
   await run.test('uncertain publication is found by its marker without any automatic second send',async()=>{
     const f=fakeDiscord(),s=session(templates[0]);Object.assign(s,core.render(s.template,Object.fromEntries(s.template.questions.map(q=>[q.key,q.example]))));s.state='completed';let sends=0,message;
     let p={id:core.id(),guild_id:IDS.guild,user_id:IDS.user,session_id:s.id,channel_id:IDS.channel,emoji_id:IDS.emoji,filename:'image.png',upload_revision:1,revision:0,status:'prepared',reward:100,reward_cap:0,reactor_roles:[],created_at:new Date()};
