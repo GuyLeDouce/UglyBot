@@ -84,6 +84,8 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
   });
   await run.test('reverse seven additive integration hunks restores every original index byte',()=>{
     const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');assert.equal(integration.sha(integration.reverse(source)),integration.BASELINE_SHA256);assert.equal(integration.apply(source),source);assert.equal(integration.changes.length,7);
+    assert(source.slice(source.indexOf('madlib.initMadlib({'),source.indexOf('function getMarketplaceCommandDeps() {')).includes('  extractDripCurrencyAmountFromPayload,'));
+    const previous=source.replace('  getMarketplaceSpendableBalance,\n  extractDripCurrencyAmountFromPayload,\n  getDripMemberCurrencyBalance,','  getMarketplaceSpendableBalance,\n  getDripMemberCurrencyBalance,');assert.equal(integration.apply(previous),source);
     assert(source.includes('...madlib.buildMadlibSlashCommands()'));assert(source.includes('...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : [])'));assert(source.includes('clientUserId: () => client.user?.id'));const original=integration.reverse(source);assert.equal(source.match(/client\.on\('interactionCreate'/g).length,original.match(/client\.on\('interactionCreate'/g).length);assert.throws(()=>integration.apply(original+'\n// other work'),/baseline changed/);
   });run.done();
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

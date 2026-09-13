@@ -1,5 +1,5 @@
 'use strict';
-const {assert,harness,errorCode,IDS}=require('./madlibTestUtils');
+const {assert,harness,errorCode,IDS,extractDripCurrencyAmountFromPayload}=require('./madlibTestUtils');
 const core=require('../modules/madlibCore');
 const {strictTransfer,canonicalMember,MadlibEconomy}=require('../modules/madlibEconomy');
 const images=require('../modules/madlibImages');
@@ -32,8 +32,8 @@ const templates=require('../modules/madlibTemplates');const run=harness('logic')
   const transport={defaultSender:'member-treasury',botDiscordId:IDS.bot,buildDripHeaders:()=>({Authorization:'Bearer FAKE_TEST_KEY','Content-Type':'application/json'}),fetchWithTimeout:async(url,options)=>{requests.push({url,options});return response;}};
   await run.test('one exact-currency PATCH from the correct sender; no made-up idempotency option',async()=>{
     const out=await strictTransfer('realm',['member-treasury'],1000,'charm',settings,options,transport);
-    assert.equal(requests.length,1);assert.equal(requests[0].url,'https://api.drip.re/api/v1/realm/realm/members/member-user/transfer');assert.equal(requests[0].options.method,'PATCH');assert.equal(requests[0].options.redirect,'error');
-    assert.deepEqual(JSON.parse(requests[0].options.body),{tokens:1000,recipientId:'member-treasury',realmPointId:'charm'});assert.equal(out.usedSenderId,'member-user');assert.equal(out.usedMemberId,'member-treasury');assert.equal(out.transactionRef,'tx-test');assert(!JSON.stringify(requests[0]).includes('idempotency'));
+    assert.equal(requests.length,1);assert.equal(requests[0].url,'https://api.drip.re/api/v1/realms/realm/members/member-user/transfer');assert.equal(requests[0].options.method,'PATCH');assert.equal(requests[0].options.redirect,'error');
+    assert.deepEqual(JSON.parse(requests[0].options.body),{amount:1000,recipientId:'member-treasury',currencyId:'charm'});assert.equal(out.usedSenderId,'member-user');assert.equal(out.usedMemberId,'member-treasury');assert.equal(out.transactionRef,'tx-test');assert(!JSON.stringify(requests[0]).includes('idempotency'));
     await assert.rejects(()=>strictTransfer('realm',['a','b'],1000,'charm',settings,options,transport),errorCode('TRANSFER_CONFIG'));await assert.rejects(()=>strictTransfer('realm',['member-treasury'],1000,null,settings,options,transport),errorCode('TRANSFER_CONFIG'));
   });
   await run.test('known rejections never try another route; timeout 5xx 409 and 202 need review',async()=>{
@@ -46,8 +46,31 @@ const templates=require('../modules/madlibTemplates');const run=harness('logic')
     assert.equal(canonicalMember(spendable,links,aliases),'member-user');assert.throws(()=>canonicalMember(spendable,[...links,{verified:true,drip_member_id:'stranger'}],aliases),errorCode('IDENTITY_CONFLICT'));assert.throws(()=>canonicalMember({...spendable,memberIds:['stranger']},links,aliases),errorCode('IDENTITY_CONFLICT'));
     assert.equal(canonicalMember({ok:true,memberIds:['only']},[{verified:true,drip_member_id:'only'}],aliases),'only');assert.throws(()=>canonicalMember({ok:true,memberIds:['one','two']},[],aliases),errorCode('IDENTITY_CONFLICT'));
   });
-  const deps={getMarketplaceSpendableBalance:async()=>spendable,getWalletLinks:async()=>links,collectDripMemberIdCandidates:aliases,clientUserId:()=>IDS.bot,getDripMemberCurrencyBalance:async()=>1000,postAdminSystemLog:async()=>{},random:()=>0};
+  const deps={extractDripCurrencyAmountFromPayload,getMarketplaceSpendableBalance:async()=>spendable,getWalletLinks:async()=>links,collectDripMemberIdCandidates:aliases,clientUserId:()=>IDS.bot,getDripMemberCurrencyBalance:async()=>1000,postAdminSystemLog:async()=>{},random:()=>0};
   const op={id:'madlib_play:test',guild_id:IDS.guild,user_id:IDS.user,kind:'debit',amount:1000,realm_id:'realm',currency_id:'charm',lease_id:'lease',revision:1};
+  await run.test('Marketplace member payload balance avoids failing direct balance endpoints',async()=>{
+    let direct=0;
+    const embedded={...spendable,resolvedMember:{...spendable.resolvedMember,balances:[{currencyId:'other',balance:999999},{currencyId:'charm',balance:2500}]}};
+    const e=new MadlibEconomy({}, {...deps,getMarketplaceSpendableBalance:async()=>embedded,getDripMemberCurrencyBalance:async()=>{direct++;throw Error('404');}});
+    assert.equal((await e.resolve(op)).sender,'member-user');assert.equal(direct,0);
+    embedded.resolvedMember.balances[1].balance=0;await assert.rejects(()=>e.resolve(op),errorCode('INSUFFICIENT_FUNDS'));assert.equal(direct,0);
+    embedded.resolvedMember.balances[1].balance='1500';assert.equal((await e.resolve(op)).recipient,'member-treasury');assert.equal(direct,0);
+  });
+  await run.test('fallback preserves verified aliases; another currency or unknown balance cannot fund a play',async()=>{
+    let tried;const e=new MadlibEconomy({}, {...deps,getDripMemberCurrencyBalance:async(realm,ids,currency)=>{tried=ids;assert.equal(realm,'realm');assert.equal(currency,'charm');return 1500;}});
+    await e.resolve(op);assert.deepEqual(tried,['member-user','realm-user']);
+    const other={...spendable,resolvedMember:{...spendable.resolvedMember,balances:[{currencyId:'other',balance:999999}]}};
+    await assert.rejects(()=>new MadlibEconomy({}, {...deps,getMarketplaceSpendableBalance:async()=>other,getDripMemberCurrencyBalance:async()=>null}).resolve(op),errorCode('BALANCE_UNKNOWN'));
+    await assert.rejects(()=>new MadlibEconomy({}, {...deps,extractDripCurrencyAmountFromPayload:undefined}).resolve(op),errorCode('BALANCE_CONFIG'));
+  });
+  await run.test('documented transfer receipts reject mismatched identity without resending',async()=>{
+    for(const mismatch of [{senderId:'stranger'},{recipientId:'stranger'},{currencyId:'other'},{amount:999}]){
+      response={ok:true,status:200,json:async()=>mismatch};const before=requests.length;
+      await assert.rejects(()=>strictTransfer('realm',['member-treasury'],1000,'charm',settings,options,transport),errorCode('TRANSFER_UNCERTAIN'));assert.equal(requests.length,before+1);
+    }
+    response={ok:true,status:200,json:async()=>({id:'response-id-not-proven-transaction',senderId:'member-user',recipientId:'member-treasury',currencyId:'charm',balance:1000})};
+    assert.equal((await strictTransfer('realm',['member-treasury'],1000,'charm',settings,options,transport)).transactionRef,null);
+  });
   await run.test('finite numeric currency balance is required; zero is insufficient rather than unknown',async()=>{
     const e=new MadlibEconomy({},deps);assert.equal((await e.resolve(op)).sender,'member-user');
     for(const balance of [null,undefined,NaN,Infinity,'1000',-1])await assert.rejects(()=>new MadlibEconomy({}, {...deps,getDripMemberCurrencyBalance:async()=>balance}).resolve(op),errorCode('BALANCE_UNKNOWN'));
@@ -73,7 +96,47 @@ const templates=require('../modules/madlibTemplates');const run=harness('logic')
     for(const url of ['http://cdn.discordapp.com/attachments/a/b/c','https://127.0.0.1/a','https://cdn.discordapp.com.evil.test/attachments/a/b/c','https://u:p@cdn.discordapp.com/attachments/a/b/c','https://cdn.discordapp.com/api/v1/token','https://media.discordapp.net:444/attachments/a/b/c'])assert.throws(()=>images.validateAttachment({...attachment,url}),errorCode('IMAGE_URL'));
     assert.throws(()=>images.validateAttachment({...attachment,size:8388609}),errorCode('IMAGE_SIZE'));assert.throws(()=>images.validateAttachment({...attachment,contentType:'image/svg+xml'}),errorCode('IMAGE_TYPE'));assert.throws(()=>images.dimensions(Buffer.from('<svg>not a PNG...........</svg>')),errorCode('IMAGE'));
     await assert.rejects(()=>images.downloadAttachment(attachment,8388608,{fetcher:async()=>({status:302,body:{destroy(){}}})}),errorCode('IMAGE_DOWNLOAD'));
-    const fetcher=async()=>({status:200,headers:{get:()=>String(png.length)},body:Readable.from([png])});await assert.rejects(()=>images.downloadAttachment({...attachment,contentType:'image/jpeg'},8388608,{fetcher}),errorCode('IMAGE_TYPE'));
+    const fetcher=async()=>({status:200,headers:{get:()=>String(png.length)},body:Readable.from([png])});assert.equal((await images.downloadAttachment({...attachment,contentType:'image/jpeg'},8388608,{fetcher})).media_type,'image/png');
+  });
+  await run.test('PNG JPEG and WebP downloads accept optional generic alias and mismatched raster MIME',async()=>{
+    for(const format of ['image/png','image/jpeg','image/webp']){
+      const bytes=canvas.toBuffer(format);
+      for(const contentType of [undefined,null,'','application/octet-stream','binary/octet-stream','image/jpg','image/pjpeg',' IMAGE/PNG ; charset=binary','image/webp']){
+        const url=`https://cdn.discordapp.com/ephemeral-attachments/${IDS.channel}/${IDS.message}/download.WEBP?ex=123&is=456&hm=signed`;
+        const a={url,size:bytes.length,contentType,name:'download.WEBP'};
+        const image=await images.downloadAttachment(a,8388608,{fetcher:async(u,o)=>{assert.equal(u,url);assert.equal(o.redirect,'manual');return {status:200,headers:{get:()=>null},body:Readable.from([bytes])};}});
+        assert.equal(image.media_type,'image/png');assert.equal(image.width,64);assert.equal(image.height,64);assert.equal(images.dimensions(image.bytes).media_type,'image/png');
+      }
+    }
+    assert.equal(images.validateAttachment({...attachment,contentType:undefined,content_type:'image/png'}),attachment.url);
+  });
+  await run.test('generic MIME never admits nonimages unsafe URLs oversized streams or redirects',async()=>{
+    for(const bytes of [Buffer.from('<svg xmlns="http://www.w3.org/2000/svg">not raster</svg>'),Buffer.from('<html>not a downloaded image</html>'),Buffer.from('MZ'+'fake executable'.repeat(5))]){
+      await assert.rejects(()=>images.downloadAttachment({...attachment,size:bytes.length,contentType:'application/octet-stream'},8388608,{fetcher:async()=>({status:200,headers:{get:()=>null},body:Readable.from([bytes])})}),errorCode('IMAGE'));
+    }
+    for(const prefix of ['attachments','ephemeral-attachments']){
+      const valid=`https://cdn.discordapp.com/${prefix}/${IDS.channel}/${IDS.message}/image.png?hm=signed`;
+      assert.equal(images.validateAttachment({...attachment,url:valid}),valid);
+      for(const url of [valid.replace('cdn.discordapp.com','cdn.discordapp.com.evil.test'),valid.replace('https:','http:'),valid.replace('cdn.discordapp.com','user:pass@cdn.discordapp.com'),valid.replace('cdn.discordapp.com','127.0.0.1'),valid.replace('cdn.discordapp.com','media.discordapp.net:444')])assert.throws(()=>images.validateAttachment({...attachment,url}),errorCode('IMAGE_URL'));
+    }
+    await assert.rejects(()=>images.downloadAttachment({...attachment,size:100,contentType:null},100,{fetcher:async()=>({status:200,headers:{get:()=>null},body:Readable.from([Buffer.alloc(101)])})}),errorCode('IMAGE_SIZE'));
+    await assert.rejects(()=>images.downloadAttachment({...attachment,contentType:null},8388608,{fetcher:async()=>({status:302,body:{destroy(){}}})}),errorCode('IMAGE_DOWNLOAD'));
+  });
+  await run.test('damaged image decoder exits cannot crash the bot and a later decode still succeeds',async()=>{
+    const damaged=png.subarray(0,33);
+    await assert.rejects(()=>images.normalizeImage(damaged,images.dimensions(damaged),8388608),errorCode('IMAGE'));
+    assert.equal((await images.normalizeImage(png,images.dimensions(png),8388608)).width,64);
+    const limited=await Promise.allSettled(Array.from({length:3},()=>images.normalizeImage(png,images.dimensions(png),8388608)));
+    assert.equal(limited.filter(r=>r.status==='fulfilled').length,2);assert.equal(limited.find(r=>r.status==='rejected').reason.code,'IMAGE_BUSY');
+  });
+  await run.test('JPEG EXIF orientation and exact 4096-square dimensions are accepted within byte limits',async()=>{
+    const c=createCanvas(96,64),jpeg=c.toBuffer('image/jpeg');
+    const exif=Buffer.from('ffe1002245786966000049492a0008000000010012010300010000000600000000000000','hex');
+    const oriented=Buffer.concat([jpeg.subarray(0,2),exif,jpeg.subarray(2)]),info=images.dimensions(oriented);
+    const out=await images.normalizeImage(oriented,info,8388608);assert.equal(out.width*out.height,96*64);assert.equal(images.dimensions(out.bytes).width,out.width);assert.equal(images.dimensions(out.bytes).height,out.height);
+    const square=createCanvas(4096,4096).toBuffer('image/png');const large=await images.normalizeImage(square,images.dimensions(square),8388608);assert.equal(large.width,4096);assert.equal(large.height,4096);
+    const oversized=Buffer.from(png);oversized.writeUInt32BE(4097,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE'));
+    await assert.rejects(()=>images.normalizeImage(png,images.dimensions(png),1),errorCode('IMAGE_SIZE'));
   });
   await run.test('headers constrain dimensions before isolated native decoding and normalization',async()=>{
     assert.deepEqual(images.dimensions(png),{media_type:'image/png',width:64,height:64});const oversized=Buffer.from(png);oversized.writeUInt32BE(100000,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE'));

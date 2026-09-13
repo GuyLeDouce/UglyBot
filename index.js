@@ -7684,6 +7684,7 @@ madlib.initMadlib({
   getHolderRules,
   getOwnedTokenIdsForContractMany,
   getMarketplaceSpendableBalance,
+  extractDripCurrencyAmountFromPayload,
   getDripMemberCurrencyBalance,
   collectDripMemberIdCandidates,
   awardDripPoints,
