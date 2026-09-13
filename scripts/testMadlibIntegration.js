@@ -82,6 +82,29 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
     const base=require.resolve('discord.js').replace(/src\/index.js$/,'src/');const reaction=fs.readFileSync(path.join(base,'managers/ReactionUserManager.js'),'utf8');assert(reaction.includes('type = ReactionType.Normal'));assert(reaction.includes('makeURLSearchParams({ limit, after, type })'));
     const ws=fs.readFileSync(path.join(base,'client/websocket/WebSocketManager.js'),'utf8'),at=ws.indexOf('this.client.emit(Events.Raw');assert(at>=0);assert(ws.indexOf('this.handlePacket',at)>at);assert(fs.readFileSync(path.join(base,'structures/MessagePayload.js'),'utf8').includes('enforce_nonce'));
   });
+  await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
+    const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
+    assert.equal(app.templates.length,60);assert(app.templates.every(t=>t.version===2&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
+    const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
+    assert(panel.includes('human-world'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
+    assert.deepEqual(messages[0].components[0].toJSON().components.map(b=>b.label),['PLAY','SHOW']);
+  });
+  await run.test('completed saved v1 prompt and story remain byte-for-byte unchanged when reopened',async()=>{
+    const saved=require('./fixtures/madlib-v1-session.json'),seed=session(saved.template);
+    Object.assign(seed,{state:'completed',answers:saved.answers,prompt:saved.prompt,story:saved.story,completed_at:new Date()});
+    const {app,store}=await feature(seed),before=store.read();
+    const i=interaction({customId:core.component('prompt',seed.id,0,IDS.user),privateMessage:true});await app.handleInteraction(i);
+    assert.equal(lastEdit(i).embeds[0].toJSON().description,saved.prompt);
+    assert.equal(store.read().prompt,before.prompt);assert.equal(store.read().story,before.story);assert.equal(store.read().template.version,1);assert.deepEqual(store.read().answers,saved.answers);
+  });
+  await run.test('an unfinished v1 session keeps its original ordered questions and never rerolls',async()=>{
+    const saved=require('./fixtures/madlib-v1-session.json'),seed=session(saved.template);const {app,store}=await feature(seed);
+    for(const q of saved.template.questions){const before=store.read();assert.equal(before.template.questions[before.step].key,q.key);
+      await app.handleInteraction(interaction({customId:core.component('submit',seed.id,before.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
+    const end=store.read();assert.equal(end.state,'completed');assert.equal(end.id,seed.id);assert.equal(end.story,saved.story);
+    assert.equal(end.template.version,1);assert(end.prompt.includes('EXPORT FOR UGLYBOT:'));
+  });
   await run.test('reverse seven additive integration hunks restores every original index byte',()=>{
     const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');assert.equal(integration.sha(integration.reverse(source)),integration.BASELINE_SHA256);assert.equal(integration.apply(source),source);assert.equal(integration.changes.length,7);
     assert(source.slice(source.indexOf('madlib.initMadlib({'),source.indexOf('function getMarketplaceCommandDeps() {')).includes('  extractDripCurrencyAmountFromPayload,'));

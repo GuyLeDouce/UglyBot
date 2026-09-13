@@ -38,7 +38,7 @@ const id = () => crypto.randomUUID();
 const nonce = value => crypto.createHash('sha256').update(value).digest('hex').slice(0, 24);
 const snowflake = value => typeof value === 'string' && /^\d{17,20}$/.test(value);
 const safeDiscord = value => String(value ?? '').replace(/\\/g, '\\\\').replace(/([*_`~|>\[\]])/g, '\\$1').replace(/@/g, '@\u200b');
-const displayName = value => String(value || 'An Ugly City resident').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/@/g, '@\u200b').slice(0, 80);
+const displayName = value => String(value || 'A wandering Squig').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/@/g, '@\u200b').slice(0, 80);
 const keysIn = value => [...String(value).matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)].map(m => m[1]);
 function validateAnswer(value, question) {
   check(typeof value === 'string', 'ANSWER', 'Enter a word or short phrase.');
@@ -65,6 +65,7 @@ function validateTemplates(templates, minimum = 50) {
       check(/^[a-z][a-z0-9_]*$/.test(q.key) && !seen.has(q.key), 'TEMPLATES', `Invalid question: ${t.id}`); seen.add(q.key);
       check(q.label && q.label.length <= 45 && q.type && q.hint && Number.isInteger(q.maxLength) && q.maxLength >= 1 && q.maxLength <= 100, 'TEMPLATES', `Invalid question definition: ${t.id}`); validateAnswer(q.example, q);
     }
+    check(t.scene.lettering == null || ['', 'GM', 'GN'].includes(t.scene.lettering), 'TEMPLATES', `Invalid scene lettering: ${t.id}`);
     const sceneKeys = new Set(keysIn(t.scene.moment));
     check(sceneKeys.size === seen.size && [...seen].every(k => sceneKeys.has(k)), 'TEMPLATES', `Both outputs must use every answer: ${t.id}`);
     for (const field of [t.lead, t.ending, t.scene.location, t.scene.moment, t.scene.composition]) {
@@ -75,7 +76,16 @@ function validateTemplates(templates, minimum = 50) {
   return active;
 }
 const STYLE = 'Use the user\'s ATTACHED Squig as the absolute character reference. Preserve its original 2D illustration style, thick outlines, flat colours, exact eye count, face, skin, ears, proportions, distinctive accessories and recognizable identity. Do not use 3D, realism, Pixar or another style. Preserve original clothing unless the scene explicitly names a costume; that costume may be layered over or replace clothing only, never facial traits or identity. Keep the face visible.';
+// Export guidance is metadata, never lettering to add to the artwork. The uploader
+// remains authoritative; prompt text cannot guarantee an external encoder's output.
+function imageOutputGuidance(maxBytes = DEFAULTS.MADLIB_MAX_IMAGE_BYTES) {
+  check(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= DEFAULTS.MADLIB_MAX_IMAGE_BYTES,
+    'RENDER', 'The saved image upload limit is invalid. Ask an admin to inspect this play.');
+  const target = Math.max(1, Math.min(4 * 1024 * 1024, Math.floor(maxBytes * 0.75)));
+  return `EXPORT FOR UGLYBOT: Create ONE still 1024 x 1024 pixel image (square 1:1). Prefer a real PNG (.png) file; JPG/JPEG (.jpg/.jpeg) or WebP (.webp) are also accepted. Aim for at most ${target} bytes; the saved bot upload ceiling is ${maxBytes} bytes (${Number((maxBytes / 1048576).toFixed(3))} MiB). Obey any lower current Discord or bot limit. Never exceed 4096 pixels on either side. No animation, GIF, SVG, AVIF, HEIC, PDF, document, collage or multi-page output. Do not upscale or merely rename the file extension. These are export requirements, NOT words to draw. Check the actual format, dimensions and file size before uploading; prompt text cannot enforce an external generator's export settings.`;
+}
 function render(t, rawAnswers) {
+  check(t.scene.lettering == null || ['', 'GM', 'GN'].includes(t.scene.lettering), 'RENDER', 'Invalid saved scene lettering.');
   const answers = {};
   for (const q of t.questions) answers[q.key] = validateAnswer(rawAnswers[q.key], q);
   const story = [t.lead, t.scene.moment, t.ending].map(s => substitute(s, answers)).join('\n\n');
@@ -83,7 +93,14 @@ function render(t, rawAnswers) {
     `LOCATION: ${substitute(t.scene.location, answers)}`,
     `SINGLE FROZEN MOMENT: ${substitute(t.scene.moment, answers, x => JSON.stringify(x))}`,
     `COMPOSITION: ${substitute(t.scene.composition, answers)}`,
-    'Keep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Do not add new lettering, captions, brand logos or watermarks. Retain original clothing graphics from the attached reference. Any shout is narrative context for expression only, not lettering. This is a playful Ugly City misadventure, not official Ugly Labs history.'
+    'Keep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Retain original clothing graphics from the attached reference. Any shout is narrative context for expression only, not lettering.',
+    t.scene.lettering === 'GM' || t.scene.lettering === 'GN'
+      ? `LETTERING: Only the short greeting ${t.scene.lettering} in the scene's specified place, plus existing reference clothing graphics. Do not add the shouted phrase, captions, new brand logos or watermarks. The export instructions must never appear in the artwork.`
+      : 'Do not add new lettering, captions, brand logos or watermarks.',
+    t.scene.world === 'human-world'
+      ? 'SETTING: An ordinary human-world location. The Squig is the unusual visitor. Keep the scene relatable, mischievous and cleanly readable as a social post. Do not add Ugly City landmarks, project lore, extra monsters or fictional financial promises.'
+      : 'This is a playful misadventure, not official Ugly Labs history.',
+    imageOutputGuidance(t.output?.maxImageBytes)
   ].join('\n\n');
   check(story.length <= 3800 && prompt.length <= 12000, 'RENDER', 'This story exceeds its safe output limit. Contact an admin; the play is saved.');
   return { story, prompt, answers };
@@ -107,4 +124,4 @@ function parseComponent(value) {
   return { action: parts[1], id: parts[2], revision: Number(parts[3]), owner: parts[4] };
 }
 function errorMessage(error) { return error instanceof MadlibError ? error.message : 'Mad Libs could not finish that action. Your saved play is safe. Try Resume or ask an admin to inspect the record.'; }
-module.exports = { DEFAULTS, MadlibError, check, enabled, config, id, nonce, snowflake, safeDiscord, displayName, keysIn, validateAnswer, validateTemplates, render, selectTemplate, rewardRules, component, parseComponent, errorMessage, STYLE };
+module.exports = { DEFAULTS, MadlibError, check, enabled, config, id, nonce, snowflake, safeDiscord, displayName, keysIn, validateAnswer, validateTemplates, render, selectTemplate, rewardRules, component, parseComponent, errorMessage, STYLE, imageOutputGuidance };

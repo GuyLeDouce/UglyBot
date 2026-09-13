@@ -43,7 +43,7 @@ async function acknowledge(i){
 async function edit(i,data){const payload=privatePayload({content:null,embeds:[],components:[],attachments:[],...data});return i.deferred||i.replied?i.editReply(payload):i.reply({...payload,ephemeral:true});}
 async function follow(i,data){return i.followUp(privatePayload({...data,ephemeral:true}));}
 function resultControls(s){return [row(button('Get Copyable Prompt','copy',s.id,0,s.user_id),button('Download Prompt .txt','export-prompt',s.id,0,s.user_id),button('Download Story .txt','export-story',s.id,0,s.user_id)),row(button('Classic Story','story',s.id,0,s.user_id),button('SHOW / History','history','0',0,s.user_id))];}
-function instruction(){return 'Copy the complete prompt into your image tool, attach your Squig reference there, generate the image, then return to SHOW. UglyBot does not generate images in V1.';}
+function instruction(){return 'Copy the complete prompt into your image tool, attach your Squig reference there, generate the image, then return to SHOW. Prefer a still 1024 x 1024 PNG; JPEG/WebP are also accepted. Follow the export limits in your prompt and check the actual file size. UglyBot does not generate images in V1.';}
 function stateMessage(s){
   if(s.state==='awaiting_payment')return 'Payment is being checked. Do not pay again. Resume opens the same saved play after confirmation.';
   if(s.state==='payment_review')return 'Payment under review. The outcome was uncertain; no second charge will be sent. Ask an admin to inspect the operation below.';
@@ -55,7 +55,9 @@ class MadlibFeature{
     this.deps=deps;this.env=env;this.images=images;this.available=false;this.failure=null;
     this.ready=(async()=>{
       if(!core.enabled(env))return false;this.cfg=core.config(env);
-      this.templates=core.validateTemplates(templates||require('./madlibTemplates'));
+      this.templates=core.validateTemplates(templates||require('./madlibTemplates')).map(template=>({
+        ...template,output:{maxImageBytes:this.cfg.MADLIB_MAX_IMAGE_BYTES},
+      })); // selectTemplate deep-copies this limit into each new session snapshot.
       this.store=store||new MadlibStore(deps.madlibPool,{random:deps.random||Math.random});await this.store.ensureMadlibTables();
       this.economy=new MadlibEconomy(this.store,deps);this.publishing=new MadlibPublishing(this.store,deps,this.cfg);
       this.workers=new MadlibWorkers({deps,store:this.store,economy:this.economy,publishing:this.publishing,cfg:this.cfg,timers,log:code=>this.log(code)});
@@ -73,7 +75,7 @@ class MadlibFeature{
   }
   async panel(i,access){
     await this.requireAdmin(i,access);const id=core.id(),cfg=this.cfg;
-    const description=['Your answers. Your Squig. Absolutely no guarantees of dignity.','Answer a few suspiciously normal questions and UglyBot will turn them into a ridiculous Ugly City story and a matching image prompt.','**PLAY** to create your next questionable adventure. **SHOW** to share your generated image and collect some Ugly Love.',`One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,core.rewardRules(cfg),instruction()].join('\n\n');
+    const description=['Your answers. Your Squig. Absolutely no guarantees of dignity.','Answer a few suspiciously normal questions and UglyBot will turn them into a ridiculous human-world misadventure and a matching image prompt: daily life, GM/GN, memes and web3 desk mischief.','**PLAY** to create your next questionable adventure. **SHOW** to share your generated image and collect some Ugly Love.',`One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,core.rewardRules(cfg),instruction()].join('\n\n');
     const message=await access.channel.send(privatePayload({embeds:[new EmbedBuilder().setTitle('SQUIG MAD LIBS').setDescription(description)],components:[row(button('PLAY','play',id,0,'public',ButtonStyle.Primary),button('SHOW','show',id,0,'public',ButtonStyle.Success))]}));
     await this.store.query('INSERT INTO madlib_panels(id,guild_id,channel_id,message_id,creator_id) VALUES($1,$2,$3,$4,$5)',[id,i.guildId,i.channelId,message.id,i.user.id]);
     return edit(i,{content:'SQUIG MAD LIBS panel posted. PLAY and SHOW are ready.'});
