@@ -1,0 +1,53 @@
+name: Mad Lib PNG decoder compatibility
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'modules/madlibImages.js'
+      - 'modules/madlibImageWorker.js'
+      - 'scripts/testMadlibPngDecode.js'
+      - '.github/workflows/madlib-png-compatibility.yml'
+permissions:
+  contents: read
+concurrency:
+  group: madlib-png-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  png-decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        canvas: ['0.1.66', '0.1.100']
+    env:
+      MADLIB_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install supported canvas version without changing the manifest
+        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@14.16.3 pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@${{ matrix.canvas }} ethers@6.10.0 dotenv@16.4.5
+      - name: Reproduce metadata failure and verify raster compatibility
+        run: |
+          set -o pipefail
+          mkdir -p png-report
+          node scripts/testMadlibPngDecode.js 2>&1 | tee png-report/tests.log
+          node scripts/testMadlibLogic.js 2>&1 | tee png-report/logic.log
+      - name: Record runtime and decoder packages for reproducing the owner sample
+        if: always()
+        run: |
+          mkdir -p png-report
+          node --version > png-report/node-version.txt
+          git rev-parse HEAD > png-report/commit.txt
+          npm ls @napi-rs/canvas > png-report/canvas-version.txt
+          tar -czf png-report/canvas-packages.tgz node_modules/@napi-rs/canvas node_modules/@napi-rs/canvas-linux-x64-gnu
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: madlib-png-${{ matrix.canvas }}
+          path: png-report/
+          retention-days: 3
