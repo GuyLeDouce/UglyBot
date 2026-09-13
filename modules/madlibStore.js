@@ -109,13 +109,14 @@ class MadlibStore {
     });
   }
   async draft(guild,user){return this.one('SELECT * FROM madlib_drafts WHERE guild_id=$1 AND user_id=$2',[guild,user]);}
-  async stage(guild,user,sid,revision,image){
+  async stage(guild,user,sid,revision,image,expectedUpdatedAt=null){
     return this.tx(async c=>{
       const s=await this.owned(guild,user,sid,c,true);check(s.state==='completed','STATE','Finish the story first.');
       const publication=await this.one('SELECT * FROM madlib_publications WHERE session_id=$1 FOR UPDATE',[sid],c);
       check(!publication||publication.status==='prepared','PUBLISHED','A sent or uncertain publication already exists. Use SHOW for its status.');
       const d=await this.one('SELECT * FROM madlib_drafts WHERE guild_id=$1 AND user_id=$2 FOR UPDATE',[guild,user],c);
-      check(d?.session_id===sid&&d.revision===revision,'STALE','Your SHOW selection changed. Select the story again before uploading.');const next=d.revision+1;
+      check(d?.session_id===sid&&d.revision===revision,'STALE','Your SHOW selection changed. Select the story again before uploading.');
+      check(!expectedUpdatedAt||new Date(d.updated_at).getTime()===new Date(expectedUpdatedAt).getTime(),'STALE','This upload form was replaced or cancelled. Reopen SHOW.');const next=d.revision+1;
       await c.query(`INSERT INTO madlib_uploads(session_id,bytes,media_type,width,height,revision) VALUES($1,$2,$3,$4,$5,$6)
         ON CONFLICT(session_id) DO UPDATE SET bytes=$2,media_type=$3,width=$4,height=$5,revision=$6,expires_at=now()+interval '24 hours'`,[sid,image.bytes,image.media_type,image.width,image.height,next]);
       await c.query('UPDATE madlib_drafts SET revision=$3,updated_at=now() WHERE guild_id=$1 AND user_id=$2',[guild,user,next]);

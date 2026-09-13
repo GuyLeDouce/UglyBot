@@ -11,10 +11,11 @@ const {MadlibPublishing,storyEmbeds,NO_MENTIONS}=require('./madlibPublishing');
 const {MadlibWorkers}=require('./madlibWorkers');
 const {downloadAttachment}=require('./madlibImages');
 const {memberAccess,eligible}=require('./madlibAccess');
+const {UploadModalBridge,buildUploadModal,draftStamp,modalTarget,uploadLimit}=require('./madlibUploadModal');
 const {check,component,parseComponent,safeDiscord,errorMessage}=core;
 const ADMIN_ACTIONS=['status','inspect','pause','resume','suspend','unsuspend','retry','mark-sent','mark-not-sent','refund','link-publication','retry-publication'];
 const COMMANDS=['madlib','madlib-upload','madlib-admin','madlib-history'];
-const COMPONENT_ACTIONS=new Set(['play','show','resume','accept','answer','submit','back','exit','abandon','abandon-confirm','history','select','prompt','story','copy','export-prompt','export-story','publish','replace','cancel-image']);
+const COMPONENT_ACTIONS=new Set(['play','show','resume','accept','answer','submit','back','exit','abandon','abandon-confirm','history','select','prompt','story','copy','export-prompt','export-story','publish','replace','cancel-image','upload','upload-submit']);
 let instance=null;
 function buildMadlibSlashCommands(env=process.env){
   if(!core.enabled(env))return [];
@@ -53,6 +54,8 @@ function stateMessage(s){
 class MadlibFeature{
   constructor(deps,{env=process.env,templates=null,store=null,images=downloadAttachment,timers=globalThis}={}){
     this.deps=deps;this.env=env;this.images=images;this.available=false;this.failure=null;
+    // Also handles old upload modals after disable/restart without touching schema or finances.
+    this.uploadModals=new UploadModalBridge(deps.client);
     this.ready=(async()=>{
       if(!core.enabled(env))return false;this.cfg=core.config(env);
       this.templates=core.validateTemplates(templates||require('./madlibTemplates')).map(template=>({
@@ -65,8 +68,8 @@ class MadlibFeature{
     })().catch(error=>{this.failure=error instanceof core.MadlibError?error.code:'INITIALIZATION_FAILED';this.available=false;this.log(this.failure);return false;});
   }
   log(code){console.warn(`[MadLibs] ${String(code).replace(/[^A-Z0-9_: -]/gi,'').slice(0,100)}`);}
-  async start(){if(await this.ready)return this.workers.start();return false;}
-  stop(){this.workers?.stop();}
+  async start(){this.uploadModals.start();if(await this.ready)return this.workers.start();return false;}
+  stop(){this.workers?.stop();this.uploadModals.stop();}
   async access(i){return memberAccess(this.deps,i.guildId,i.user.id,i.channelId);}
   async requireAdmin(i,access){check(await this.deps.isAdmin({user:i.user,guildId:i.guildId,guild:access.guild,member:access.member,memberPermissions:access.member.permissions}),'ADMIN','Only an UglyBot administrator can use that action.');}
   async ensurePanel(i,c){
@@ -124,7 +127,7 @@ class MadlibFeature{
     const selected=await this.store.chooseDraft(i.guildId,i.user.id,sid),s=selected.session;
     if(selected.publication)return this.publicationStatus(i,selected.publication);
     const image=await this.store.upload(s.id);if(image&&image.revision===selected.draft.revision)return this.preview(i,s,selected.draft,image);
-    return edit(i,{content:`**${safeDiscord(s.template.title)}**\nStory ID: \`${s.id}\`\n\nUse **/madlib-upload image:** and attach one PNG, JPEG or WebP. You can omit story_id because this SHOW selection is saved. The upload and preview are private; only Publish shares it.\n\n${instruction()}`,components:[row(button('Image Prompt','prompt',s.id,0,i.user.id),button('Classic Story','story',s.id,0,i.user.id),button('SHOW / History','history','0',0,i.user.id))]});
+    return edit(i,{content:`**${safeDiscord(s.template.title)}**\nStory ID: \`${s.id}\`\n\nClick **Upload Image** below and choose one PNG, JPEG or WebP. The upload and preview are private; only Publish shares it. **/madlib-upload** remains available as a fallback.\n\n${instruction()}`,components:[row(button('Upload Image','upload',s.id,selected.draft.revision,i.user.id,ButtonStyle.Primary)),row(button('Image Prompt','prompt',s.id,0,i.user.id),button('Classic Story','story',s.id,0,i.user.id),button('SHOW / History','history','0',0,i.user.id))]});
   }
   async preview(i,s,draft,image){
     const p=await this.store.one('SELECT * FROM madlib_publications WHERE session_id=$1',[s.id]);
@@ -132,12 +135,46 @@ class MadlibFeature{
     const embeds=storyEmbeds(s);embeds[0].setImage('attachment://madlib-preview.png');
     return edit(i,{content:`**Private preview** — ${safeDiscord(s.display_name)}\nTarget channel ID: ${cfg.MADLIB_CHANNEL_ID}\nNothing has been published. Uploads expire after 24 hours.\n\n${core.rewardRules(cfg)}`,embeds,files:[new AttachmentBuilder(image.bytes,{name:'madlib-preview.png'})],components:[row(button('Publish','publish',s.id,draft.revision,i.user.id,ButtonStyle.Success),button('Replace Image','replace',s.id,draft.revision,i.user.id),button('Cancel','cancel-image',s.id,draft.revision,i.user.id))]});
   }
+  async checkUploadDraft(i,sid,revision,stamp=null){
+    const s=await this.store.owned(i.guildId,i.user.id,sid);check(s.state==='completed','STATE','Finish the story before uploading.');
+    const d=await this.store.draft(i.guildId,i.user.id);
+    check(d?.session_id===sid&&d.revision===revision&&(!stamp||draftStamp(d)===stamp),'STALE','Your SHOW selection or preview changed. Reopen SHOW and select the story again.');
+    const p=await this.store.one('SELECT * FROM madlib_publications WHERE session_id=$1',[sid]);
+    check(!p||p.status==='prepared','PUBLISHED','This story already has a sent or uncertain publication. Use SHOW for its status.');
+    return {session:s,draft:d};
+  }
+  async openUpload(i,c){
+    check(i.isMessageComponent?.()&&!i.isModalSubmit?.(),'UPLOAD_MODAL','Use the Upload Image button after selecting a story in SHOW.');
+    check(this.uploadModals.available,'UPLOAD_MODAL','The upload form is unavailable. Use /madlib-upload for the same saved story.');
+    let timer;
+    try{
+      const selected=await Promise.race([(async()=>{
+        await this.ready;check(this.available,'UNAVAILABLE','Mad Libs is unavailable. Your story is saved.');
+        const access=await this.access(i);await eligible(this.deps,this.cfg,access);
+        return this.checkUploadDraft(i,c.id,c.revision);
+      })(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new core.MadlibError('SLOW','Checks are taking too long to open the form. Try Upload Image again, or use /madlib-upload.')),1400);})]);
+      // A modal must use this button's initial response; never defer before showModal.
+      try{await i.showModal(buildUploadModal(selected.draft,i.user.id,uploadLimit(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit)));}
+      catch(_){throw new core.MadlibError('UPLOAD_MODAL','Discord could not open the upload form. Reopen SHOW or use /madlib-upload for the same saved story.');}
+    }finally{clearTimeout(timer);}
+  }
+  async saveUploadedImage(i,access,sid,revision,attachment,rawLimit=null,stamp=null){
+    await eligible(this.deps,this.cfg,access);
+    const {session:s,draft}=await this.checkUploadDraft(i,sid,revision,stamp);
+    const image=await this.images(attachment,uploadLimit(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit,rawLimit));
+    // The database rechecks the selection under lock AFTER download/decode finishes.
+    const saved=await this.store.stage(i.guildId,i.user.id,s.id,revision,image,draft.updated_at);
+    return this.preview(i,s,saved,image);
+  }
   async upload(i,access){
     await eligible(this.deps,this.cfg,access);const supplied=i.options.getString('story_id');
     if(supplied){const selection=await this.store.chooseDraft(i.guildId,i.user.id,supplied);if(selection.publication)return this.publicationStatus(i,selection.publication);}
     const draft=await this.store.draft(i.guildId,i.user.id);check(draft,'DRAFT','Select your completed story through SHOW first, or supply your story_id.');
-    const s=await this.store.owned(i.guildId,i.user.id,draft.session_id),image=await this.images(i.options.getAttachment('image',true),Math.min(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit||this.cfg.MADLIB_MAX_IMAGE_BYTES));
-    const saved=await this.store.stage(i.guildId,i.user.id,s.id,draft.revision,image);return this.preview(i,s,saved,image);
+    return this.saveUploadedImage(i,access,draft.session_id,draft.revision,i.options.getAttachment('image',true));
+  }
+  async submitUpload(i,access,c){
+    const target=modalTarget(c),received=this.uploadModals.take(i);
+    return this.saveUploadedImage(i,access,target.sessionId,c.revision,received.attachment,received.limit,target.stamp);
   }
   async publicationStatus(i,p){
     check(p.guild_id===i.guildId&&p.user_id===i.user.id,'OWNER','That publication is not yours in this server.');
@@ -183,6 +220,7 @@ class MadlibFeature{
     try{
       if(ours){c=parseComponent(i.customId);check(COMPONENT_ACTIONS.has(c.action),'ACTION','That control is not recognized. Reopen PLAY or SHOW.');check(c.owner==='public'||c.owner===i.user.id,'OWNER','That private control belongs to another member.');}
       if(!core.enabled(this.env)){await acknowledge(i);await edit(i,{content:'Squig Mad Libs is currently disabled. Saved stories and pending payment obligations have not been erased.'});return true;}
+      if(c&&['upload','replace'].includes(c.action)){check(c.owner!=='public','OWNER','Upload controls are private.');await this.openUpload(i,c);return true;}
       if(c?.action==='answer'){check(c.owner!=='public','OWNER','Answer controls are private.');await this.openAnswer(i,c);return true;}
       await acknowledge(i);await this.ready;check(this.available,'UNAVAILABLE',`Squig Mad Libs is unavailable (${this.failure||'initializing'}). Existing UglyBot features are unchanged.`);
       const access=await this.access(i);if(c)await this.ensurePanel(i,c);
@@ -192,7 +230,7 @@ class MadlibFeature{
       else if(['show','history'].includes(c.action))await this.history(i,c.action==='show'?0:Number(c.id));
       else if(c.action==='select'){check(i.values?.length===1,'SELECT','Choose one story.');await this.selected(i,i.values[0]);}
       else if(c.action==='publish')await this.publish(i,access,c);
-      else if(c.action==='replace'){const d=await this.store.draft(g,u);await this.store.owned(g,u,c.id);check(d?.session_id===c.id&&d.revision===c.revision,'STALE','The preview changed. Reopen SHOW.');await edit(i,{content:'Use /madlib-upload image: again to replace this private staged image. The saved story is unchanged and nothing is charged.',components:[row(button('SHOW / History','history','0',0,u))]});}
+      else if(c.action==='upload-submit')await this.submitUpload(i,access,c);
       else if(c.action==='cancel-image'){await this.store.cancelUpload(g,u,c.id,c.revision);await edit(i,{content:'Private upload cancelled. Your completed story remains in SHOW; no public post was made.'});}
       else{
         const s=await this.store.owned(g,u,c.id);
