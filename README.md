@@ -2,6 +2,8 @@
 
 ## Squig Mad Libs
 
+**Image uploads:** SHOW → choose a saved story → **Upload Image** → choose a file → private preview → **Publish**. **Replace Image** opens the same picker. `/madlib-upload` remains an optional fallback. See [button-upload setup and compatibility](docs/squig-madlibs-upload-button.md).
+
 **Human-world scene library:** 60 authored, versioned scenes now cover GM, GN, errands, work, reaction memes, web3 desk life, food, weekends, posting and social mischief. Every new prompt requests a still 1024 x 1024 PNG (JPEG/WebP accepted), includes the configured upload ceiling, and preserves the attached Squig's original 2D identity. New scenes use existing question types; saved sessions and completed history are not replaced. [Scene update and rollout guide](docs/squig-madlibs-human-world.md).
 
 See the [Squig Mad Libs owner guide](docs/squig-madlibs.md) for setup, publishing, payment recovery and rollback. On the running UglyBot service, `MADLIB_ENABLED=true` registers `/madlib`, `/madlib-upload`, `/madlib-history` and `/madlib-admin`. An administrator runs `/madlib` to post the PLAY / SHOW panel; it is not posted automatically.

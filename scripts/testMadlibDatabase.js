@@ -82,6 +82,23 @@ function economyDeps(extra={}){return {
     assert.equal((await store.one('SELECT next_free_at FROM madlib_users WHERE guild_id=$1 AND user_id=$2',[IDS.guild,s.user_id])).next_free_at.getTime(),before.next_free_at.getTime());
     await assert.rejects(()=>store.admin(adminArgs('retry',id,op.revision)),errorCode('STATE'));assert.equal(await other.claimOperation(id),null);
   });
+  await run.test('upload-modal selection timestamp is checked under the same lock as revision and saved bytes',async()=>{
+    const s=await finish((await begin(store,nextUser())).session),chosen=await store.chooseDraft(s.guild_id,s.user_id,s.id),d=chosen.draft;
+    const image={bytes:Buffer.from('test-png'),media_type:'image/png',width:64,height:64};
+    await store.cancelUpload(s.guild_id,s.user_id,s.id,d.revision);
+    const newer=await other.chooseDraft(s.guild_id,s.user_id,s.id);
+    // Same revision after cancellation/recreation, but the new draft is not the old modal.
+    assert.equal(newer.draft.revision,d.revision);
+    await other.query("UPDATE madlib_drafts SET updated_at=updated_at+interval '1 second' WHERE guild_id=$1 AND user_id=$2",[s.guild_id,s.user_id]);
+    await assert.rejects(()=>store.stage(s.guild_id,s.user_id,s.id,d.revision,image,d.updated_at),errorCode('STALE'));
+    assert.equal(await store.upload(s.id),null);
+    const latest=await other.draft(s.guild_id,s.user_id);
+    const results=await Promise.allSettled([store.stage(s.guild_id,s.user_id,s.id,latest.revision,image,latest.updated_at),other.stage(s.guild_id,s.user_id,s.id,latest.revision,image,latest.updated_at)]);
+    assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
+    assert.equal(results.find(x=>x.status==='rejected').reason.code,'STALE');
+    assert.equal((await store.upload(s.id)).revision,latest.revision+1);
+    assert.equal((await store.one('SELECT count(*)::int AS n FROM madlib_operations WHERE session_id=$1',[s.id])).n,0);
+  });
   await run.test('expired resolving lease can be reclaimed but its former worker cannot arm',async()=>{
     const s=await paid(),id=`madlib_play:${s.id}`,old=await store.claimOperation(id);await store.query("UPDATE madlib_operations SET lease_until=now()-interval '1 second' WHERE id=$1",[id]);await other.recoverStale();const fresh=await other.claimOperation(id);assert(fresh);assert.notEqual(fresh.lease_id,old.lease_id);assert.equal(await store.armOperation(old,{sender:'member-user',recipient:'member-treasury'}),null);const armed=await other.armOperation(fresh,{sender:'member-user',recipient:'member-treasury'});assert(armed);assert.equal(armed.attempt_count,1);
   });

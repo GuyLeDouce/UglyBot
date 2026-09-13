@@ -1,0 +1,43 @@
+name: Mad Lib upload modal compatibility
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'modules/madlib*'
+      - 'scripts/*Madlib*'
+      - 'scripts/madlibTestUtils.js'
+      - '.github/workflows/madlib-upload-modal-compatibility.yml'
+permissions:
+  contents: read
+jobs:
+  modal-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        discord: ['14.16.3', '14.24.2']
+    env:
+      MADLIB_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install isolated SDK baseline (no manifest change)
+        run: npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund discord.js@${{ matrix.discord }} pg@8.12.0 node-fetch@2.6.7 @napi-rs/canvas@0.1.66 ethers@6.10.0 dotenv@16.4.5
+      - name: Exercise real SDK serialization and Gateway parsing without login
+        run: |
+          set -o pipefail
+          mkdir -p madlib-modal-ci
+          node scripts/testMadlibUploadModal.js 2>&1 | tee madlib-modal-ci/upload-modal.log
+          node scripts/testMadlibIntegration.js 2>&1 | tee madlib-modal-ci/integration.log
+          git diff --exit-code -- package.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: madlib-upload-modal-${{ matrix.discord }}
+          path: madlib-modal-ci/
+          retention-days: 7

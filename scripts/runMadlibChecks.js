@@ -15,7 +15,7 @@ const recordOnly=({text,...r})=>r;let temp,failed=false;
 try{
   const codeFiles=[...fs.readdirSync(path.join(root,'modules')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/${n}`),...fs.readdirSync(path.join(root,'modules','data')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/data/${n}`),...fs.readdirSync(__dirname).filter(n=>/^(?:testMadlib|installMadlib|runMadlib|madlibTestUtils).*\.js$/.test(n)).map(n=>`scripts/${n}`),'index.js'];
   for(const file of codeFiles){const r=execute(`syntax-${path.basename(file)}`,['--check',file]);result.syntax.push(recordOnly(r));if(r.status!=='passed')failed=true;}
-  for(const test of ['testMadlibLogic','testMadlibTemplates','testMadlibIntegration','testMadlibDatabase','testMadlibPngDecode']){
+  for(const test of ['testMadlibLogic','testMadlibTemplates','testMadlibIntegration','testMadlibDatabase','testMadlibPngDecode','testMadlibUploadModal']){
     const r=execute(test,[`scripts/${test}.js`]),counts=[...r.text.matchAll(/^RESULT .*?: (\d+) test groups passed/gm)].map(m=>Number(m[1]));
     result.feature.push({...recordOnly(r),testGroups:counts.reduce((a,b)=>a+b,0)});if(r.status!=='passed'||counts.length!==1||counts[0]<1)failed=true;
   }
@@ -45,7 +45,7 @@ try{
 }catch(error){failed=true;result.runnerError=String(error.message);console.error(error.stack);}
 finally{
   if(temp)fs.rmSync(temp,{recursive:true,force:true});
-  result.featureVerification=result.feature.length===5&&result.feature.every(r=>r.status==='passed'&&r.testGroups>0)?'passed':'incomplete_or_failed';
+  result.featureVerification=result.feature.length===6&&result.feature.every(r=>r.status==='passed'&&r.testGroups>0)?'passed':'incomplete_or_failed';
   result.status=failed?'failed_or_incomplete':result.baselineIssues.length?'passed_with_baseline_disclosures':'passed';
   fs.writeFileSync(path.join(reportDir,'verification.json'),JSON.stringify(result,null,2)+'\n');
   const lines=['# Mad Libs verification',`Runtime: ${result.runtime}`,`Feature verification: **${result.featureVerification}**`,`Unchanged legacy baseline failures: **${result.baselineIssues.length}**`,'','| Suite | Status | Groups |','|---|---|---|',...result.feature.map(r=>`| ${r.name} | ${r.status} | ${r.testGroups} |`),'','| Legacy suite | Baseline comparison |','|---|---|',...result.legacy.map(r=>`| ${r.name} | ${r.disposition} |`),'','No production database, Discord token or DRIP key was used. Live sandbox acceptance remains separately authorized. See verification.json and individual logs for exact results.'];
