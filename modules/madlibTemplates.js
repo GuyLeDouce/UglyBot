@@ -15,6 +15,11 @@ const questions={
 };
 const categories=['Ugly City errands','Workweek survival','Food disasters','Sports','Dubious jobs','Exploration and discovery','Community competitions','Harmless $CHARM mishaps','The Maw mishaps','Community celebrations'];
 module.exports=rows.map(([id,title,theme,location,lead,moment,ending,composition,review])=>{
+  // Use a neutral singular determiner before unknown answers: 'one orange cushion'
+  // works for either vowel or consonant sounds without guessing a/an. This runs
+  // on authored text only, before literal user substitution, and both outputs
+  // snapshot the same normalized moment. User answers are never rewritten.
+  moment=moment.replace(/\b(a|an) (?=\{\{)/gi,article=>article[0]==='A'?'One ':'one ');
   const keys=[...new Set([...moment.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)].map(m=>m[1]))];
   return {id,version:1,title,category:categories[theme],enabled:true,lead,ending,scene:{location,moment,composition},review,
     questions:keys.map(key=>{if(!questions[key])throw new Error(`Unknown question key in static template ${id}`);const [label,hint,example,maxLength]=questions[key];return {key,label,type:key,hint,example,maxLength};})};
