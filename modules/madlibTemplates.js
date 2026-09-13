@@ -1,0 +1,21 @@
+'use strict';
+// Static authored data, not runtime AI generation. Every exported entry contains
+// complete ordered question definitions and one shared story/image scene contract.
+const rows=[...require('./data/madlibScenesA'),...require('./data/madlibScenesB')];
+const questions={
+  emotion:['Emotion (adjective)','An emotion describing how someone feels.','furious',60],
+  object:['Household object (singular noun)','One ordinary object; a short noun phrase.','coat hanger',60],
+  food:['Food (noun or short phrase)','Name one food, not a list.','lasagna',60],
+  animal:['Animal (singular noun)','Name an animal; it may become a small motif.','platypus',60],
+  adjective:['Describing word (adjective)','A strange descriptive quality.','suspiciously elegant',60],
+  colour:['Colour or colour phrase','One colour, without naming an object.','electric purple',60],
+  plural:['Plural noun','More than one of something.','tiny umbrellas',60],
+  costume:['Costume or outfit','Clothing only; deliberately layers over or replaces the original outfit.','oversized bathrobe',60],
+  shout:['A ridiculous thing to shout','One short line of dialogue; no need for quotation marks.','Stay Ugly, Fkrs!',100],
+};
+const categories=['Ugly City errands','Workweek survival','Food disasters','Sports','Dubious jobs','Exploration and discovery','Community competitions','Harmless $CHARM mishaps','The Maw mishaps','Community celebrations'];
+module.exports=rows.map(([id,title,theme,location,lead,moment,ending,composition,review])=>{
+  const keys=[...new Set([...moment.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)].map(m=>m[1]))];
+  return {id,version:1,title,category:categories[theme],enabled:true,lead,ending,scene:{location,moment,composition},review,
+    questions:keys.map(key=>{if(!questions[key])throw new Error(`Unknown question key in static template ${id}`);const [label,hint,example,maxLength]=questions[key];return {key,label,type:key,hint,example,maxLength};})};
+});
