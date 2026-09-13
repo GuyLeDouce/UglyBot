@@ -3,6 +3,7 @@ const path=require('node:path');
 const {fork}=require('node:child_process');
 const fetch=require('node-fetch');
 const {check,MadlibError}=require('./madlibCore');
+const {safeVersion}=require('./madlibImageWorker');
 // Attachment MIME is optional. File signatures and decoding establish the real format.
 const MIME=new Set(['image/png','image/x-png','image/jpeg','image/jpg','image/pjpeg','image/jfif','image/webp','image/x-webp','application/octet-stream','binary/octet-stream','application/binary','']);
 const MAX_PIXELS=4096*4096;
@@ -34,6 +35,18 @@ function validateAttachment(a,maxBytes=8388608){
   // Keep the exact Discord hosts and signed query string; do not rewrite paths or follow redirects.
   check(u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&['cdn.discordapp.com','media.discordapp.net'].includes(u.hostname)&&/^\/(?:ephemeral-)?attachments\/\d{17,20}\/\d{17,20}\/[^/]+$/.test(u.pathname),'IMAGE_URL','Only direct Discord attachment downloads are allowed.');return u.toString();
 }
+function decoderFailure(message) {
+  const d=message?.diagnostics||{};
+  const stage=['INIT','DECODE','DIMENSIONS','ENCODE'].includes(d.stage)?d.stage:'REPLY';
+  const reason=['SVG_MISDETECTED','NATIVE_BINDING','NATIVE_LIBRARY','DIMENSION_MISMATCH','OUTPUT_SIZE','FAILED'].includes(d.reason)?d.reason:'INVALID_REPLY';
+  const code=message?.code==='IMAGE_SIZE'?'IMAGE_SIZE':'IMAGE';
+  // Never log the image, its metadata, signed URL, credentials or native error text.
+  console.warn(`[MadLibs] IMAGE_WORKER stage=${stage} reason=${reason} canvas=${safeVersion(d.canvasVersion)} node=${safeVersion(process.versions.node)}`);
+  const text=code==='IMAGE_SIZE'?'This image becomes too large when prepared for Discord. Upload a smaller image.':
+    stage==='INIT'?'The bot image decoder could not initialize (IMAGE_INIT). Ask an admin to check its installation. Your story is saved.':
+    `The image could not be processed (IMAGE_${stage}). Your story is saved. Share this code with an admin.`;
+  return new MadlibError(code,text);
+}
 let activeDecodes=0;
 async function normalizeImage(bytes,info,maxBytes){
   check(activeDecodes<2,'IMAGE_BUSY','Two images are already being checked. Try this upload again in a moment.');activeDecodes++;
@@ -52,7 +65,7 @@ async function normalizeImage(bytes,info,maxBytes){
       const valid=m?.ok&&Buffer.isBuffer(m.bytes)&&m.bytes.length>0&&m.bytes.length<=maxBytes&&
         ((m.width===info.width&&m.height===info.height)||(info.media_type==='image/jpeg'&&m.width===info.height&&m.height===info.width));
       if(valid)result={media_type:'image/png',width:m.width,height:m.height,bytes:m.bytes};
-      else failure=new MadlibError(m?.code==='IMAGE_SIZE'?'IMAGE_SIZE':'IMAGE',m?.code==='IMAGE_SIZE'?'This image becomes too large when prepared for Discord. Upload a smaller image.':'That file could not be decoded as a still PNG, JPG/JPEG or WebP image.');
+      else failure=decoderFailure(m);
       terminate();
     });
     child.once('error',()=>{failure=new MadlibError('IMAGE','The image checker could not start. Try again in a moment.');terminate();});
@@ -75,4 +88,4 @@ async function downloadAttachment(attachment,maxBytes=8388608,{fetcher=fetch,dec
   }catch(e){if(e instanceof MadlibError)throw e;throw new MadlibError('IMAGE_DOWNLOAD','The upload could not be downloaded safely. Attach the image again.');}
   finally{clearTimeout(timer);abort.abort();res?.body?.destroy?.();}
 }
-module.exports={dimensions,validateAttachment,normalizeImage,downloadAttachment};
+module.exports={dimensions,validateAttachment,normalizeImage,downloadAttachment,decoderFailure};
