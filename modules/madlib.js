@@ -78,7 +78,12 @@ class MadlibFeature{
   }
   async panel(i,access){
     await this.requireAdmin(i,access);const id=core.id(),cfg=this.cfg;
-    const description=['Your answers. Your Squig. Absolutely no guarantees of dignity.','Answer a few suspiciously normal questions and UglyBot will turn them into a ridiculous human-world misadventure and a matching image prompt: daily life, GM/GN, memes and web3 desk mischief.','**PLAY** to create your next questionable adventure. **SHOW** to share your generated image and collect some Ugly Love.',`One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,core.rewardRules(cfg),instruction()].join('\n\n');
+    const description=[
+      'Mad Libs is a fill-in-the-blanks word game: you supply the words before seeing the story. Our Squig version also gives you a matching image prompt for some human-world mischief.',
+      '**1. PLAY** — Answer a few questions to reveal your story and image prompt.\n**2. Make your image** — Copy the prompt into your image generator and attach your Squig as the reference.\n**3. SHOW** — Choose your saved story, press **Upload Image**, and check your private preview.',
+      '**Hidden until you decide to Publish.** Your answers, story, prompt and image preview stay private in Discord. Only **Publish** shares your finished story and image with the channel.',
+      `One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,
+    ].join('\n\n');
     const message=await access.channel.send(privatePayload({embeds:[new EmbedBuilder().setTitle('SQUIG MAD LIBS').setDescription(description)],components:[row(button('PLAY','play',id,0,'public',ButtonStyle.Primary),button('SHOW','show',id,0,'public',ButtonStyle.Success))]}));
     await this.store.query('INSERT INTO madlib_panels(id,guild_id,channel_id,message_id,creator_id) VALUES($1,$2,$3,$4,$5)',[id,i.guildId,i.channelId,message.id,i.user.id]);
     return edit(i,{content:'SQUIG MAD LIBS panel posted. PLAY and SHOW are ready.'});
