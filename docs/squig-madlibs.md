@@ -66,16 +66,18 @@ Active sessions, frozen templates, answers, quotes, full outputs, uploads, publi
 
 ## Financial safety and recovery
 
-DRIP is authoritative. `getMarketplaceSpendableBalance` resolves identity/configuration, not a numeric balance. A separate existing helper retrieves the actual configured-currency balance before debit. Finite zero is valid but insufficient; unknown is not zero or unlimited. Realm/currency and fixed sender/recipient must match the saved operation.
+DRIP is authoritative. `getMarketplaceSpendableBalance` resolves identity/configuration, not a numeric balance. Mad Libs follows Malformed Marketplace's balance-check sequence: run the existing extractDripCurrencyAmountFromPayload on the freshly resolved member and configured currency first; only if no amount is present, call the existing direct balance helper with the same verified account aliases. Finite zero is valid but insufficient; unknown is not zero or unlimited. Realm/currency and fixed sender/recipient must match the saved operation.
 
 The strict adapter uses one documented route with the existing header/HTTP helpers:
 
 ```text
-PATCH /api/v1/realm/{realmId}/members/{senderMemberId}/transfer
-{ "tokens": amount, "recipientId": recipientMemberId, "realmPointId": currencyId }
+PATCH /api/v1/realms/{realmId}/members/{senderMemberId}/transfer
+{ "amount": amount, "recipientId": recipientMemberId, "currencyId": currencyId }
 ```
 
-Reference: https://docs.drip.re/developer/guides/managing-members
+Reference: https://docs.drip.re/api-reference/realm-members-balances/transfer-member-balance-of-a-currency
+
+This matches the first route and currency-explicit payload tried by the existing Marketplace helper. Mad Libs still makes only one transfer request per armed attempt, without copying the legacy currency-less or credit fallbacks. Echoed sender, recipient, currency or amount mismatches require review. A generic response id is not assumed to be a transaction id.
 
 Before sandbox financial acceptance, the owner must verify the existing currency really is $CHARM and the treasury/API permissions support this route. No alternative currency, generic project credit, invented idempotency header or alternate treasury is used. Debit is resolved user member to configured treasury, default 1,000; reward is treasury to **author**, default 100, never reactor; refund reverses the same confirmed debit and currency. All use scoped contexts, `requireTransfer:true` and a runtime bot-ID accessor.
 
@@ -98,7 +100,7 @@ Mutations are stale-revision protected, recorded in `madlib_audit`, and logged v
 
 ## Upload and publication safety
 
-Only HTTPS Discord attachment paths on the explicit CDN/media allowlist are downloaded; no arbitrary URL, credentials, custom port or redirect. Actual streamed bytes, timeout, MIME, signature and dimensions are checked. Still PNG/JPEG/WebP only, maximum configured 8 MiB and 4096 pixels per side/16 million pixels. An isolated bounded worker decodes and normalizes PNG, stripping metadata. Only two image decodes run concurrently. The older SDK does not expose every modern attachment-limit field; the conservative local cap remains enforced and actual sandbox upload limits still need verification.
+Only HTTPS Discord attachment paths on the explicit CDN/media allowlist are downloaded; no arbitrary URL, credentials, custom port or redirect. Actual streamed bytes, timeout, signature and dimensions are checked. Still PNG/JPG/JPEG/WebP only, maximum configured 8 MiB and 4096 pixels per side, including 4096 x 4096. MIME metadata is optional: common raster aliases, missing/generic binary labels and mismatched raster labels are accepted only when actual bytes pass header checks and full raster decoding. File extensions alone do not establish type. SVG, HTML, executables, animations and unsupported codecs remain rejected. Decoding and PNG normalization run in a short-lived child process with application credentials omitted, so a native decoder crash does not terminate the bot. This is crash containment, not a security sandbox or an absolute native-memory cap; file size, dimensions, five-second timeout and two-decode concurrency bounds remain enforced. JPEG EXIF axis rotation is accepted, and normalized output must also fit the byte limit. The older SDK does not expose every modern attachment-limit field; the conservative local cap remains enforced and actual sandbox upload limits still need verification.
 
 Normalized bytes live in PostgreSQL BYTEA, not Railway's ephemeral disk or a temporary signed URL. A unique publication intent snapshots the approved image revision and reward rules before send. Public posts re-upload the image and include full story/author/reward totals, not the private prompt. Mentions are disabled. Payloads are validated before a send claim.
 
@@ -123,3 +125,11 @@ Only a separate owner authorization may merge/deploy and change production enabl
 ## Rollback
 
 Set `MADLIB_ENABLED=false` in the authorized environment and restart/redeploy only when approved. Disabled mode registers no new commands/intents, starts no feature migration/workers and returns safe unavailable responses for old controls. It does not erase saved stories or obligations. A sent transfer cannot be recalled by disabling a flag. Retain `madlib_` data and reconcile on re-enable; do not reset balances or delete uncertain operations. No legacy feature needs changing to roll this feature back.
+
+## Image and Marketplace checkout repair
+
+No new Railway variable, API credential, dependency upgrade, database schema or price is introduced by this repair. The original rejected image was not supplied, so its exact format and the live DRIP account require owner testing. Standard still PNG, JPG/JPEG and WebP downloads are supported within the stated limits. AVIF, HEIC, animated GIF, SVG and documents are not supported; this is not a claim that every generator export format works. Original-download MIME metadata can be absent or incorrect. The bot verifies the bytes rather than requiring a Canva conversion.
+
+For a saved confirmed_failure / BALANCE_UNKNOWN operation, inspect the existing record after deploying the repair. Use /madlib-admin action:inspect record:<madlib_play:ID>, then /madlib-admin action:retry with the same record, current revision from inspection, and an appropriate evidence/reason. The retry retains that paid-play intent and rechecks balance and identity. Resume opens the same session once payment succeeds. Do not mark it sent, refund it, delete its row or blindly resend an uncertain transfer. Deployment does not automatically replay old failed debits.
+
+Regression tests cover member payload balances (including zero and numeric strings), same-account aliases, unknown versus insufficient balance, the current transfer route and payload, mismatched success receipts, saved-failure retry with competing workers, missing/generic/mismatched MIME, PNG/JPEG/WebP decoding, JPEG EXIF orientation, exact 4096-square images, corrupt decoding, nonimages, unsafe hosts, redirects, size bounds and decode concurrency. No automated test uses production credentials or sends live DRIP transfers. See the actual test report to distinguish executed checks from skipped database tests.

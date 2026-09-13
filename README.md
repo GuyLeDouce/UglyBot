@@ -1,5 +1,11 @@
 # UglyBot
 
+## Squig Mad Libs
+
+See the [Squig Mad Libs owner guide](docs/squig-madlibs.md) for setup, publishing, payment recovery and rollback. On the running UglyBot service, `MADLIB_ENABLED=true` registers `/madlib`, `/madlib-upload`, `/madlib-history` and `/madlib-admin`. An administrator runs `/madlib` to post the PLAY / SHOW panel; it is not posted automatically.
+
+One free play is available every 24 hours; additional confirmed plays cost 1,000 $CHARM by default. Checkout uses the same resolved-member currency-balance parser and primary transfer route as Malformed Marketplace, retaining Mad Libs' durable payment intents and no-blind-retry safeguards. SHOW accepts valid still PNG, JPG/JPEG and WebP downloads based on their decoded contents, including missing/generic or mismatched raster file-type labels. The configured byte limit (8 MiB default) and 4096-pixel-per-side limit still apply. No image-generation API key or new database URL is required.
+
 ## Rewards environment variables
 
 - `PASSIVE_REWARD_START_AT`: optional ISO timestamp for the earliest passive $CHARM accrual start. If unset, each collection starts accruing when its first enabled holder rule was created. Alias: `CHARM_PASSIVE_REWARD_START_AT`.

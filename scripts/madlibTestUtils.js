@@ -2,6 +2,13 @@
 const assert=require('node:assert/strict');
 const {Collection,PermissionsBitField,PermissionFlagsBits,ChannelType,MessageFlagsBitField}=require('discord.js');
 const {EventEmitter}=require('node:events');const core=require('../modules/madlibCore');
+// Execute only this existing pure Marketplace parser. Never require index.js (it starts the bot).
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');
+const parserStart=source.indexOf('function extractDripCurrencyAmountFromPayload(');
+const parserEnd=source.indexOf('\nasync function getDripMemberCurrencyBalance(',parserStart);
+assert(parserStart>=0&&parserEnd>parserStart);
+const extractDripCurrencyAmountFromPayload=vm.runInNewContext('('+source.slice(parserStart,parserEnd)+')');
 const IDS=Object.freeze({guild:'100000000000000001',otherGuild:'100000000000000002',user:'200000000000000001',other:'200000000000000002',bot:'300000000000000001',channel:'1334884237727240267',emoji:'1526597741160169522',role:'400000000000000001',message:'500000000000000001'});
 function harness(file){let count=0;return {async test(name,fn){await fn();count++;console.log(`PASS ${file}: ${name}`);},done(){console.log(`RESULT ${file}: ${count} test groups passed`);return count;}};}
 function errorCode(code){return e=>{assert.equal(e.code,code);return true;};}
@@ -37,4 +44,4 @@ function modelStore(seed){
     async editSession(g,u,id,revision,action,value){await this.owned(g,u,id);core.check(current.revision===revision,'STALE','Stale question.');if(action==='answer'){const q=current.template.questions[current.step];current.answers[q.key]=core.validateAnswer(value,q);current.step++;}else if(action==='back')current.step=Math.max(0,current.step-1);else if(action==='abandon')current.state='cancelled';current.revision++;if(current.step===current.template.questions.length){Object.assign(current,core.render(current.template,current.answers));current.state='completed';current.completed_at=new Date();}return structuredClone(current);},
     async history(g,u){return current?.state==='completed'&&current.guild_id===g&&current.user_id===u?[structuredClone(current)]:[];},read(){return structuredClone(current);},set(s){current=structuredClone(s);}};
 }
-module.exports={assert,harness,errorCode,IDS,fakeDiscord,interaction,session,modelStore,Collection,PermissionsBitField,PermissionFlagsBits,ChannelType};
+module.exports={extractDripCurrencyAmountFromPayload,assert,harness,errorCode,IDS,fakeDiscord,interaction,session,modelStore,Collection,PermissionsBitField,PermissionFlagsBits,ChannelType};

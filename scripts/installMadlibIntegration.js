@@ -27,6 +27,7 @@ const changes=[
   getHolderRules,
   getOwnedTokenIdsForContractMany,
   getMarketplaceSpendableBalance,
+  extractDripCurrencyAmountFromPayload,
   getDripMemberCurrencyBalance,
   collectDripMemberIdCandidates,
   awardDripPoints,
@@ -39,10 +40,17 @@ const changes=[
 function getMarketplaceCommandDeps() {`],
   ["client.on('interactionCreate', async (interaction) => {\n  try {","client.on('interactionCreate', async (interaction) => {\n  try {\n    if (await madlib.handleInteraction(interaction)) return;"],
 ];
+// Accept the earlier merged integration, preserving the original byte-for-byte audit.
+const previousChanges=changes.map(([before,after])=>[before,after.replace('  extractDripCurrencyAmountFromPayload,\n','')]);
 const sha=text=>crypto.createHash('sha256').update(text).digest('hex');
-function reverse(source){let out=source;for(const [before,after] of [...changes].reverse()){if(out.split(after).length!==2)throw new Error('Missing or changed integration hunk.');out=out.replace(after,before);}return out;}
+function reverse(source,hunks=changes){let out=source;for(const [before,after] of [...hunks].reverse()){if(out.split(after).length!==2)throw new Error('Missing or changed integration hunk.');out=out.replace(after,before);}return out;}
 function apply(source){
-  if(source.includes("const madlib = require('./modules/madlib');")){if(sha(reverse(source))!==BASELINE_SHA256)throw new Error('Unexpected already-integrated index.js; review current work rather than overwrite it.');return source;}
+  if(source.includes("const madlib = require('./modules/madlib');")){
+    try {if(sha(reverse(source))===BASELINE_SHA256)return source;} catch (_) {}
+    const original=reverse(source,previousChanges);
+    if(sha(original)!==BASELINE_SHA256)throw new Error('Unexpected already-integrated index.js; review current work rather than overwrite it.');
+    return apply(original);
+  }
   if(sha(source)!==BASELINE_SHA256)throw new Error('index.js baseline changed. Re-review/rebase the additive hunks; never overwrite newer work.');
   let out=source;for(const [before,after] of changes){if(out.split(before).length!==2)throw new Error('Integration anchor is not unique.');out=out.replace(before,after);}return out;
 }

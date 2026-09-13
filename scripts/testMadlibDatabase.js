@@ -1,7 +1,7 @@
 'use strict';
 // Disposable PostgreSQL only. Never import index.js, log into Discord or send live DRIP calls.
 const {Pool}=require('pg');const crypto=require('node:crypto');
-const {assert,harness,errorCode,IDS,Collection,fakeDiscord}=require('./madlibTestUtils');
+const {assert,harness,errorCode,IDS,Collection,fakeDiscord,extractDripCurrencyAmountFromPayload}=require('./madlibTestUtils');
 const core=require('../modules/madlibCore');const {MadlibStore}=require('../modules/madlibStore');
 const {MadlibEconomy}=require('../modules/madlibEconomy');const {MadlibPublishing,marker}=require('../modules/madlibPublishing');
 const templates=require('../modules/madlibTemplates');const run=harness('postgres'),cfg=core.config({});
@@ -24,6 +24,7 @@ async function completed(user=nextUser()){return finish((await begin(store,user)
 async function intent(s,overrides={}){const selected=await store.chooseDraft(IDS.guild,s.user_id,s.id),draft=await store.stage(IDS.guild,s.user_id,s.id,selected.draft.revision,image);return store.publicationIntent(IDS.guild,s.user_id,s.id,draft.revision,{...cfg,...overrides},settings);}
 async function published(s,overrides={}){let p=await intent(s,overrides);p=await store.claimPublication(p.id,p.revision);const mid=String(500000000000000000n+BigInt(++sequence));await store.confirmPublication(p.id,{id:mid,attachments:new Collection([['file',{id:`attachment-${mid}`} ]])},p.lease_id);return store.publication(p.id);}
 function economyDeps(extra={}){return {
+  extractDripCurrencyAmountFromPayload,
   getMarketplaceSpendableBalance:async()=>({ok:true,settings,memberIds:['member-user'],resolvedMember:{id:'member-user'},botMemberId:'member-treasury'}),
   getWalletLinks:async()=>[{verified:true,drip_member_id:'member-user',wallet_address:'0xone'},{verified:true,drip_member_id:'member-user',wallet_address:'0xtwo'}],
   collectDripMemberIdCandidates:m=>[m.id],getDripMemberCurrencyBalance:async()=>10000,clientUserId:()=>IDS.bot,random:()=>0,postAdminSystemLog:async()=>{},
@@ -67,6 +68,19 @@ function economyDeps(extra={}){return {
   });
   await run.test('zero and unknown balances send nothing and leave an inspectable failed session',async()=>{
     for(const balance of [0,null]){const s=await paid();let sends=0;const e=new MadlibEconomy(store,economyDeps({getDripMemberCurrencyBalance:async()=>balance,awardDripPoints:async()=>{sends++;}})),result=await e.execute(`madlib_play:${s.id}`);assert.equal(result.state,'confirmed_failure');assert.equal(sends,0);const op=await store.operation(result.operationId);assert.equal(op.attempt_count,0);assert.equal(op.error_code,balance===0?'INSUFFICIENT_FUNDS':'BALANCE_UNKNOWN');assert.equal((await store.active(IDS.guild,s.user_id)).state,'payment_failed');}
+  });
+  await run.test('BALANCE_UNKNOWN can be retried once on the same intent using Marketplace member balance',async()=>{
+    const s=await paid(),id=`madlib_play:${s.id}`;let sends=0,direct=0;
+    const before=await store.one('SELECT next_free_at FROM madlib_users WHERE guild_id=$1 AND user_id=$2',[IDS.guild,s.user_id]);
+    const broken=new MadlibEconomy(store,economyDeps({getDripMemberCurrencyBalance:async()=>null,awardDripPoints:async()=>{sends++;}}));
+    assert.equal((await broken.execute(id)).code,'BALANCE_UNKNOWN');let op=await store.operation(id);assert.equal(op.attempt_count,0);assert.equal(sends,0);
+    await store.admin(adminArgs('retry',id,op.revision));
+    const fixed=economyDeps({getMarketplaceSpendableBalance:async()=>({ok:true,settings,memberIds:['member-user'],resolvedMember:{id:'member-user',balances:[{currencyId:'test-charm',balance:10000}]},botMemberId:'member-treasury'}),getDripMemberCurrencyBalance:async()=>{direct++;throw Error('404');},awardDripPoints:async(r,ids,n,c,settings,o)=>{sends++;return {usedMemberId:ids[0],usedSenderId:o.senderMemberIdOverride};}});
+    await Promise.all([new MadlibEconomy(store,fixed).execute(id),new MadlibEconomy(other,fixed).execute(id)]);
+    assert.equal(sends,1);assert.equal(direct,0);op=await store.operation(id);assert.equal(op.state,'confirmed_success');assert.equal(op.attempt_count,1);
+    assert.equal((await store.active(IDS.guild,s.user_id)).id,s.id);assert.equal((await store.active(IDS.guild,s.user_id)).state,'active');
+    assert.equal((await store.one('SELECT next_free_at FROM madlib_users WHERE guild_id=$1 AND user_id=$2',[IDS.guild,s.user_id])).next_free_at.getTime(),before.next_free_at.getTime());
+    await assert.rejects(()=>store.admin(adminArgs('retry',id,op.revision)),errorCode('STATE'));assert.equal(await other.claimOperation(id),null);
   });
   await run.test('expired resolving lease can be reclaimed but its former worker cannot arm',async()=>{
     const s=await paid(),id=`madlib_play:${s.id}`,old=await store.claimOperation(id);await store.query("UPDATE madlib_operations SET lease_until=now()-interval '1 second' WHERE id=$1",[id]);await other.recoverStale();const fresh=await other.claimOperation(id);assert(fresh);assert.notEqual(fresh.lease_id,old.lease_id);assert.equal(await store.armOperation(old,{sender:'member-user',recipient:'member-treasury'}),null);const armed=await other.armOperation(fresh,{sender:'member-user',recipient:'member-treasury'});assert(armed);assert.equal(armed.attempt_count,1);

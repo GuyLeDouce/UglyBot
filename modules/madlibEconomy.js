@@ -2,7 +2,7 @@
 const { MadlibError,check } = require('./madlibCore');
 /** Opt-in guard called by the existing awardDripPoints helper only for Mad Libs.
  * One documented route, explicit currency, no alternative payload or credit fallback.
- * https://docs.drip.re/developer/guides/managing-members#transferring-points-between-members
+ * https://docs.drip.re/api-reference/realm-members-balances/transfer-member-balance-of-a-currency
  */
 async function strictTransfer(realmId,memberIds,amount,currencyId,settings,options,transport) {
   const recipients=Array.isArray(memberIds)?memberIds:[memberIds];
@@ -10,11 +10,11 @@ async function strictTransfer(realmId,memberIds,amount,currencyId,settings,optio
   check(options.requireTransfer===true&&/^madlib_(play|reward|refund):/.test(options.context||''),'TRANSFER_CONFIG','Mad Libs must use a scoped transfer context.');
   check(recipients.length===1&&typeof recipients[0]==='string'&&recipients[0]&&sender&&sender!==recipients[0]&&sender!==transport.botDiscordId,'TRANSFER_CONFIG','A single unambiguous sender and recipient are required.');
   check(Number.isSafeInteger(amount)&&amount>0&&currencyId&&realmId&&settings?.drip_api_key,'TRANSFER_CONFIG','The amount, realm, currency, or existing DRIP credentials are not configured.');
-  const url=`https://api.drip.re/api/v1/realm/${encodeURIComponent(realmId)}/members/${encodeURIComponent(sender)}/transfer`;
+  const url=`https://api.drip.re/api/v1/realms/${encodeURIComponent(realmId)}/members/${encodeURIComponent(sender)}/transfer`;
   let res;
   try {
     res=await transport.fetchWithTimeout(url,{timeoutMs:15000,timeout:15000,size:65536,redirect:'error',method:'PATCH',
-      headers:transport.buildDripHeaders(settings,true),body:JSON.stringify({tokens:amount,recipientId:recipients[0],realmPointId:String(currencyId)})});
+      headers:transport.buildDripHeaders(settings,true),body:JSON.stringify({amount,recipientId:recipients[0],currencyId:String(currencyId)})});
   } catch (_) { throw new MadlibError('TRANSFER_UNCERTAIN','Payment outcome is unknown and needs admin review.'); }
   if(!res.ok) {
     res.body?.destroy?.();
@@ -27,7 +27,12 @@ async function strictTransfer(realmId,memberIds,amount,currencyId,settings,optio
   let data={};
   try {data=await res.json();}catch(_){ /* A confirmed synchronous 2xx may omit its optional body. */ }
   if(data?.success===false||data?.error)throw new MadlibError('TRANSFER_UNCERTAIN','DRIP returned a conflicting success response; admin review is required.');
-  const ref=data?.transactionId||data?.data?.transactionId||data?.id||null;
+  // Check any echoed identity; a generic response id is not a proven transaction id.
+  const receipt=data?.data&&typeof data.data==='object'?data.data:data;
+  for(const [key,expected] of [['senderId',String(sender)],['recipientId',recipients[0]],['currencyId',String(currencyId)],['amount',amount]]) {
+    if(receipt?.[key]!=null&&receipt[key]!==expected)throw new MadlibError('TRANSFER_UNCERTAIN','DRIP returned a mismatched transfer receipt; admin review is required.');
+  }
+  const ref=data?.transactionId||data?.data?.transactionId||null;
   return {usedMemberId:recipients[0],usedSenderId:String(sender),endpoint:'/transfer',method:'PATCH',transactionRef:typeof ref==='string'?ref.slice(0,200):null};
 }
 function canonicalMember(spendable,links,collectIds) {
@@ -53,8 +58,13 @@ class MadlibEconomy {
     const sender=op.kind==='debit'?member:bot,recipient=op.kind==='debit'?bot:member;
     check((!op.sender_id||op.sender_id===sender)&&(!op.recipient_id||op.recipient_id===recipient),'IDENTITY_CHANGED','The saved sender or recipient changed. Admin review is required.');
     if(op.kind==='debit') {
-      // Spendable is an identity/config resolver, NOT a numeric balance.
-      const balance=await d.getDripMemberCurrencyBalance(op.realm_id,[member],op.currency_id,settings);
+      // Match Marketplace: parse the fresh resolved member before trying direct GETs.
+      // Some DRIP versions return balances through member search, not /balance.
+      check(typeof d.extractDripCurrencyAmountFromPayload==='function','BALANCE_CONFIG','The Marketplace balance parser was not connected. Deploy the complete Mad Libs fix.');
+      const embedded=d.extractDripCurrencyAmountFromPayload(spendable.resolvedMember||null,op.currency_id);
+      // canonicalMember above verified these aliases refer to the same account.
+      const ids=[...new Set([member,...(spendable.memberIds||[]).map(String)])];
+      const balance=embedded!=null?embedded:await d.getDripMemberCurrencyBalance(op.realm_id,ids,op.currency_id,settings);
       check(typeof balance==='number'&&Number.isFinite(balance)&&balance>=0,'BALANCE_UNKNOWN','Your $CHARM balance could not be confirmed. No charge was sent.');
       check(balance>=op.amount,'INSUFFICIENT_FUNDS',`You need ${op.amount.toLocaleString('en-US')} $CHARM. No charge was sent.`);
     }

@@ -1,9 +1,12 @@
 'use strict';
 const path=require('node:path');
-const {Worker}=require('node:worker_threads');
+const {fork}=require('node:child_process');
 const fetch=require('node-fetch');
 const {check,MadlibError}=require('./madlibCore');
-const MIME=new Set(['image/png','image/jpeg','image/webp']);
+// Attachment MIME is optional. File signatures and decoding establish the real format.
+const MIME=new Set(['image/png','image/x-png','image/jpeg','image/jpg','image/pjpeg','image/jfif','image/webp','image/x-webp','application/octet-stream','binary/octet-stream','application/binary','']);
+const MAX_PIXELS=4096*4096;
+const typeHint=a=>String(a?.contentType??a?.content_type??'').split(';')[0].trim().toLowerCase();
 function dimensions(bytes) {
   check(Buffer.isBuffer(bytes)&&bytes.length>=24,'IMAGE','That file is not a supported image.');let type,width,height;
   if(bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))){
@@ -21,11 +24,11 @@ function dimensions(bytes) {
     else if(tag==='VP8 '){check(bytes.length>=30&&bytes.subarray(23,26).equals(Buffer.from([157,1,42])),'IMAGE','Invalid WebP frame.');width=bytes.readUInt16LE(26)&16383;height=bytes.readUInt16LE(28)&16383;}
     else if(tag==='VP8L'){check(bytes.length>=25&&bytes[20]===47,'IMAGE','Invalid lossless WebP frame.');const bits=bytes.readUInt32LE(21);width=(bits&16383)+1;height=((bits>>>14)&16383)+1;}
   }
-  check(type&&Number.isInteger(width)&&Number.isInteger(height)&&width>=32&&height>=32&&width<=4096&&height<=4096&&width*height<=16000000,'IMAGE','Use a still PNG, JPEG or WebP, 32–4096 pixels per side and at most 16 million pixels.');return {media_type:type,width,height};
+  check(type&&Number.isInteger(width)&&Number.isInteger(height)&&width>=32&&height>=32&&width<=4096&&height<=4096&&width*height<=MAX_PIXELS,'IMAGE','Use a still PNG, JPEG or WebP, 32–4096 pixels per side including 4096 × 4096.');return {media_type:type,width,height};
 }
 function validateAttachment(a,maxBytes=8388608){
   check(a&&typeof a.url==='string'&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=maxBytes,'IMAGE_SIZE',`Attach one image no larger than ${Math.floor(maxBytes/1048576)} MiB.`);
-  check(MIME.has(String(a.contentType||'').split(';')[0].toLowerCase()),'IMAGE_TYPE','Upload a PNG, JPEG or WebP as a Discord attachment.');
+  check(MIME.has(typeHint(a)),'IMAGE_TYPE','Attach a still PNG, JPG/JPEG or WebP image (not a webpage, SVG, animation, or document).');
   let u;try{u=new URL(a.url);}catch(_){throw new MadlibError('IMAGE_URL','Invalid Discord attachment URL.');}
   // Slash-command uploads can use /ephemeral-attachments/ rather than /attachments/.
   // Keep the exact Discord hosts and signed query string; do not rewrite paths or follow redirects.
@@ -35,12 +38,30 @@ let activeDecodes=0;
 async function normalizeImage(bytes,info,maxBytes){
   check(activeDecodes<2,'IMAGE_BUSY','Two images are already being checked. Try this upload again in a moment.');activeDecodes++;
   try{return await new Promise((resolve,reject)=>{
-    const w=new Worker(path.join(__dirname,'madlibImageWorker.js'),{workerData:{bytes,info,maxBytes},resourceLimits:{maxOldGenerationSizeMb:128}});let done=false;
-    const finish=(err,data)=>{if(done)return;done=true;clearTimeout(timer);w.terminate().catch(()=>{});if(err)reject(err);else resolve({...info,media_type:'image/png',bytes:Buffer.from(data)});};
-    const timer=setTimeout(()=>finish(new MadlibError('IMAGE','Image decoding timed out. Try a smaller still image.')),5000);
-    w.once('message',m=>m.ok?finish(null,m.bytes):finish(new MadlibError('IMAGE','That image could not be decoded safely. Try re-exporting it as PNG.')));
-    w.once('error',()=>finish(new MadlibError('IMAGE','That image could not be decoded safely.')));
-    w.once('exit',code=>{if(!done)finish(new MadlibError('IMAGE',`Image checker exited before completion (${code}).`));});
+    // Native decoder crashes affect worker threads' entire process. Use a child instead.
+    // This is crash containment, not a security sandbox; all input bounds still apply.
+    const child=fork(path.join(__dirname,'madlibImageWorker.js'),[],{
+      execArgv:['--max-old-space-size=128'],serialization:'advanced',stdio:['ignore','ignore','ignore','ipc'],
+      // No application credentials or inherited NODE_OPTIONS are needed by this decoder.
+      env:{PATH:process.env.PATH||'',LANG:'C.UTF-8'},
+    });
+    let result=null,failure=null,settled=false;
+    const terminate=()=>{if(!child.killed)child.kill('SIGKILL');};
+    const timer=setTimeout(()=>{failure=new MadlibError('IMAGE','Image decoding timed out. Try a smaller still image.');terminate();},5000);
+    child.once('message',m=>{
+      const valid=m?.ok&&Buffer.isBuffer(m.bytes)&&m.bytes.length>0&&m.bytes.length<=maxBytes&&
+        ((m.width===info.width&&m.height===info.height)||(info.media_type==='image/jpeg'&&m.width===info.height&&m.height===info.width));
+      if(valid)result={media_type:'image/png',width:m.width,height:m.height,bytes:m.bytes};
+      else failure=new MadlibError(m?.code==='IMAGE_SIZE'?'IMAGE_SIZE':'IMAGE',m?.code==='IMAGE_SIZE'?'This image becomes too large when prepared for Discord. Upload a smaller image.':'That file could not be decoded as a still PNG, JPG/JPEG or WebP image.');
+      terminate();
+    });
+    child.once('error',()=>{failure=new MadlibError('IMAGE','The image checker could not start. Try again in a moment.');terminate();});
+    child.once('close',()=>{
+      if(settled)return;settled=true;clearTimeout(timer);
+      if(failure)reject(failure);else if(result)resolve(result);else reject(new MadlibError('IMAGE','That image could not be decoded safely. Try another downloaded image.'));
+    });
+    try {child.send({bytes,info,maxBytes},error=>{if(error){failure=new MadlibError('IMAGE','The image could not be sent to the checker.');terminate();}});}
+    catch (_) {failure=new MadlibError('IMAGE','The image could not be sent to the checker.');terminate();}
   });}finally{activeDecodes--;}
 }
 async function downloadAttachment(attachment,maxBytes=8388608,{fetcher=fetch,decode=normalizeImage}={}){
@@ -49,7 +70,8 @@ async function downloadAttachment(attachment,maxBytes=8388608,{fetcher=fetch,dec
     res=await fetcher(url,{signal:abort.signal,redirect:'manual',size:maxBytes,timeout:12000});check(res.status===200,'IMAGE_DOWNLOAD','Discord could not supply the attachment. Upload it again.');
     const contentLength=Number(res.headers.get('content-length')||0);check(Number.isFinite(contentLength)&&contentLength<=maxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');
     const chunks=[];let total=0;for await(const chunk of res.body){total+=chunk.length;check(total<=maxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');chunks.push(chunk);}
-    const bytes=Buffer.concat(chunks),info=dimensions(bytes);check(info.media_type===attachment.contentType.split(';')[0].toLowerCase(),'IMAGE_TYPE','The file signature does not match the declared image type.');return await decode(bytes,info,maxBytes);
+    // The declared raster MIME can be wrong; headers plus full decoding prove the type.
+    const bytes=Buffer.concat(chunks),info=dimensions(bytes);return await decode(bytes,info,maxBytes);
   }catch(e){if(e instanceof MadlibError)throw e;throw new MadlibError('IMAGE_DOWNLOAD','The upload could not be downloaded safely. Attach the image again.');}
   finally{clearTimeout(timer);abort.abort();res?.body?.destroy?.();}
 }
