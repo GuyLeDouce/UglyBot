@@ -41,6 +41,7 @@ const marketplaceCommand = require('./modules/marketplaceCommand');
 const mawEvent = require('./modules/mawEvent');
 const bountyVault = require('./modules/bountyVault');
 const squigDuels = require('./modules/squigDuels');
+const madlib = require('./modules/madlib');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
   loadMawRankingIndex,
@@ -290,7 +291,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    ...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : []),
   ]
 });
 
@@ -1280,6 +1282,7 @@ function buildSlashCommands() {
     bountyVault.buildBountyVaultSlashCommand().toJSON(),
     bountyVault.buildBountyPoolSlashCommand().toJSON(),
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
+    ...madlib.buildMadlibSlashCommands(),
   ];
 }
 
@@ -1339,6 +1342,8 @@ client.once(Events.ClientReady, async (c) => {
       console.warn('⚠️ Portal auto-start failed:', err.message);
     }
   }
+  // Mad Libs awaits its own schema; existing ready jobs above are not delayed.
+  Promise.resolve(madlib.startMadlibWorkers()).catch(() => console.warn('[MadLibs] Worker startup failed.'));
 });
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
@@ -6913,6 +6918,16 @@ function resolveConfiguredDripSenderMemberId() {
 }
 
 async function awardDripPoints(realmId, memberIds, tokens, currencyId, settings, options = {}) {
+  // Opt-in only: preserve all legacy callers and their original fallback behavior.
+  // Mad Libs must not try currency-less payloads or another route after a failed debit.
+  if (options.madlibStrictTransfer === true) {
+    return madlib.strictTransfer(realmId, memberIds, tokens, currencyId, settings, options, {
+      fetchWithTimeout,
+      buildDripHeaders,
+      defaultSender: resolveConfiguredDripSenderMemberId(),
+      botDiscordId: client.user?.id || DISCORD_CLIENT_ID,
+    });
+  }
   const amount = Number(tokens);
   const recipientCandidates = collectUniqueDripMemberIds(Array.isArray(memberIds) ? memberIds : [memberIds]);
   if (!recipientCandidates.length) {
@@ -7660,6 +7675,24 @@ bountyVault.initBountyVault({
   squigsChain: SQUIGS_CHAIN,
 });
 
+madlib.initMadlib({
+  client,
+  clientUserId: () => client.user?.id || DISCORD_CLIENT_ID || null,
+  madlibPool: prizesPool,
+  getWalletLinks,
+  getGuildSettings,
+  getHolderRules,
+  getOwnedTokenIdsForContractMany,
+  getMarketplaceSpendableBalance,
+  getDripMemberCurrencyBalance,
+  collectDripMemberIdCandidates,
+  awardDripPoints,
+  postAdminSystemLog,
+  isAdmin,
+  squigsContract: SQUIGS_CONTRACT,
+  squigsChain: SQUIGS_CHAIN,
+});
+
 function getMarketplaceCommandDeps() {
   return {
     clientUserId: client.user?.id || DISCORD_CLIENT_ID || null,
@@ -7675,6 +7708,7 @@ function getMarketplaceCommandDeps() {
 
 client.on('interactionCreate', async (interaction) => {
   try {
+    if (await madlib.handleInteraction(interaction)) return;
     if (interaction.isChatInputCommand()) {
       if (await squigDuels.handleCommand(interaction)) {
         return;
