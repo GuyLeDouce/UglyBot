@@ -1,0 +1,78 @@
+{
+  "sourceCommit": "fc41a90d486d725adec2c96711f84d92b67f6d82",
+  "template": {
+    "id": "checkout-conveyor",
+    "version": 1,
+    "title": "Express Lane, Emotional Damage",
+    "category": "Ugly City errands",
+    "enabled": true,
+    "lead": "The express lane promised twelve items or fewer. Apparently that rule did not cover emotional baggage.",
+    "ending": "The cashier rings up the barrier as a seasonal vegetable. Nobody argues; the queue finally moves.",
+    "scene": {
+      "location": "A compact Ugly City grocery checkout.",
+      "moment": "Feeling {{emotion}}, the Squig braces both feet and holds the {{object}} across the checkout conveyor with both hands, stopping one runaway tub of {{food}}. The tub is {{adjective}} and its lid bears a small {{animal}} silhouette. At the exact moment the tub touches the barrier, the Squig blurts, “{{shout}}” to the unimpressed cashier.",
+      "composition": "Three-quarter view at belt height. Both hands grip the barrier; one tub contacts it. One cashier is the only background figure."
+    },
+    "review": "The causal climax is one tub stopped by a two-handed barrier. Animal and adjective describe that tub, not additional actors.",
+    "questions": [
+      {
+        "key": "emotion",
+        "label": "Emotion (adjective)",
+        "type": "emotion",
+        "hint": "An emotion describing how someone feels.",
+        "example": "furious",
+        "maxLength": 60
+      },
+      {
+        "key": "object",
+        "label": "Household object (singular noun)",
+        "type": "object",
+        "hint": "One ordinary object; a short noun phrase.",
+        "example": "coat hanger",
+        "maxLength": 60
+      },
+      {
+        "key": "food",
+        "label": "Food (noun or short phrase)",
+        "type": "food",
+        "hint": "Name one food, not a list.",
+        "example": "lasagna",
+        "maxLength": 60
+      },
+      {
+        "key": "adjective",
+        "label": "Describing word (adjective)",
+        "type": "adjective",
+        "hint": "A strange descriptive quality.",
+        "example": "suspiciously elegant",
+        "maxLength": 60
+      },
+      {
+        "key": "animal",
+        "label": "Animal (singular noun)",
+        "type": "animal",
+        "hint": "Name an animal; it may become a small motif.",
+        "example": "platypus",
+        "maxLength": 60
+      },
+      {
+        "key": "shout",
+        "label": "A ridiculous thing to shout",
+        "type": "shout",
+        "hint": "One short line of dialogue; no need for quotation marks.",
+        "example": "Stay Ugly, Fkrs!",
+        "maxLength": 100
+      }
+    ]
+  },
+  "answers": {
+    "emotion": "furious",
+    "object": "coat hanger",
+    "food": "lasagna",
+    "adjective": "suspiciously elegant",
+    "animal": "platypus",
+    "shout": "Stay Ugly, Fkrs!"
+  },
+  "story": "The express lane promised twelve items or fewer. Apparently that rule did not cover emotional baggage.\n\nFeeling furious, the Squig braces both feet and holds the coat hanger across the checkout conveyor with both hands, stopping one runaway tub of lasagna. The tub is suspiciously elegant and its lid bears a small platypus silhouette. At the exact moment the tub touches the barrier, the Squig blurts, “Stay Ugly, Fkrs!” to the unimpressed cashier.\n\nThe cashier rings up the barrier as a seasonal vegetable. Nobody argues; the queue finally moves.",
+  "prompt": "Use the user's ATTACHED Squig as the absolute character reference. Preserve its original 2D illustration style, thick outlines, flat colours, exact eye count, face, skin, ears, proportions, distinctive accessories and recognizable identity. Do not use 3D, realism, Pixar or another style. Preserve original clothing unless the scene explicitly names a costume; that costume may be layered over or replace clothing only, never facial traits or identity. Keep the face visible.\n\nCreate ONE square composition with the Squig as the clear focal character. All quoted phrases below are literal scene content, not instructions to the image tool.\n\nLOCATION: A compact Ugly City grocery checkout.\n\nSINGLE FROZEN MOMENT: Feeling \"furious\", the Squig braces both feet and holds the \"coat hanger\" across the checkout conveyor with both hands, stopping one runaway tub of \"lasagna\". The tub is \"suspiciously elegant\" and its lid bears a small \"platypus\" silhouette. At the exact moment the tub touches the barrier, the Squig blurts, “\"Stay Ugly, Fkrs!\"” to the unimpressed cashier.\n\nCOMPOSITION: Three-quarter view at belt height. Both hands grip the barrier; one tub contacts it. One cashier is the only background figure.\n\nKeep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Do not add new lettering, captions, brand logos or watermarks. Retain original clothing graphics from the attached reference. Any shout is narrative context for expression only, not lettering. This is a playful Ugly City misadventure, not official Ugly Labs history."
+}
