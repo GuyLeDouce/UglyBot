@@ -418,10 +418,25 @@ function eventSeller(event) {
 }
 
 function rpcUrl(cfg = getConfig()) {
-  const explicit = String(process.env.TRICK_OR_TREAT_ETH_RPC_URL || process.env.ETH_RPC_URL || process.env.ALCHEMY_RPC_URL || '').trim();
-  if (explicit) return explicit;
-  const key = String(process.env.ALCHEMY_API_KEY || '').trim();
-  return key ? `https://eth-mainnet.g.alchemy.com/v2/${key}` : '';
+  const dedicated = String(process.env.TRICK_OR_TREAT_ETH_RPC_URL || '').trim();
+  if (dedicated) return dedicated;
+
+  const bounty = String(
+    process.env.BOUNTY_ETHEREUM_RPC_URL ||
+    process.env.BOUNTY_ETH_RPC_URL ||
+    ''
+  ).trim();
+  if (bounty) return bounty;
+
+  const alchemyRpc = String(process.env.ALCHEMY_RPC_URL || '').trim();
+  if (alchemyRpc) return alchemyRpc;
+
+  const alchemyKey = String(process.env.ALCHEMY_API_KEY || '').trim();
+  if (alchemyKey) return `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}`;
+
+  // Keep the generic ETH_RPC_URL only as a last-resort fallback. Some deployments
+  // use it for legacy providers with exhausted quotas, while Alchemy is healthy.
+  return String(process.env.ETH_RPC_URL || '').trim();
 }
 
 async function verifySaleOnChain(event, tokenId, buyer, seller, cfg = getConfig()) {
@@ -429,8 +444,26 @@ async function verifySaleOnChain(event, tokenId, buyer, seller, cfg = getConfig(
   if (!txHash) throw new Error('The sale event did not include a verifiable transaction hash.');
   const url = rpcUrl(cfg);
   if (!url) throw new Error('An Ethereum RPC is required to verify Trick transactions.');
-  const provider = new ethers.JsonRpcProvider(url);
-  const [receipt, head] = await Promise.all([provider.getTransactionReceipt(txHash), provider.getBlockNumber()]);
+  // Ethereum mainnet is fixed for Squigs. Pin the network so ethers does not
+  // repeatedly retry network detection when an upstream RPC returns an error.
+  const provider = new ethers.JsonRpcProvider(url, 1, { staticNetwork: true });
+  let receipt;
+  let head;
+  try {
+    [receipt, head] = await Promise.all([
+      provider.getTransactionReceipt(txHash),
+      provider.getBlockNumber(),
+    ]);
+  } catch (err) {
+    const status = err?.info?.responseStatus || err?.status || err?.code || '';
+    const message = String(err?.shortMessage || err?.message || err || '');
+    const safeMessage = message
+      .replace(/https?:\/\/[^\s)"']+/g, '[rpc-url-redacted]')
+      .slice(0, 220);
+    throw new Error(
+      `Ethereum RPC verification failed${status ? ` (${status})` : ''}: ${safeMessage || 'provider unavailable'}`
+    );
+  }
   if (!receipt || receipt.status !== 1) throw new Error('The sale transaction is missing or unsuccessful.');
   const confirmations = Math.max(0, Number(head) - Number(receipt.blockNumber) + 1);
   if (confirmations < cfg.minConfirmations) throw new Error(`The purchase has only ${confirmations} confirmation(s). Try again shortly.`);
