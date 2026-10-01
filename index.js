@@ -42,6 +42,7 @@ const mawEvent = require('./modules/mawEvent');
 const bountyVault = require('./modules/bountyVault');
 const squigDuels = require('./modules/squigDuels');
 const madlib = require('./modules/madlib');
+const trickOrTreat = require('./modules/trickOrTreat');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
   loadMawRankingIndex,
@@ -807,6 +808,9 @@ async function setWalletLink(guildId, discordId, walletAddress, verified = false
            updated_at = NOW()`,
       [guildId, discordId, walletAddress, verified, dripMemberId]
     );
+    await trickOrTreat.recordWalletLinkEvent(guildId, discordId, walletAddress, true).catch((err) =>
+      console.warn('[TrickOrTreat] wallet-link audit failed:', err.message)
+    );
   } catch (err) {
     await postAdminSystemLog({
       guildId,
@@ -929,6 +933,12 @@ async function getWalletOwnerLink(guildId, walletAddress) {
 
 async function reassignWalletLink(guildId, discordId, walletAddress, verified = false, dripMemberId = null) {
   try {
+    const previousOwner = await getWalletOwnerLink(guildId, walletAddress).catch(() => null);
+    if (previousOwner?.discord_id && String(previousOwner.discord_id) !== String(discordId)) {
+      await trickOrTreat.recordWalletLinkEvent(guildId, previousOwner.discord_id, walletAddress, false).catch((err) =>
+        console.warn('[TrickOrTreat] wallet-reassign audit failed:', err.message)
+      );
+    }
     await holdersPool.query(
       `DELETE FROM wallet_links WHERE guild_id = $1 AND wallet_address = $2 AND discord_id <> $3`,
       [guildId, walletAddress, discordId]
@@ -984,6 +994,9 @@ async function verifyUserWalletLinks(guildId, discordId, dripMemberId = null) {
 
 async function deleteWalletLink(guildId, discordId, walletAddress) {
   try {
+    await trickOrTreat.recordWalletLinkEvent(guildId, discordId, walletAddress, false).catch((err) =>
+      console.warn('[TrickOrTreat] wallet-unlink audit failed:', err.message)
+    );
     const { rowCount } = await holdersPool.query(
       `DELETE FROM wallet_links WHERE guild_id = $1 AND discord_id = $2 AND wallet_address = $3`,
       [guildId, discordId, walletAddress]
@@ -1283,6 +1296,7 @@ function buildSlashCommands() {
     bountyVault.buildBountyPoolSlashCommand().toJSON(),
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
     ...madlib.buildMadlibSlashCommands(),
+    trickOrTreat.buildSlashCommand().toJSON(),
   ];
 }
 
@@ -1344,6 +1358,7 @@ client.once(Events.ClientReady, async (c) => {
   }
   // Mad Libs awaits its own schema; existing ready jobs above are not delayed.
   Promise.resolve(madlib.startMadlibWorkers()).catch(() => console.warn('[MadLibs] Worker startup failed.'));
+  Promise.resolve(trickOrTreat.ensureTables()).catch((err) => console.warn('[TrickOrTreat] schema startup failed:', err.message));
 });
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
@@ -7675,6 +7690,17 @@ bountyVault.initBountyVault({
   squigsChain: SQUIGS_CHAIN,
 });
 
+trickOrTreat.initTrickOrTreat({
+  client,
+  trickOrTreatPool: prizesPool,
+  getWalletLinks,
+  getOwnedSquigsReloadedTokenIds,
+  postAdminSystemLog,
+  isAdmin,
+  squigsContract: SQUIGS_CONTRACT,
+  squigsChain: SQUIGS_CHAIN,
+});
+
 madlib.initMadlib({
   client,
   clientUserId: () => client.user?.id || DISCORD_CLIENT_ID || null,
@@ -7720,6 +7746,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await bountyVault.handleCommand(interaction)) {
+        return;
+      }
+
+      if (await trickOrTreat.handleCommand(interaction)) {
         return;
       }
 
@@ -8762,6 +8792,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await bountyVault.handleComponent(interaction)) {
+        return;
+      }
+
+      if (await trickOrTreat.handleButton(interaction)) {
         return;
       }
 
@@ -10342,6 +10376,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (await bountyVault.handleModalSubmit(interaction)) {
+        return;
+      }
+
+      if (await trickOrTreat.handleModalSubmit(interaction)) {
         return;
       }
 
