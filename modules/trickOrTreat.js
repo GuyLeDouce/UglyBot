@@ -320,7 +320,7 @@ async function getActiveSquigListings(wallet, cfg = getConfig()) {
   const matches = [];
   let pages = 0;
   do {
-    const params = new URLSearchParams({ limit: '200', sort_by: 'START_TIME', sort_direction: 'desc' });
+    const params = new URLSearchParams({ limit: '100', sort_by: 'START_TIME', sort_direction: 'desc' });
     if (next) params.set('after', next);
     const url = `https://api.opensea.io/api/v2/account/${wallet}/listings?${params.toString()}`;
     const payload = await fetchJson(url, cfg);
