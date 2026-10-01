@@ -462,6 +462,7 @@ function publicPanel() {
           '🎟️ **Every verified Trick or Treat = 1 Halloween entry.**\n\n' +
           'No holder-size multiplier. No Trick cap. Just show up, hold ugly, and hunt.'
         )
+        .setImage('https://i.imgur.com/JSXZmzh.png')
         .setFooter({ text: 'Stay Ugly. 🎃' }),
     ],
     components: [
