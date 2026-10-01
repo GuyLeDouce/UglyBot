@@ -7694,6 +7694,7 @@ trickOrTreat.initTrickOrTreat({
   client,
   trickOrTreatPool: prizesPool,
   getWalletLinks,
+  getOwnedTokenIdsForContractMany,
   getOwnedSquigsReloadedTokenIds,
   postAdminSystemLog,
   isAdmin,
