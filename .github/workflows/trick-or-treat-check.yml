@@ -1,0 +1,34 @@
+name: Trick or Treat checks
+
+on:
+  pull_request:
+    paths:
+      - 'modules/trickOrTreat.js'
+      - 'scripts/testTrickOrTreatLogic.js'
+      - 'index.js'
+      - 'package.json'
+      - 'docs/trick-or-treat.md'
+      - '.github/workflows/trick-or-treat-check.yml'
+  push:
+    branches:
+      - feature/october-trick-or-treat
+    paths:
+      - 'modules/trickOrTreat.js'
+      - 'scripts/testTrickOrTreatLogic.js'
+      - 'index.js'
+      - 'package.json'
+      - '.github/workflows/trick-or-treat-check.yml'
+
+jobs:
+  logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:trick-or-treat
+      - run: node --check modules/trickOrTreat.js
+      - run: node --check index.js
