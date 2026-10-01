@@ -1,5 +1,13 @@
 # UglyBot
 
+## Squigs Trick or Treat — October 2026
+
+UglyBot includes an opt-in October **Trick or Treat** event. Holders manually claim one daily 🍬 Treat when they hold at least one Squigs Reloaded NFT and have no active OpenSea Squigs listings across their event wallets. Every verified secondary purchase can earn one 👻 Trick, with **no Trick cap**. Each Treat and Trick is one Halloween draw entry.
+
+The event is tracked per Discord user across all linked/event wallets, preserves wallet association history to prevent unlink/relink bypasses, verifies Trick purchases against OpenSea sale events plus the Ethereum transaction receipt, and keeps draw/export data in PostgreSQL.
+
+See [docs/trick-or-treat.md](docs/trick-or-treat.md) for configuration, rollout, verification, anti-abuse behavior, listing-source limitations, admin commands and draw auditing.
+
 ## Squig Mad Libs
 
 **Simple menus and posts:** The main panel explains the word game, image-prompt workflow and privacy until Publish. Public creations show their author and an invitation to react if it is UGLY, without reward rules or accounting totals. Rewards still run unchanged. [Copy update and rollout](docs/squig-madlibs-simple-copy.md).
