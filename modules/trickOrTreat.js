@@ -25,6 +25,11 @@ const TRICK_URL_FIELD = 'tot_trick_url';
 
 let deps = null;
 let schemaPromise = null;
+const listingCache = new Map();
+let nextOpenSeaRequestAt = 0;
+const OPENSEA_MIN_INTERVAL_MS = Math.max(250, Number(process.env.TRICK_OR_TREAT_OPENSEA_INTERVAL_MS || 1200));
+const OPENSEA_LISTING_CACHE_MS = Math.max(0, Number(process.env.TRICK_OR_TREAT_LISTING_CACHE_MS || 45000));
+const OPENSEA_MAX_RETRIES = Math.max(1, Math.min(8, Number(process.env.TRICK_OR_TREAT_OPENSEA_RETRIES || 5)));
 
 function initTrickOrTreat(injected = {}) {
   deps = injected || {};
@@ -266,18 +271,51 @@ function openSeaHeaders(cfg) {
   return { accept: 'application/json', 'x-api-key': cfg.openSeaApiKey };
 }
 
+function retryAfterMs(headerValue) {
+  if (!headerValue) return 0;
+  const numeric = Number(headerValue);
+  if (Number.isFinite(numeric)) return Math.max(0, numeric * 1000);
+  const date = Date.parse(String(headerValue));
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
+}
+
+async function waitForOpenSeaSlot() {
+  const now = Date.now();
+  const waitMs = Math.max(0, nextOpenSeaRequestAt - now);
+  nextOpenSeaRequestAt = Math.max(now, nextOpenSeaRequestAt) + OPENSEA_MIN_INTERVAL_MS;
+  if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
 async function fetchJson(url, cfg, timeoutMs = 12000) {
-  const res = await fetch(url, { headers: openSeaHeaders(cfg), timeout: timeoutMs });
-  if (!res.ok) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= OPENSEA_MAX_RETRIES; attempt++) {
+    await waitForOpenSeaSlot();
+    const res = await fetch(url, { headers: openSeaHeaders(cfg), timeout: timeoutMs });
+    if (res.ok) return res.json();
+
     const body = await res.text().catch(() => '');
     const err = new Error(`OpenSea API returned ${res.status}: ${body.slice(0, 180)}`);
     err.status = res.status;
-    throw err;
+    lastError = err;
+
+    if (res.status !== 429 && res.status < 500) throw err;
+    if (attempt >= OPENSEA_MAX_RETRIES) break;
+
+    const serverDelay = retryAfterMs(res.headers?.get?.('retry-after'));
+    const exponential = Math.min(30000, 1500 * (2 ** (attempt - 1)));
+    const delay = Math.max(serverDelay, exponential);
+    nextOpenSeaRequestAt = Math.max(nextOpenSeaRequestAt, Date.now() + delay);
   }
-  return res.json();
+  throw lastError || new Error('OpenSea API request failed.');
 }
 
 async function getActiveSquigListings(wallet, cfg = getConfig()) {
+  const cacheKey = `${cfg.chain}:${cfg.contract}:${wallet}`;
+  const cached = listingCache.get(cacheKey);
+  if (cached && Date.now() - cached.at <= OPENSEA_LISTING_CACHE_MS) {
+    return cached.listings.map((x) => ({ ...x }));
+  }
+
   let next = null;
   const matches = [];
   let pages = 0;
@@ -300,6 +338,7 @@ async function getActiveSquigListings(wallet, cfg = getConfig()) {
     pages++;
   } while (next && pages < 10);
   if (next) throw new Error('OpenSea listing pagination exceeded the safety limit; eligibility was not determined.');
+  listingCache.set(cacheKey, { at: Date.now(), listings: matches.map((x) => ({ ...x })) });
   return matches;
 }
 
@@ -416,6 +455,13 @@ async function verifySaleOnChain(event, tokenId, buyer, seller, cfg = getConfig(
 
 async function ownedTokenIds(wallets) {
   if (!wallets.length) return [];
+  const cfg = getConfig();
+  if (typeof deps.getOwnedTokenIdsForContractMany === 'function') {
+    return deps.getOwnedTokenIdsForContractMany(wallets, cfg.contract, cfg.chain, {
+      concurrency: 2,
+      suppressErrors: false,
+    });
+  }
   return deps.getOwnedSquigsReloadedTokenIds(wallets);
 }
 
