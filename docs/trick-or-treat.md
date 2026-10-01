@@ -90,6 +90,18 @@ The draw uses each user's literal `Treats + Tricks` count as weight. There is no
 
 A 32-byte random seed plus the complete entry snapshot are persisted. Winner selection is deterministic from that seed so a completed draw can be audited/replayed.
 
+### Provider throttling
+
+Trick or Treat now rate-limits its OpenSea requests internally and retries HTTP 429 / server errors with exponential backoff. Active-listing results are cached briefly per wallet to reduce repeated API pressure during bursts of claims.
+
+Optional tuning:
+
+- `TRICK_OR_TREAT_OPENSEA_INTERVAL_MS` — minimum spacing between OpenSea requests. Default `1200`.
+- `TRICK_OR_TREAT_LISTING_CACHE_MS` — active-listing cache duration per wallet. Default `45000`.
+- `TRICK_OR_TREAT_OPENSEA_RETRIES` — maximum OpenSea request attempts. Default `5`.
+
+Ownership checks for this event are intentionally restricted to the configured Squigs chain instead of probing the same contract on Base/Abstract. This avoids irrelevant RPC startup/errors from non-Squigs chains.
+
 ## Environment variables
 
 Required for live verification:
