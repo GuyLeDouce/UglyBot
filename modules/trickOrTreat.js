@@ -313,7 +313,9 @@ async function getActiveSquigListings(wallet, cfg = getConfig()) {
   const cacheKey = `${cfg.chain}:${cfg.contract}:${wallet}`;
   const cached = listingCache.get(cacheKey);
   if (cached && Date.now() - cached.at <= OPENSEA_LISTING_CACHE_MS) {
-    return cached.listings.map((x) => ({ ...x }));
+    return cached.listings
+      .filter((x) => !x.expiresAt || x.expiresAt > Date.now())
+      .map((x) => ({ ...x }));
   }
 
   let next = null;
@@ -326,11 +328,16 @@ async function getActiveSquigListings(wallet, cfg = getConfig()) {
     const payload = await fetchJson(url, cfg);
     for (const listing of payload?.listings || []) {
       const contract = normalizeAddress(listing?.asset?.contract);
-      if (contract === cfg.contract) {
+      if (contract === cfg.contract && isOpenSeaListingActive(listing)) {
+        const maker = listingMaker(listing) || wallet;
+        if (maker !== wallet) continue;
+        const tokenId = normalizeTokenId(listing?.asset?.identifier);
+        if (!tokenId) continue;
         matches.push({
-          tokenId: String(listing?.asset?.identifier || ''),
+          tokenId,
           orderHash: String(listing?.order_hash || listing?.id || ''),
-          maker: normalizeAddress(listing?.maker) || wallet,
+          maker,
+          expiresAt: listingExpirationTimestamp(listing),
         });
       }
     }
@@ -342,13 +349,77 @@ async function getActiveSquigListings(wallet, cfg = getConfig()) {
   return matches;
 }
 
-async function getAllListingsForWallets(wallets, cfg = getConfig()) {
+function normalizeTokenId(value) {
+  const text = String(value ?? '');
+  if (!/^\d+$/.test(text)) return null;
+  try { return String(BigInt(text)); } catch (_) { return null; }
+}
+
+function listingMaker(listing) {
+  const candidates = [
+    listing?.maker,
+    listing?.maker?.address,
+    listing?.protocol_data?.parameters?.offerer,
+    listing?.protocolData?.parameters?.offerer,
+  ];
+  for (const candidate of candidates) {
+    const address = normalizeAddress(typeof candidate === 'string' ? candidate : candidate?.address);
+    if (address) return address;
+  }
+  return null;
+}
+
+function listingTimestamp(value) {
+  if (value == null || value === '') return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric > 1e12 ? numeric : numeric * 1000;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function listingExpirationTimestamp(listing) {
+  for (const value of [listing?.expiration_date, listing?.expiration_time, listing?.expirationTime]) {
+    const expiration = listingTimestamp(value);
+    if (expiration != null && expiration > 0) return expiration;
+  }
+  return null;
+}
+
+function isOpenSeaListingActive(listing, now = Date.now()) {
+  const inactiveStatuses = new Set(['cancelled', 'canceled', 'fulfilled', 'expired', 'closed', 'inactive', 'invalid']);
+  const activeStatuses = new Set(['active', 'open', 'valid']);
+  for (const raw of [listing?.status, listing?.order_status, listing?.orderStatus]) {
+    if (raw == null || raw === '') continue;
+    const status = String(raw).trim().toLowerCase();
+    if (inactiveStatuses.has(status)) return false;
+    if (!activeStatuses.has(status)) return false;
+  }
+  for (const flag of ['cancelled', 'canceled', 'fulfilled', 'finalized', 'marked_invalid', 'markedInvalid', 'closed']) {
+    if (listing?.[flag] === true) return false;
+  }
+  for (const value of [listing?.remaining_quantity, listing?.remainingQuantity]) {
+    if (value != null && Number.isFinite(Number(value)) && Number(value) <= 0) return false;
+  }
+  const expiration = listingExpirationTimestamp(listing);
+  if (expiration != null && expiration <= now) return false;
+  return true;
+}
+
+function getDisqualifyingListings(listingsByWallet, ownedByWallet) {
   const out = [];
-  for (const wallet of wallets) {
-    const listings = await getActiveSquigListings(wallet, cfg);
-    for (const listing of listings) out.push({ wallet, ...listing });
+  for (const [wallet, listings] of listingsByWallet) {
+    const owned = new Set((ownedByWallet.get(wallet) || []).map(normalizeTokenId).filter(Boolean));
+    for (const listing of listings) {
+      if (listing.maker === wallet && owned.has(normalizeTokenId(listing.tokenId))) out.push({ wallet, ...listing });
+    }
   }
   return out;
+}
+
+async function getAllListingsForWallets(wallets, ownedByWallet, cfg = getConfig()) {
+  const listingsByWallet = new Map();
+  for (const wallet of wallets) listingsByWallet.set(wallet, await getActiveSquigListings(wallet, cfg));
+  return getDisqualifyingListings(listingsByWallet, ownedByWallet);
 }
 
 function parseOpenSeaSquigUrl(value, cfg = getConfig()) {
@@ -498,6 +569,11 @@ async function ownedTokenIds(wallets) {
   return deps.getOwnedSquigsReloadedTokenIds(wallets);
 }
 
+async function ownedTokenIdsByWallet(wallets) {
+  const entries = await Promise.all(wallets.map(async (wallet) => [wallet, await ownedTokenIds([wallet])]));
+  return new Map(entries);
+}
+
 async function userCounts(guildId, discordId) {
   const cfg = getConfig();
   await ensureTables();
@@ -603,13 +679,14 @@ async function claimTreat(interaction) {
     return;
   }
 
-  let owned;
+  let ownedByWallet;
   try {
-    owned = await ownedTokenIds(wallets);
+    ownedByWallet = await ownedTokenIdsByWallet(wallets);
   } catch (_) {
     await interaction.editReply('🎃 UglyBot could not verify your Squigs ownership right now. Nothing was claimed. Try again shortly.');
     return;
   }
+  const owned = [...new Set([...ownedByWallet.values()].flat().map(normalizeTokenId).filter(Boolean))];
   if (!owned.length) {
     await interaction.editReply('🎃 **YOUR BAG IS EMPTY**\nYou need at least one Squigs Reloaded NFT across your event wallets to claim today\'s Treat.');
     return;
@@ -617,7 +694,7 @@ async function claimTreat(interaction) {
 
   let listings;
   try {
-    listings = await getAllListingsForWallets(wallets, cfg);
+    listings = await getAllListingsForWallets(wallets, ownedByWallet, cfg);
   } catch (err) {
     console.warn('[TrickOrTreat] listing verification failed:', err.message);
     await interaction.editReply('🎃 UglyBot could not verify your active listings right now. Nothing was claimed. Try again shortly.');
@@ -971,4 +1048,7 @@ module.exports = {
   parseOpenSeaSquigUrl,
   drawUniqueWinners,
   deterministicPick,
+  getActiveSquigListings,
+  getAllListingsForWallets,
+  getDisqualifyingListings,
 };

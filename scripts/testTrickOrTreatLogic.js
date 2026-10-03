@@ -2,6 +2,7 @@ const assert = require('assert');
 const Module = require('module');
 
 const originalLoad = Module._load;
+let mockFetch = async () => { throw new Error('network not used in logic tests'); };
 Module._load = function trickOrTreatTestStubs(request, parent, isMain) {
   if (request === 'discord.js') {
     class Stub {
@@ -19,7 +20,7 @@ Module._load = function trickOrTreatTestStubs(request, parent, isMain) {
       TextInputStyle: { Short: 1 }, PermissionFlagsBits: { Administrator: 8n },
     };
   }
-  if (request === 'node-fetch') return async () => { throw new Error('network not used in logic tests'); };
+  if (request === 'node-fetch') return (...args) => mockFetch(...args);
   if (request === 'ethers') {
     return { ethers: { id: (x) => 'topic:' + x, JsonRpcProvider: class {} } };
   }
@@ -27,11 +28,13 @@ Module._load = function trickOrTreatTestStubs(request, parent, isMain) {
 };
 
 const savedEnv = { ...process.env };
+(async () => {
 try {
   process.env.TRICK_OR_TREAT_ENABLED = 'true';
   process.env.TRICK_OR_TREAT_TIME_ZONE = 'America/Toronto';
   process.env.TRICK_OR_TREAT_START_AT = '2026-10-01T00:00:00-04:00';
   process.env.TRICK_OR_TREAT_END_AT = '2026-10-31T23:59:59-04:00';
+  process.env.OPENSEA_API_KEY = 'test-key';
 
   const tot = require('../modules/trickOrTreat');
 
@@ -47,6 +50,43 @@ try {
   assert.strictEqual(tot.parseOpenSeaSquigUrl('https://opensea.io/collection/squigs-reloaded'), null);
   assert.strictEqual(tot.parseOpenSeaSquigUrl('https://opensea.io/item/base/' + contract + '/1').chain, 'base');
   assert.strictEqual(tot.parseOpenSeaSquigUrl('https://opensea.io/item/ethereum/0x1111111111111111111111111111111111111111/1'), null);
+
+  const walletA = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const walletB = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const listing = (tokenId, fields = {}) => ({ asset: { contract, identifier: String(tokenId) }, maker: walletA, ...fields });
+  const payload = { listings: [
+    listing(100), listing(101), listing(102),
+    listing(103, { status: 'fulfilled' }),
+    listing(104, { status: 'cancelled' }),
+    listing(105, { expiration_date: '2000-01-01T00:00:00Z' }),
+  ] };
+  let apiCalls = 0;
+  mockFetch = async () => { apiCalls++; return { ok: true, json: async () => payload }; };
+  const activeA = await tot.getActiveSquigListings(walletA);
+  assert.deepStrictEqual(activeA.map((x) => x.tokenId), ['100', '101', '102'], 'fulfilled, cancelled and expired OpenSea records are ignored');
+  const oneWalletListings = new Map([[walletA, activeA]]);
+  assert.deepStrictEqual(tot.getDisqualifyingListings(oneWalletListings, new Map([[walletA, ['100']]])).map((x) => x.tokenId), ['100'], 'an owned active listing disqualifies');
+  assert.deepStrictEqual(tot.getDisqualifyingListings(oneWalletListings, new Map([[walletA, []]])), [], 'a sold token in cached OpenSea results is ignored against fresh ownership');
+  assert.deepStrictEqual(
+    tot.getDisqualifyingListings(oneWalletListings, new Map([[walletA, ['100', '101']]])).map((x) => x.tokenId),
+    ['100', '101'],
+    'stale listing #102 cannot disqualify tokens currently owned as #100 and #101'
+  );
+  assert.deepStrictEqual(await tot.getAllListingsForWallets([walletA], new Map([[walletA, []]])), [], 'listing cache is reconciled against current ownership on every check');
+  assert.strictEqual(apiCalls, 1, 'active listing cache still avoids repeat API calls');
+
+  const walletListings = new Map([
+    [walletA, [{ tokenId: '2', maker: walletA }]],
+    [walletB, []],
+  ]);
+  const multiWalletOwnership = new Map([[walletA, ['1']], [walletB, ['2']]]);
+  assert.deepStrictEqual(tot.getDisqualifyingListings(walletListings, multiWalletOwnership), [], 'Wallet A stale listing #2 does not count because only Wallet B owns #2');
+  walletListings.set(walletB, [{ tokenId: '2', maker: walletB }]);
+  assert.deepStrictEqual(
+    tot.getDisqualifyingListings(walletListings, multiWalletOwnership).map((x) => [x.wallet, x.tokenId]),
+    [[walletB, '2']],
+    'Wallet B active listing #2 disqualifies because Wallet B owns it'
+  );
 
   const rows = [
     { discordId: 'a', treats: 31, tricks: 0, entries: 31 },
@@ -70,3 +110,7 @@ try {
   process.env = savedEnv;
   Module._load = originalLoad;
 }
+})().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
