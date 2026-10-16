@@ -338,13 +338,9 @@ async function adminAction(i, e, action, confirmed = false) {
   if (action === "post") {
     await store.transaction(async (c) => {
       const ev = await store.event(c, i.guildId, true);
-      if (ev.panel_channel_id && ev.panel_channel_id !== i.channelId)
-        throw Error(
-          "Panel destination already configured; use REFRESH PANELS.",
-        );
       await c.query(
         "UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
-        [ev.id, i.channelId],
+        [ev.id, ev.panel_channel_id || i.channelId],
       );
     });
   }
