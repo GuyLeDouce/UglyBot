@@ -138,3 +138,8 @@ Inbound ERC-721 and straightforward ERC-1155 transfers are detected automaticall
 Rejected NFTs and NFT prizes continue to use manual team return/delivery panels. The admin performs the transaction from the Vault wallet and pastes the transaction hash; UglyBot verifies the receipt on the NFT's stored chain before marking the return or delivery complete. UglyBot does **not** store a Vault private key and never signs outbound NFT transactions.
 
 Configure the review and draw channels so the bot can view channels, send messages, embed links, add reactions, read message history, and use external emojis/reactions as applicable. DRIP must already be configured for automatic `$CHARM` rewards and draw payouts.
+
+
+## Trick or Treat: The Four Graves
+
+The Halloween finale is a separately gated extension (`FOUR_GRAVES_ENABLED=false` by default). It adds permanent ticket allocation, private grave teams, a persistent 15-minute countdown, fixed reveals and private contestant exports. Existing claims and draws remain unchanged. Games and prizes are operated manually. See [the administrator setup, staging and recovery guide](docs/four-graves.md).

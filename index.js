@@ -43,6 +43,7 @@ const bountyVault = require('./modules/bountyVault');
 const squigDuels = require('./modules/squigDuels');
 const madlib = require('./modules/madlib');
 const trickOrTreat = require('./modules/trickOrTreat');
+const fourGraves = require('./modules/fourGraves');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
   loadMawRankingIndex,
@@ -291,6 +292,7 @@ const DAILY_HOLDER_REFRESH_PROGRESS_EVERY = Math.max(
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    ...(fourGraves.enabled() ? [GatewayIntentBits.GuildMembers] : []),
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     ...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : []),
@@ -1297,6 +1299,7 @@ function buildSlashCommands() {
     squigDuels.buildSquigDuelSlashCommand().toJSON(),
     ...madlib.buildMadlibSlashCommands(),
     trickOrTreat.buildSlashCommand().toJSON(),
+    fourGraves.buildSlashCommand().toJSON(),
   ];
 }
 
@@ -1358,7 +1361,7 @@ client.once(Events.ClientReady, async (c) => {
   }
   // Mad Libs awaits its own schema; existing ready jobs above are not delayed.
   Promise.resolve(madlib.startMadlibWorkers()).catch(() => console.warn('[MadLibs] Worker startup failed.'));
-  Promise.resolve(trickOrTreat.ensureTables()).catch((err) => console.warn('[TrickOrTreat] schema startup failed:', err.message));
+  Promise.resolve(trickOrTreat.ensureTables()).then(() => fourGraves.start()).catch(() => console.warn('[FourGraves] schema/startup failed; inspect database connectivity.'));
 });
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
@@ -7690,6 +7693,8 @@ bountyVault.initBountyVault({
   squigsChain: SQUIGS_CHAIN,
 });
 
+fourGraves.initFourGraves({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds, postAdminSystemLog });
+
 trickOrTreat.initTrickOrTreat({
   client,
   trickOrTreatPool: prizesPool,
@@ -7750,6 +7755,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleCommand(interaction)) {
         return;
       }
@@ -8796,6 +8802,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleButton(interaction)) {
         return;
       }
@@ -10380,6 +10387,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleModalSubmit(interaction)) {
         return;
       }
