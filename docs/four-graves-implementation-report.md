@@ -59,15 +59,15 @@ Local execution used Node 24.19.0; CI targets the repository's Node 20 requireme
 | Verification | Result |
 |---|---|
 | `npm run test:trick-or-treat` | Passed existing regression script |
-| `npm run test:four-graves` | 41 named tests passed |
+| `npm run test:four-graves` | 43 named tests passed |
 | `FOUR_GRAVES_TEST_PGLITE=true npm run test:four-graves-db` | 32 named database/Discord tests passed against embedded PostgreSQL |
 | JavaScript syntax checks | Passed for new modules and integrated `index.js` |
 | Discord slash-command serialization | Passed using installed discord.js builders |
 | ZIP verification | Passed independent Python `zipfile` CRC/file-count check |
 
-The embedded adapter serializes connections: its successful simultaneous-request scenarios verify accounting logic, **not PostgreSQL server multi-session lock behavior**. The PR workflow runs the same suite with concurrent `pg` connections on PostgreSQL 16. Consult the PR checks for that result; do not treat local embedded results as a substitute.
+The embedded adapter serializes connections: its successful simultaneous-request scenarios verify accounting logic, **not PostgreSQL server multi-session lock behavior**. The PR workflow ran the same suite with concurrent `pg` connections on PostgreSQL 16 / Node 20: **all 32 database tests passed**, including concurrent overspend, close/allocation ordering and first-click decision races. Initial successful run: https://github.com/GuyLeDouce/UglyBot/actions/runs/38828754534. The existing Trick or Treat CI workflow also passed.
 
-No local test failures remain. Not executed here: live staging Discord/Railway tests, real gateway reconnects, real rate-limit behavior, manual game CSV imports, and production migrations. Mocked Discord tests cover resource reuse, isolation, multiple roles, wrong-role removal, departed/rejoined membership, missing roles, failed assignments, failed reveal edits, new worker-instance recovery and admin permission enforcement. Full external API ambiguity still needs staging exercises.
+No Four Graves test failures remain. Two existing Mad Libs CI workflows fail with `Missing or changed integration hunk.` in `scripts/installMadlibIntegration.js`. The same integration test was run against a separate checkout of unchanged main (`1460da2185f338a373dcd556c2c37bd91b66c2b2`); baseline and branch output were identical after normalizing checkout paths. This pre-existing verification failure is disclosed, not bypassed or hidden. Not executed here: live staging Discord/Railway tests, real gateway reconnects, real rate-limit behavior, manual game CSV imports, and production migrations. Mocked Discord tests cover resource reuse, isolation, multiple roles, wrong-role removal, departed/rejoined membership, missing roles, failed assignments, failed reveal edits, new worker-instance recovery and admin permission enforcement. Full external API ambiguity still needs staging exercises.
 
 The tracked `.env` was checked without printing its values; the check found no non-placeholder values under common secret-bearing key names. This is a targeted check, not a guarantee about all historical repository contents. No credentials were added to this change.
 

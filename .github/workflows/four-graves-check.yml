@@ -1,7 +1,7 @@
 name: Four Graves checks
 on:
   pull_request:
-    paths: ['modules/fourGraves*', 'scripts/testFourGraves*', 'index.js', '.github/workflows/four-graves-check.yml']
+    paths: ['modules/fourGraves*', 'scripts/testFourGraves*', 'scripts/fourGravesDiscordFixture.js', 'package.json', 'index.js', '.github/workflows/four-graves-check.yml']
   workflow_dispatch:
 jobs:
   test:

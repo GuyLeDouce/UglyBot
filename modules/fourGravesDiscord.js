@@ -191,6 +191,7 @@ class FourGravesDiscord {
       throw Error(
         "Managed grave role has unexpected server permissions; remove those permissions before reconciliation.",
       );
+    if (role.name !== roleName && role.setName) await role.setName(roleName);
     g.role_id = role.id;
     await guild.channels.fetch();
     let channel = g.channel_id ? guild.channels.cache.get(g.channel_id) : null;
@@ -227,6 +228,9 @@ class FourGravesDiscord {
       );
     if (channel.topic !== marker || channel.type !== ChannelType.GuildText)
       throw Error("Stored channel is not a dedicated Four Graves channel.");
+    if (e.config.category && channel.parentId !== e.config.category) {
+      await channel.setParent(e.config.category, { lockPermissions: false });
+    }
     // Restrict team access until membership reconciliation has completed.
     g.channel_id = channel.id;
     return { role, channel, overwrites };

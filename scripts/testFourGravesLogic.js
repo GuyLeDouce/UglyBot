@@ -7,6 +7,8 @@ const {
   buildSnapshot,
   exportFiles,
   zip,
+  privateArchives,
+  csvRecords,
 } = require("../modules/fourGravesCore");
 const { publicPanel, decisionPanel } = require("../modules/fourGravesDiscord");
 const { validatePatch, buildSlashCommand } = require("../modules/fourGraves");
@@ -264,4 +266,18 @@ test("ZIP signatures", () => {
   assert.equal(z.readUInt32LE(z.length - 22), 0x06054b50);
   require("fs").writeFileSync("/tmp/four-graves-test.zip", z);
 });
+test("private multipart exports respect limits", () => {
+  const parts = privateArchives(
+    {
+      "large.csv":
+        '"contestant"\r\n' +
+        Array.from({ length: 100 }, (_, i) => '"Guy ' + i + '"\r\n').join(""),
+    },
+    700,
+  );
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every((p) => p.attachment.length <= 700));
+});
+test("multipart splitting preserves quoted multiline records", () =>
+  assert.equal(csvRecords('"name"\r\n"Guy\nJunior"\r\n').length, 2));
 console.log(`${tests} Four Graves logic tests passed.`);
