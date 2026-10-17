@@ -86,6 +86,8 @@ Admin commands:
 - `/trickortreat export`
 - `/trickortreat draw winners:<count>`
 
+**Download participants CSV** appears in both status responses (including `status user:@user`). It privately downloads the full current event participant list, just like `/trickortreat export`, with columns `discord_id,treats,tricks,total_entries`. Each participant appears once. Counts are refreshed when clicked, and administrator permission is checked again. Downloads remain available when ticket earning is disabled.
+
 The draw uses each user's literal `Treats + Tricks` count as weight. There is no Trick cap. Once a Discord user wins, that user is removed from later rounds of that draw so separate winner positions are unique.
 
 A 32-byte random seed plus the complete entry snapshot are persisted. Winner selection is deterministic from that seed so a completed draw can be audited/replayed.

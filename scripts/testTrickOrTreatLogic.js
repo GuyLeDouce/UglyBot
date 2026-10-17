@@ -6,11 +6,12 @@ let mockFetch = async () => { throw new Error('network not used in logic tests')
 Module._load = function trickOrTreatTestStubs(request, parent, isMain) {
   if (request === 'discord.js') {
     class Stub {
+      constructor(attachment, options) { this.attachment = attachment; this.name = options?.name; }
       setName() { return this; } setDescription() { return this; } addSubcommand(fn) { fn?.(new Stub()); return this; }
       addUserOption(fn) { fn?.(new Stub()); return this; } addIntegerOption(fn) { fn?.(new Stub()); return this; }
       addBooleanOption(fn) { fn?.(new Stub()); return this; } setRequired() { return this; } setMinValue() { return this; }
-      setMaxValue() { return this; } setTitle() { return this; } setCustomId() { return this; } setLabel() { return this; }
-      setEmoji() { return this; } setStyle() { return this; } addComponents() { return this; } addFields() { return this; }
+      setMaxValue() { return this; } setTitle() { return this; } setCustomId(id) { this.customId = id; return this; } setLabel() { return this; }
+      setEmoji() { return this; } setStyle() { return this; } addComponents(...components) { this.components = components; return this; } addFields() { return this; }
       setFooter() { return this; } setPlaceholder() { return this; } toJSON() { return {}; }
     }
     return {
@@ -105,7 +106,69 @@ try {
   const uncapped = [{ discordId: 'whale', treats: 31, tricks: 50, entries: 81 }];
   assert.strictEqual(tot.drawUniqueWinners(uncapped, 1, seed)[0].entries, 81);
 
-  console.log('Trick or Treat logic tests passed.');
+  // Status downloads use the existing authoritative aggregation and stay private.
+  let admin = true;
+  let participants = [{ discord_id: '123', treats: 3, tricks: 50 }];
+  let aggregateCalls = 0;
+  tot.initTrickOrTreat({
+    isAdmin: () => admin,
+    pool: { query: async (sql, params) => {
+      if (sql.includes('WITH users AS')) {
+        aggregateCalls++;
+        assert.deepStrictEqual(params, [tot.getConfig().eventKey, 'guild-test']);
+        return { rows: participants };
+      }
+      return { rows: [] };
+    } },
+  });
+  const interaction = (sub = 'status') => {
+    const calls = [];
+    return {
+      calls, guildId: 'guild-test', commandName: 'trickortreat',
+      isChatInputCommand: () => true, isButton: () => true,
+      options: { getSubcommand: () => sub, getUser: () => null },
+      reply: async (payload) => calls.push(['reply', payload]),
+      deferReply: async (payload) => calls.push(['defer', payload]),
+      editReply: async (payload) => calls.push(['edit', payload]),
+    };
+  };
+  const status = interaction();
+  assert.strictEqual(await tot.handleCommand(status), true);
+  const statusReply = status.calls[0][1];
+  assert.strictEqual(statusReply.flags, 64);
+  const customId = statusReply.components[0].components[0].customId;
+  assert.strictEqual(customId, 'tot_export_entries');
+  participants = [
+    { discord_id: '123', treats: 4, tricks: 50 },
+    { discord_id: '456', treats: 0, tricks: 2 },
+  ];
+  process.env.TRICK_OR_TREAT_ENABLED = 'false';
+  const click = interaction();
+  click.customId = customId;
+  assert.strictEqual(await tot.handleButton(click), true);
+  assert.deepStrictEqual(click.calls[0], ['defer', { flags: 64 }]);
+  const file = click.calls[1][1].files[0];
+  assert.strictEqual(file.name, 'trick-or-treat-entries.csv');
+  assert.strictEqual(file.attachment.toString(), 'discord_id,treats,tricks,total_entries\n123,4,50,54\n456,0,2,2');
+  assert.strictEqual(aggregateCalls, 2, 'download refreshes counts after status');
+  const directExport = interaction('export');
+  await tot.handleCommand(directExport);
+  assert.strictEqual(directExport.calls[1][1].files[0].attachment.toString(), file.attachment.toString());
+  admin = false;
+  const denied = interaction();
+  denied.customId = customId;
+  const beforeDenied = aggregateCalls;
+  assert.strictEqual(await tot.handleButton(denied), true);
+  assert.deepStrictEqual(denied.calls, [['reply', { content: 'Admin only.', flags: 64 }]]);
+  assert.strictEqual(aggregateCalls, beforeDenied, 'unauthorized clicks never query participant data');
+  admin = true;
+  participants = [];
+  const empty = interaction();
+  empty.customId = customId;
+  await tot.handleButton(empty);
+  assert.strictEqual(empty.calls[1][1].files[0].attachment.toString(), 'discord_id,treats,tricks,total_entries');
+
+  console.log('Trick or Treat logic and status download tests passed.');
 } finally {
   process.env = savedEnv;
   Module._load = originalLoad;
