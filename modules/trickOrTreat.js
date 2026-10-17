@@ -20,6 +20,7 @@ const EVENT_KEY = 'squigs-trick-or-treat-2026';
 const CLAIM_BUTTON = 'tot_claim_treat';
 const TRICK_BUTTON = 'tot_submit_trick';
 const BAG_BUTTON = 'tot_view_bag';
+const EXPORT_BUTTON = 'tot_export_entries';
 const TRICK_MODAL = 'tot_trick_modal';
 const TRICK_URL_FIELD = 'tot_trick_url';
 
@@ -889,11 +890,19 @@ function csvEscape(value) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+function exportButtonRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(EXPORT_BUTTON).setLabel('Download participants CSV').setStyle(ButtonStyle.Secondary)
+  );
+}
+
 async function exportEntries(interaction) {
+  await interaction.deferReply({ flags: EPHEMERAL });
+  await ensureTables();
   const rows = await aggregateEntries(interaction.guildId);
   const lines = ['discord_id,treats,tricks,total_entries', ...rows.map((r) => [r.discordId, r.treats, r.tricks, r.entries].map(csvEscape).join(','))];
   const file = new AttachmentBuilder(Buffer.from(lines.join('\n'), 'utf8'), { name: 'trick-or-treat-entries.csv' });
-  await interaction.reply({ content: `🎃 Exported ${rows.length} participant(s).`, files: [file], flags: EPHEMERAL });
+  await interaction.editReply({ content: `🎃 Exported ${rows.length} participant(s).`, files: [file] });
 }
 
 function deterministicPick(seedHex, round, total) {
@@ -997,7 +1006,7 @@ async function handleCommand(interaction) {
     const target = interaction.options.getUser('user', false);
     if (target) {
       const counts = await userCounts(interaction.guildId, target.id);
-      await interaction.reply({ embeds: [bagEmbed(target, counts)], flags: EPHEMERAL });
+      await interaction.reply({ embeds: [bagEmbed(target, counts)], components: [exportButtonRow()], flags: EPHEMERAL });
       return true;
     }
     const rows = await aggregateEntries(interaction.guildId);
@@ -1005,6 +1014,7 @@ async function handleCommand(interaction) {
     const totalTricks = rows.reduce((s, r) => s + r.tricks, 0);
     await interaction.reply({
       content: `🎃 Participants: **${rows.length}**\n🍬 Treats: **${totalTreats}**\n👻 Tricks: **${totalTricks}**\n🎟️ Entries: **${totalTreats + totalTricks}**\nEnabled: **${getConfig().enabled ? 'yes' : 'no'}**`,
+      components: [exportButtonRow()],
       flags: EPHEMERAL,
     });
     return true;
@@ -1014,6 +1024,14 @@ async function handleCommand(interaction) {
 
 async function handleButton(interaction) {
   if (!interaction.isButton?.()) return false;
+  if (interaction.customId === EXPORT_BUTTON) {
+    if (!requireAdmin(interaction)) {
+      await interaction.reply({ content: 'Admin only.', flags: EPHEMERAL });
+      return true;
+    }
+    await exportEntries(interaction);
+    return true;
+  }
   if (interaction.customId === CLAIM_BUTTON) {
     await claimTreat(interaction);
     return true;
