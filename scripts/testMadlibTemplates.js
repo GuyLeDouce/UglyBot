@@ -39,11 +39,11 @@ const templates=require('../modules/madlibTemplates');const run=harness('templat
     for(const t of active){assert(t.review&&t.review.length>=60,`Missing content review: ${t.id}`);assert(t.scene.location&&t.scene.composition);}
     assert.equal(new Set(active.map(t=>t.review)).size,60);
   });
-  await run.test('human-world v2 covers all ten themes with the original nine question types',()=>{
+  await run.test('human-world v3 covers all ten themes with the original nine question types',()=>{
     const allowed=new Set(['emotion','object','food','animal','adjective','colour','plural','costume','shout']);const used=new Set();
     assert.deepEqual([...new Set(active.map(t=>t.category))],['Morning / GM','Night / GN','Everyday errands','Workweek / office','Meme reactions','Web3 desk life','Food / coffee','Weekend / outdoors','Screens / posting','Social mischief']);
     for(const t of active){
-      assert(t.id.startsWith('hw-'));assert.equal(t.version,2);assert.equal(t.scene.world,'human-world');
+      assert(t.id.startsWith('hw-'));assert.equal(t.version,3);assert.equal(t.scene.world,'human-world');
       assert(!/Ugly City|The Maw|Ugly Labs/.test([t.scene.location,t.lead,t.scene.moment,t.ending].join(' ')));
       assert.deepEqual(t.questions.map(q=>q.key),[...new Set(core.keysIn(t.scene.moment))]);
       for(const q of t.questions){assert(allowed.has(q.key));used.add(q.key);assert.equal(q.maxLength,q.key==='shout'?100:60);}
@@ -78,6 +78,17 @@ const templates=require('../modules/madlibTemplates');const run=harness('templat
     const out=core.render(saved.template,saved.answers);assert.equal(out.story,saved.story);assert.deepEqual(out.answers,saved.answers);
     assert(out.prompt.includes(saved.template.scene.location));assert(out.prompt.includes('EXPORT FOR UGLYBOT:'));
     assert.equal(JSON.stringify(saved),before);assert(!saved.prompt.includes('EXPORT FOR UGLYBOT:'));
+  });
+  await run.test('saved version-two plays retain their original copy and answers',()=>{
+    const saved=require('./fixtures/madlib-v2-session.json');
+    const out=core.render(saved.template,saved.answers);
+    assert.equal(saved.template.version,2);
+    assert.equal(out.story,saved.story);assert.equal(out.prompt,saved.prompt);
+    const current=active.find(t=>t.id===saved.template.id);
+    assert.equal(current.version,3);assert.notEqual(current.lead,saved.template.lead);
+    assert.notEqual(current.ending,saved.template.ending);
+    assert.notDeepEqual(current.questions,saved.template.questions);
+    assert.equal(current.scene.moment,saved.template.scene.moment);
   });
   await run.test('all sixty scenes keep unusual answers literal with complete story-prompt correspondence',()=>{
     for(const t of active){
