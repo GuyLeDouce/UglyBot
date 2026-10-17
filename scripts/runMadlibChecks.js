@@ -1,10 +1,10 @@
 'use strict';
 // Test runner only: never requires index.js, reads .env, or starts the bot.
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');const {spawnSync}=require('node:child_process');
-const {reverse,BASELINE_SHA256,sha}=require('./installMadlibIntegration');
+const {verify}=require('./verifyMadlibIntegration');
 const root=path.join(__dirname,'..'),reportDir=path.resolve(process.env.MADLIB_REPORT_DIR||path.join(root,'madlib-ci'));
 fs.mkdirSync(reportDir,{recursive:true});
-const result={runtime:process.version,baseCommit:'fc02c69dfda8ec96120fa4f3b508d769995cfa73',productionServicesUsed:false,syntax:[],feature:[],legacy:[],baselineIssues:[]};
+const result={runtime:process.version,baselineKind:'current checkout with only verified Mad Libs additions removed',productionServicesUsed:false,syntax:[],feature:[],legacy:[],baselineIssues:[]};
 function execute(name,args,cwd=root,env={}){
   const r=spawnSync(process.execPath,args,{cwd,env:{...process.env,MADLIB_ENABLED:'false',MADLIB_REPORT_DIR:reportDir,...env},encoding:'utf8',timeout:180000,maxBuffer:16*1024*1024});
   const text=[r.stdout||'',r.stderr||'',r.error?String(r.error):''].join('\n');fs.writeFileSync(path.join(reportDir,`${name}.log`),text);
@@ -13,15 +13,15 @@ function execute(name,args,cwd=root,env={}){
 }
 const recordOnly=({text,...r})=>r;let temp,failed=false;
 try{
-  const codeFiles=[...fs.readdirSync(path.join(root,'modules')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/${n}`),...fs.readdirSync(path.join(root,'modules','data')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/data/${n}`),...fs.readdirSync(__dirname).filter(n=>/^(?:testMadlib|installMadlib|runMadlib|madlibTestUtils).*\.js$/.test(n)).map(n=>`scripts/${n}`),'index.js'];
+  const codeFiles=[...fs.readdirSync(path.join(root,'modules')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/${n}`),...fs.readdirSync(path.join(root,'modules','data')).filter(n=>/^madlib.*\.js$/.test(n)).map(n=>`modules/data/${n}`),...fs.readdirSync(__dirname).filter(n=>/^(?:testMadlib|installMadlib|verifyMadlib|runMadlib|madlibTestUtils).*\.js$/.test(n)).map(n=>`scripts/${n}`),'index.js'];
   for(const file of codeFiles){const r=execute(`syntax-${path.basename(file)}`,['--check',file]);result.syntax.push(recordOnly(r));if(r.status!=='passed')failed=true;}
   for(const test of ['testMadlibLogic','testMadlibTemplates','testMadlibIntegration','testMadlibDatabase','testMadlibPngDecode','testMadlibUploadModal']){
     const r=execute(test,[`scripts/${test}.js`]),counts=[...r.text.matchAll(/^RESULT .*?: (\d+) test groups passed/gm)].map(m=>Number(m[1]));
     result.feature.push({...recordOnly(r),testGroups:counts.reduce((a,b)=>a+b,0)});if(r.status!=='passed'||counts.length!==1||counts[0]<1)failed=true;
   }
-  // Reconstruct exactly the reviewed index and run unchanged legacy code in the same runtime.
-  temp=fs.mkdtempSync(path.join(os.tmpdir(),'madlib-legacy-'));const original=reverse(fs.readFileSync(path.join(root,'index.js'),'utf8'));
-  if(sha(original)!==BASELINE_SHA256)throw new Error('Original index reconstruction failed; baseline comparison is unsafe.');
+  // Compare against current code with only the verified Mad Libs additions removed.
+  // Preserve later features; never reconstruct the obsolete pre-install index.
+  temp=fs.mkdtempSync(path.join(os.tmpdir(),'madlib-legacy-'));const original=verify(fs.readFileSync(path.join(root,'index.js'),'utf8'));
   fs.writeFileSync(path.join(temp,'index.js'),original);fs.copyFileSync(path.join(root,'package.json'),path.join(temp,'package.json'));
   fs.cpSync(path.join(root,'modules'),path.join(temp,'modules'),{recursive:true,filter:source=>!/^madlib/i.test(path.basename(source))&&path.basename(source)!=='squigMadlibTemplates.json'});
   fs.mkdirSync(path.join(temp,'scripts'));

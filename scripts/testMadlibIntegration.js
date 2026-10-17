@@ -127,7 +127,7 @@ React below if you think it's **UGLY**! 💜`);
   });
   await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
     const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
-    assert.equal(app.templates.length,60);assert(app.templates.every(t=>t.version===2&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    assert.equal(app.templates.length,60);assert(app.templates.every(t=>t.version===3&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
     const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
     const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
     assert(panel.includes('human-world'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
@@ -148,10 +148,19 @@ React below if you think it's **UGLY**! 💜`);
     const end=store.read();assert.equal(end.state,'completed');assert.equal(end.id,seed.id);assert.equal(end.story,saved.story);
     assert.equal(end.template.version,1);assert(end.prompt.includes('EXPORT FOR UGLYBOT:'));
   });
-  await run.test('reverse seven additive integration hunks restores every original index byte',()=>{
-    const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');assert.equal(integration.sha(integration.reverse(source)),integration.BASELINE_SHA256);assert.equal(integration.apply(source),source);assert.equal(integration.changes.length,7);
-    assert(source.slice(source.indexOf('madlib.initMadlib({'),source.indexOf('function getMarketplaceCommandDeps() {')).includes('  extractDripCurrencyAmountFromPayload,'));
-    const previous=source.replace('  getMarketplaceSpendableBalance,\n  extractDripCurrencyAmountFromPayload,\n  getDripMemberCurrencyBalance,','  getMarketplaceSpendableBalance,\n  getDripMemberCurrencyBalance,');assert.equal(integration.apply(previous),source);
-    assert(source.includes('...madlib.buildMadlibSlashCommands()'));assert(source.includes('...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : [])'));assert(source.includes('clientUserId: () => client.user?.id'));const original=integration.reverse(source);assert.equal(source.match(/client\.on\('interactionCreate'/g).length,original.match(/client\.on\('interactionCreate'/g).length);assert.throws(()=>integration.apply(original+'\n// other work'),/baseline changed/);
+  await run.test('current integration retains all seven Mad Libs additions without freezing unrelated code',()=>{
+    const {verify,additions}=require('./verifyMadlibIntegration');
+    const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');
+    const original=verify(source);
+    assert.equal(additions.length,7);
+    assert.equal(source.match(/client\.on\('interactionCreate'/g).length,original.match(/client\.on\('interactionCreate'/g).length);
+    assert.equal(verify(source+'\n// unrelated future feature'),original+'\n// unrelated future feature');
+    for(const addition of additions){
+      assert.throws(()=>verify(source.replace(addition,'')),/Missing or duplicated/);
+      assert.throws(()=>verify(source+addition),/Missing or duplicated/);
+    }
+    assert(source.includes('  extractDripCurrencyAmountFromPayload,'));
+    // Historical authoring safeguards remain strict; this is not a migration tool.
+    assert.throws(()=>integration.apply(original+'\n// other work'),/baseline changed/);
   });run.done();
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

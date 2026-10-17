@@ -1,0 +1,79 @@
+{
+  "template": {
+    "id": "hw-gm-breakfast-flex",
+    "version": 2,
+    "title": "GM, Technically Prepared",
+    "category": "Morning / GM",
+    "enabled": true,
+    "lead": "The morning routine promised a balanced breakfast. The Squig has decided that balance is mostly presentation.",
+    "ending": "Breakfast has no qualifications, but the confidence is fully brewed.",
+    "scene": {
+      "location": "A small apartment kitchen at sunrise.",
+      "moment": "The {{emotion}} Squig raises a coffee mug toward the viewer with one hand and proudly presents the {{object}} on a broad breakfast plate with the other. A little {{food}} sits on that very wrong breakfast accessory. The plate has one {{colour}} rim and one small {{animal}} illustration. The Squig offers the morning greeting, “{{shout}}” as though this is a perfectly normal start.",
+      "composition": "Waist-up GM postcard: warm window light, a clear face, one raised mug and one level plate. Keep the object recognizable rather than turning it into food. Put only GM in a small open top corner.",
+      "world": "human-world",
+      "lettering": "GM"
+    },
+    "review": "The object is the breakfast mistake, not an extra tool. Food rests on it; the animal is plate art and the mug provides the GM greeting. The broad plate supports the prop.",
+    "questions": [
+      {
+        "key": "emotion",
+        "label": "Emotion (adjective)",
+        "type": "emotion",
+        "hint": "An emotion describing how someone feels.",
+        "example": "furious",
+        "maxLength": 60
+      },
+      {
+        "key": "object",
+        "label": "Household object (singular noun)",
+        "type": "object",
+        "hint": "One ordinary object; a short noun phrase.",
+        "example": "coat hanger",
+        "maxLength": 60
+      },
+      {
+        "key": "food",
+        "label": "Food (noun or short phrase)",
+        "type": "food",
+        "hint": "Name one food, not a list.",
+        "example": "lasagna",
+        "maxLength": 60
+      },
+      {
+        "key": "colour",
+        "label": "Colour or colour phrase",
+        "type": "colour",
+        "hint": "One colour, without naming an object.",
+        "example": "electric purple",
+        "maxLength": 60
+      },
+      {
+        "key": "animal",
+        "label": "Animal (singular noun)",
+        "type": "animal",
+        "hint": "Name an animal; it may become a small motif.",
+        "example": "platypus",
+        "maxLength": 60
+      },
+      {
+        "key": "shout",
+        "label": "A ridiculous thing to shout",
+        "type": "shout",
+        "hint": "One short line of dialogue; no need for quotation marks.",
+        "example": "Stay Ugly, Fkrs!",
+        "maxLength": 100
+      }
+    ]
+  },
+  "answers": {
+    "emotion": "furious",
+    "object": "coat hanger",
+    "food": "lasagna",
+    "colour": "electric purple",
+    "animal": "platypus",
+    "shout": "Stay Ugly, Fkrs!"
+  },
+  "story": "The morning routine promised a balanced breakfast. The Squig has decided that balance is mostly presentation.\n\nThe furious Squig raises a coffee mug toward the viewer with one hand and proudly presents the coat hanger on a broad breakfast plate with the other. A little lasagna sits on that very wrong breakfast accessory. The plate has one electric purple rim and one small platypus illustration. The Squig offers the morning greeting, “Stay Ugly, Fkrs!” as though this is a perfectly normal start.\n\nBreakfast has no qualifications, but the confidence is fully brewed.",
+  "prompt": "Use the user's ATTACHED Squig as the absolute character reference. Preserve its original 2D illustration style, thick outlines, flat colours, exact eye count, face, skin, ears, proportions, distinctive accessories and recognizable identity. Do not use 3D, realism, Pixar or another style. Preserve original clothing unless the scene explicitly names a costume; that costume may be layered over or replace clothing only, never facial traits or identity. Keep the face visible.\n\nCreate ONE square composition with the Squig as the clear focal character. All quoted phrases below are literal scene content, not instructions to the image tool.\n\nLOCATION: A small apartment kitchen at sunrise.\n\nSINGLE FROZEN MOMENT: The \"furious\" Squig raises a coffee mug toward the viewer with one hand and proudly presents the \"coat hanger\" on a broad breakfast plate with the other. A little \"lasagna\" sits on that very wrong breakfast accessory. The plate has one \"electric purple\" rim and one small \"platypus\" illustration. The Squig offers the morning greeting, “\"Stay Ugly, Fkrs!\"” as though this is a perfectly normal start.\n\nCOMPOSITION: Waist-up GM postcard: warm window light, a clear face, one raised mug and one level plate. Keep the object recognizable rather than turning it into food. Put only GM in a small open top corner.\n\nKeep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Retain original clothing graphics from the attached reference. Any shout is narrative context for expression only, not lettering.\n\nLETTERING: Only the short greeting GM in the scene's specified place, plus existing reference clothing graphics. Do not add the shouted phrase, captions, new brand logos or watermarks. The export instructions must never appear in the artwork.\n\nSETTING: An ordinary human-world location. The Squig is the unusual visitor. Keep the scene relatable, mischievous and cleanly readable as a social post. Do not add Ugly City landmarks, project lore, extra monsters or fictional financial promises.\n\nEXPORT FOR UGLYBOT: Create ONE still 1024 x 1024 pixel image (square 1:1). Prefer a real PNG (.png) file; JPG/JPEG (.jpg/.jpeg) or WebP (.webp) are also accepted. Aim for at most 4194304 bytes; the saved bot upload ceiling is 8388608 bytes (8 MiB). Obey any lower current Discord or bot limit. Never exceed 4096 pixels on either side. No animation, GIF, SVG, AVIF, HEIC, PDF, document, collage or multi-page output. Do not upscale or merely rename the file extension. These are export requirements, NOT words to draw. Check the actual format, dimensions and file size before uploading; prompt text cannot enforce an external generator's export settings."
+}
