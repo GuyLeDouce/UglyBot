@@ -896,11 +896,41 @@ function exportButtonRow() {
   );
 }
 
+async function participantName(interaction, discordId) {
+  const members = interaction.guild?.members;
+  let member = members?.cache?.get(discordId);
+  if (!member && members?.fetch) {
+    try { member = await members.fetch(discordId); } catch (_) { /* Departed member or unavailable lookup. */ }
+  }
+  if (member?.displayName) return member.displayName;
+  const users = interaction.client?.users;
+  let user = member?.user || users?.cache?.get(discordId);
+  if (!user && users?.fetch) {
+    try { user = await users.fetch(discordId); } catch (_) { /* Preserve the participant even when Discord is unavailable. */ }
+  }
+  return user?.globalName || user?.username || `Unknown user (${discordId})`;
+}
+
+function csvName(name) {
+  // Names are untrusted text: prevent spreadsheet formulas, including leading whitespace.
+  const text = String(name).replace(/[\r\n\t]/g, ' ');
+  return /^\s*[=+@-]/.test(text) ? "'" + text : text;
+}
+
 async function exportEntries(interaction) {
   await interaction.deferReply({ flags: EPHEMERAL });
   await ensureTables();
   const rows = await aggregateEntries(interaction.guildId);
-  const lines = ['discord_id,treats,tricks,total_entries', ...rows.map((r) => [r.discordId, r.treats, r.tricks, r.entries].map(csvEscape).join(','))];
+  const lines = ['discord_name,treats,tricks,total_entries'];
+  // Bound REST concurrency; never require a full guild-member fetch or privileged intent.
+  for (let i = 0; i < rows.length; i += 5) {
+    const batch = rows.slice(i, i + 5);
+    const names = await Promise.all(batch.map(r => participantName(interaction, r.discordId)));
+    for (let j = 0; j < batch.length; j++) {
+      const r = batch[j];
+      lines.push([csvName(names[j]), r.treats, r.tricks, r.entries].map(csvEscape).join(','));
+    }
+  }
   const file = new AttachmentBuilder(Buffer.from(lines.join('\n'), 'utf8'), { name: 'trick-or-treat-entries.csv' });
   await interaction.editReply({ content: `🎃 Exported ${rows.length} participant(s).`, files: [file] });
 }

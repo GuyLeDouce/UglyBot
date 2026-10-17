@@ -125,6 +125,8 @@ try {
     const calls = [];
     return {
       calls, guildId: 'guild-test', commandName: 'trickortreat',
+      guild: { members: { cache: new Map([['123', { displayName: 'Guy, the Ugly' }]]), fetch: async () => { throw new Error('Unknown member'); } } },
+      client: { users: { fetch: async id => ({ username: id === '456' ? '=badformula' : 'Other' }) } },
       isChatInputCommand: () => true, isButton: () => true,
       options: { getSubcommand: () => sub, getUser: () => null },
       reply: async (payload) => calls.push(['reply', payload]),
@@ -149,7 +151,7 @@ try {
   assert.deepStrictEqual(click.calls[0], ['defer', { flags: 64 }]);
   const file = click.calls[1][1].files[0];
   assert.strictEqual(file.name, 'trick-or-treat-entries.csv');
-  assert.strictEqual(file.attachment.toString(), 'discord_id,treats,tricks,total_entries\n123,4,50,54\n456,0,2,2');
+  assert.strictEqual(file.attachment.toString(), "discord_name,treats,tricks,total_entries\n\"Guy, the Ugly\",4,50,54\n'=badformula,0,2,2");
   assert.strictEqual(aggregateCalls, 2, 'download refreshes counts after status');
   const directExport = interaction('export');
   await tot.handleCommand(directExport);
@@ -162,11 +164,22 @@ try {
   assert.deepStrictEqual(denied.calls, [['reply', { content: 'Admin only.', flags: 64 }]]);
   assert.strictEqual(aggregateCalls, beforeDenied, 'unauthorized clicks never query participant data');
   admin = true;
+  const unavailable = interaction();
+  unavailable.customId = customId;
+  unavailable.guild = null;
+  unavailable.client = { users: { fetch: async () => { throw new Error('Discord unavailable'); } } };
+  await tot.handleButton(unavailable);
+  assert(unavailable.calls[1][1].files[0].attachment.toString().includes('Unknown user (123),4,50,54'));
+  const sameNames = interaction();
+  sameNames.customId = customId;
+  sameNames.guild = { members: { fetch: async () => ({ displayName: 'Émile 🦆' }) } };
+  await tot.handleButton(sameNames);
+  assert.strictEqual(sameNames.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries\nÉmile 🦆,4,50,54\nÉmile 🦆,0,2,2');
   participants = [];
   const empty = interaction();
   empty.customId = customId;
   await tot.handleButton(empty);
-  assert.strictEqual(empty.calls[1][1].files[0].attachment.toString(), 'discord_id,treats,tricks,total_entries');
+  assert.strictEqual(empty.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries');
 
   console.log('Trick or Treat logic and status download tests passed.');
 } finally {
