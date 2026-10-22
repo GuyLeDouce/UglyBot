@@ -52,16 +52,21 @@ class FourGravesStore {
   }
   async setup(guild, actor) {
     return this.transaction(async (c) => {
+      const config = this.testMode
+        ? { ...DEFAULT_CONFIG, testMode: true, testOwnerId: String(actor), prizesFinalized: true }
+        : DEFAULT_CONFIG;
       await c.query(
         "INSERT INTO four_graves_events(event_key,guild_id,source_event_key,config) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
         [
           this.eventKey,
           guild,
           this.sourceEventKey,
-          JSON.stringify(DEFAULT_CONFIG),
+          JSON.stringify(config),
         ],
       );
       const e = await this.event(c, guild, true);
+      if (this.testMode && (e.config?.testMode !== true || e.config.testOwnerId !== String(actor) || e.source_event_key !== this.sourceEventKey))
+        throw Error("Test ownership or source mismatch: refusing to operate.");
       for (const g of GRAVES)
         await c.query(
           "INSERT INTO four_graves_graves(event_id,grave_id,fixed_game) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
