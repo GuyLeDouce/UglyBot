@@ -150,11 +150,14 @@ function status(data, isAdmin) {
     const state=graves.find(x=>x.grave_id===g.id);
     const entries=s.entries.filter(x=>x.grave_id===g.id);
     const awarded=awards.filter(x=>x.grave_id===g.id);
+    const progress=state.decision && state.reveal_stage>=3
+      ? "; winners announced " + awarded.filter(x=>x.announced_at).length +
+        "/" + (e.config.mysteryByGrave ? require("./fourGravesCore").prizeSlots(e.config,g.id).length : "not configured")
+      : "; prize pool hidden until team choice";
     text += e.config.names[i] + ": " + entries.length + " buried, " +
       new Set(entries.map(x=>x.discord_id)).size + " holders; " +
       (state.decision ? state.decision.choice + " chosen" : "waiting on choice") +
-      "; winners announced " + awarded.filter(x=>x.announced_at).length +
-      "/" + (e.config.mysteryByGrave ? require("./fourGravesCore").prizeSlots(e.config,g.id).length : "not configured") + "\n";
+      progress + "\n";
     if(isAdmin) text += "Role " + (state.role_id||"missing") +
       "; channel " + (state.channel_id||"missing") +
       "; next winner " + (state.next_draw_at||"not scheduled") +
