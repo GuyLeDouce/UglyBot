@@ -27,6 +27,8 @@ Every grave has 1 DollzOnApe, 3 Squigs Reloaded, 1 Ugly Monster and 5 separate p
 
 **50 prize awards:** 30 NFTs and 20 $CHARM awards (100,000 $CHARM total).
 
+**Cletus bonus update:** RugDollz 3D replaces the retired 2 × Doruzu (ApeChain) bonus. On startup, UglyBot updates only SETUP/OPEN event records whose saved Cletus bonus still exactly matches the retired Doruzu allocation. The migration logs one audit entry and is safe to run repeatedly. Other graves, tickets, and previously recorded allocations are unchanged. An event that has already CLOSED or has a separately customized Cletus pool is intentionally not modified; inspect its saved config before announcing any prize changes.
+
 The default configuration contains these exact per-grave mystery prize lists and is finalized. Existing unclosed events with an old shared mystery list are upgraded on admin setup. Already-closed legacy events are NOT silently changed; they require administrator review.
 
 ## Fair random winner selection
