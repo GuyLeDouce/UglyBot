@@ -27,6 +27,36 @@ class FourGravesStore {
     await this.pool.query(
       fs.readFileSync(path.join(__dirname, "fourGravesSchema.sql"), "utf8"),
     );
+    // Only convert the exact retired Doruzu pool in events still accepting
+    // allocations. A closed grave's prize configuration or recorded winners
+    // must never be silently rewritten after its entries are frozen.
+    // This idempotent update runs on startup without requiring an admin to
+    // reopen /fourgraves admin, and audits each changed event atomically.
+    await this.pool.query(
+      `WITH changed AS (
+         UPDATE four_graves_events
+         SET config=jsonb_set(
+           config, '{mysteryByGrave,cletus_von_wrinkles}', $3::jsonb, false
+         )
+         WHERE event_key=$1 AND source_event_key=$2
+           AND closed_at IS NULL AND state IN ('SETUP','OPEN')
+           AND config #> '{mysteryByGrave,cletus_von_wrinkles}' = $4::jsonb
+         RETURNING id
+       )
+       INSERT INTO four_graves_audit(event_id,actor_id,action,detail)
+       SELECT id,'SYSTEM','cletus-bonus-prize-update',$5::jsonb FROM changed`,
+      [
+        this.eventKey,
+        this.sourceEventKey,
+        JSON.stringify(DEFAULT_CONFIG.mysteryByGrave.cletus_von_wrinkles),
+        JSON.stringify([{ name: "Doruzu (ApeChain)", quantity: 2 }]),
+        JSON.stringify({
+          old: [{ name: "Doruzu (ApeChain)", quantity: 2 }],
+          new: DEFAULT_CONFIG.mysteryByGrave.cletus_von_wrinkles,
+          reason: "Approved Cletus bonus-prize replacement",
+        }),
+      ],
+    );
   }
   async transaction(fn) {
     const c = await this.pool.connect();
