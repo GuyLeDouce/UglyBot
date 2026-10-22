@@ -58,7 +58,12 @@ function fixture(guildId) {
     },
     roles: {
       cache: roles,
-      fetch: async () => roles,
+      fetch: async (roleId) => {
+        if (!roleId) return roles;
+        const found = roles.get(roleId);
+        if (!found) throw Object.assign(Error("Unknown Role"), { code: 10011, status: 404 });
+        return found;
+      },
       create: async (args) => {
         const role = {
           id: String(++id),
