@@ -304,6 +304,7 @@ const client = new Client({
 // repeatedly requesting the full guild member list via gateway opcode 8.
 client.on('guildMemberAdd', (member) => noteGuildMemberChange(member, true));
 client.on('guildMemberRemove', (member) => noteGuildMemberChange(member, false));
+client.on('guildMemberUpdate', (_before, after) => noteGuildMemberChange(after, true));
 
 // ===== UTILS =====
 async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
