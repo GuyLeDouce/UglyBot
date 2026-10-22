@@ -2,6 +2,7 @@
 const { SlashCommandBuilder, ChannelType } = require("discord.js");
 const { FourGravesStore } = require("./fourGravesStore");
 const { FourGravesDiscord, button, row, cid } = require("./fourGravesDiscord");
+const { prizeWinnerCsv } = require("./fourGravesDraw");
 const {
   GRAVES,
   quantity,
@@ -67,7 +68,7 @@ function buildSlashCommand() {
           o
             .setName("config-json")
             .setDescription(
-              "Names, rules, mystery prizes, reveal delay; see administrator guide",
+              "Four names, per-grave mysteryByGrave lists; see docs",
             ),
         )
         .addBooleanOption((o) =>
@@ -138,83 +139,79 @@ function controls(e) {
   };
 }
 function status(data, isAdmin) {
-  const { event: e, snapshot: s, graves, operations } = data;
-  const total = s.users.reduce((n, u) => n + u.total, 0);
-  let text = `**THE FOUR GRAVES — ${e.state}**\nParticipants: ${s.users.filter((u) => u.allocated).length}\nTickets buried: ${s.entries.length}\n`;
-  if (e.deadline)
-    text += `Decision deadline: <t:${Math.floor(new Date(e.deadline) / 1000)}:F>\n`;
-  for (const [i, g] of GRAVES.entries()) {
-    const state = graves.find((x) => x.grave_id === g.id),
-      entries = s.entries.filter((x) => x.grave_id === g.id);
-    text += `${e.config.names[i]}: ${entries.length} tickets, ${new Set(entries.map((x) => x.discord_id)).size} members — ${state.reveal_stage === 3 ? "REVEALED" : !entries.length ? "NO CONTESTANTS" : "unrevealed"}\n`;
-    if (isAdmin)
-      text += `Role ${state.role_id || "missing"}; channel ${state.channel_id || "missing"}; reveal stage ${state.reveal_stage}${state.decision ? `; ${state.decision.choice} by ${state.decision.user_id}` : ""}\n`;
+  const { event: e, snapshot: s, graves, operations, awards = [] } = data;
+  const total = s.users.reduce((n,u)=>n+u.total,0);
+  let text = "**FOUR GRAVES — " + e.state + "**\n" +
+    "Participants: " + s.users.filter(u=>u.allocated).length +
+    "\nTickets buried: " + s.entries.length + "\n";
+  if(e.deadline && e.state === "CLOSED_COUNTDOWN")
+    text += "Team choice unlocks: <t:" + Math.floor(new Date(e.deadline)/1000) + ":R>\n";
+  for(const [i,g] of GRAVES.entries()){
+    const state=graves.find(x=>x.grave_id===g.id);
+    const entries=s.entries.filter(x=>x.grave_id===g.id);
+    const awarded=awards.filter(x=>x.grave_id===g.id);
+    const progress=state.decision && state.reveal_stage>=3
+      ? "; winners announced " + awarded.filter(x=>x.announced_at).length +
+        "/" + (e.config.mysteryByGrave ? require("./fourGravesCore").prizeSlots(e.config,g.id).length : "not configured")
+      : "; prize pool hidden until team choice";
+    text += e.config.names[i] + ": " + entries.length + " buried, " +
+      new Set(entries.map(x=>x.discord_id)).size + " holders; " +
+      (state.decision ? state.decision.choice + " chosen" : "waiting on choice") +
+      progress + "\n";
+    if(isAdmin) text += "Role " + (state.role_id||"missing") +
+      "; channel " + (state.channel_id||"missing") +
+      "; next winner " + (state.next_draw_at||"not scheduled") +
+      "; completed " + (state.draw_completed_at||"no") + "\n";
   }
-  if (isAdmin)
-    text += `\nTreats: ${s.users.reduce((n, u) => n + u.treats, 0)}; Tricks: ${s.users.reduce((n, u) => n + u.tricks, 0)}\nEarned: ${total}; unallocated: ${total - s.entries.length}\nOpened: ${e.opened_at || "never"}\nClosed: ${e.closed_at || "never"}\nCountdown generation: ${e.generation}\nSnapshot: ${e.snapshot_id || "live"}\nLast export: ${e.last_export_at || "never"}\nPrize pool finalized: ${!!e.config.prizesFinalized}\nPending operations:\n${
-      operations
-        .filter((o) => o.last_error)
-        .map((o) => `${o.operation_key}: ${o.last_error}`)
-        .join("\n") || "none"
-    }`;
-  return { content: text.slice(0, 1950), allowedMentions: { parse: [] } };
+  if(isAdmin) text += "\nEarned: "+total+"; unallocated: "+(total-s.entries.length)+
+    "\nSnapshot: "+(e.snapshot_id||"live")+
+    "\nPrizes finalized: "+!!e.config.prizesFinalized+
+    "\nWorker errors: "+(operations.filter(x=>x.last_error).map(x=>
+      x.operation_key+": "+x.last_error).join("; ")||"none");
+  return {content:text.slice(0,1940),allowedMentions:{parse:[]}};
 }
 function validatePatch(input) {
-  const patch = {};
-  for (const k of Object.keys(input))
-    if (!["names", "rules", "mystery", "revealDelaySeconds"].includes(k))
-      throw Error(`Unsupported config key: ${k}`);
-  for (const k of ["names", "rules"])
-    if (input[k] !== undefined) {
-      if (
-        !Array.isArray(input[k]) ||
-        input[k].length !== 4 ||
-        input[k].some(
-          (v) =>
-            typeof v !== "string" ||
-            !v.trim() ||
-            v.length > (k === "names" ? 40 : 900),
-        )
-      )
-        throw Error(`Provide four ${k} strings within documented limits.`);
-      patch[k] = input[k];
+  if (!input || typeof input!=="object" || Array.isArray(input))
+    throw Error("Configuration must be a JSON object.");
+  const patch={};
+  for(const key of Object.keys(input))
+    if(!["names","rules","mysteryByGrave","revealDelaySeconds"].includes(key))
+      throw Error("Unsupported config key: "+key);
+  for(const key of ["names","rules"])
+    if(input[key]!==undefined) {
+      if(!Array.isArray(input[key]) || input[key].length!==4 ||
+        input[key].some(value=>typeof value!=="string" || !value.trim() ||
+          value.length>(key==="names"?40:900)))
+        throw Error("Provide exactly four valid "+key+" strings.");
+      patch[key]=input[key];
     }
-  if (input.mystery !== undefined) {
-    if (
-      !Array.isArray(input.mystery) ||
-      input.mystery.length > 10 ||
-      input.mystery.some(
-        (p) =>
-          typeof p.name !== "string" ||
-          !p.name.trim() ||
-          p.name.length > 80 ||
-          !Number.isInteger(p.quantity) ||
-          p.quantity < 1 ||
-          p.quantity > 100,
-      )
-    )
-      throw Error(
-        "Mystery prizes need names and positive integer quantities; [] means none.",
-      );
-    patch.mystery = input.mystery;
-    patch.prizesFinalized = false;
+  if(input.mysteryByGrave!==undefined){
+    const obj=input.mysteryByGrave;
+    if(!obj || typeof obj!=="object" || Array.isArray(obj) ||
+      Object.keys(obj).length!==GRAVES.length ||
+      Object.keys(obj).some(key=>!GRAVES.some(g=>g.id===key)) ||
+      GRAVES.some(g=>!Array.isArray(obj[g.id]) || obj[g.id].length>10 ||
+        obj[g.id].some(p=>!p || typeof p.name!=="string" || !p.name.trim() ||
+          p.name.length>80 || !Number.isInteger(p.quantity) ||
+          p.quantity<1 || p.quantity>100)))
+      throw Error("Supply a list of real mystery prizes for each of the four graves.");
+    patch.mysteryByGrave=obj;
+    patch.prizesFinalized=false;
   }
-  if (input.revealDelaySeconds !== undefined) {
-    if (
-      !Number.isInteger(input.revealDelaySeconds) ||
-      input.revealDelaySeconds < 1 ||
-      input.revealDelaySeconds > 30
-    )
-      throw Error("Reveal delay must be 1–30 seconds.");
-    patch.revealDelaySeconds = input.revealDelaySeconds;
+  if(input.revealDelaySeconds!==undefined){
+    if(!Number.isInteger(input.revealDelaySeconds) ||
+      input.revealDelaySeconds<1 || input.revealDelaySeconds>30)
+      throw Error("Reveal delay must be between 1 and 30 seconds.");
+    patch.revealDelaySeconds=input.revealDelaySeconds;
   }
   return patch;
 }
 async function exportsReply(i, grave = "all", format = "all") {
   admin(i);
-  const { event, snapshot } = await store.read(i.guildId);
-  const files = exportFiles(event, snapshot, grave, format),
-    parts = privateArchives(files, i.attachmentSizeLimit || 8 * 1024 * 1024);
+  const { event, snapshot, awards } = await store.read(i.guildId);
+  const files = exportFiles(event, snapshot, grave, format);
+  if (awards.length) files["four_graves_prize_winners.csv"] = prizeWinnerCsv(event, awards, grave);
+  const parts = privateArchives(files, i.attachmentSizeLimit || 8 * 1024 * 1024);
   await reply(i, {
     content: `Private export: ${snapshot.entries.length} allocated tickets (${event.snapshot_id || "live snapshot"}). ${parts.length} ZIP part(s).`,
     files: [parts[0]],
@@ -250,7 +247,7 @@ async function adminAction(i, e, action, confirmed = false) {
     if (!confirmed)
       return reply(i, {
         content:
-          "Only proceed after inspecting Discord and confirming every CREATE_IN_FLIGHT resource is absent or retains its original Four Graves name/topic/footer. Renamed resources need administrator review first. This authorizes retrying uncertain creation requests; no ticket data changes.",
+          "Before retrying any uncertain Discord resource creation, inspect its grave channel/role markers. This does not alter ticket balances or recorded winners.",
         components: [
           row(
             button(
@@ -299,7 +296,7 @@ async function adminAction(i, e, action, confirmed = false) {
     return reply(i, {
       content:
         action === "close"
-          ? "**FINAL WARNING — CLOSE ALL FOUR GRAVES?**\nPermanently stop allocation, freeze all entries, assign team roles, unlock private channels and start the 15-minute countdown. Existing allocations cannot be changed."
+          ? "**CLOSE ALL FOUR GRAVES?**\nFreeze tickets, grant team-channel access and start the existing 15-minute decision countdown. Choices trigger the team prize reveal and then automatically draw winners."
           : `Confirm ${action.toUpperCase()}? ${action === "restart" ? "This invalidates old decision buttons and starts a fresh 15 minutes. Allocations remain closed." : "Participants may permanently bury tickets."}`,
       components: [
         row(

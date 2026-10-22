@@ -142,7 +142,7 @@ Configure the review and draw channels so the bot can view channels, send messag
 
 ## Trick or Treat: The Four Graves
 
-The Halloween finale is a separately gated extension (`FOUR_GRAVES_ENABLED=false` by default). It adds permanent ticket allocation, private grave teams, a persistent 15-minute countdown, fixed reveals and private contestant exports. Existing claims and draws remain unchanged. Games and prizes are operated manually. See [the administrator setup, staging and recovery guide](docs/four-graves.md).
+The Halloween finale is a separately gated extension (`FOUR_GRAVES_ENABLED=false` by default). It keeps permanent ticket allocation, private grave teams, a persistent 15-minute countdown, and first-click TRICK/TREAT reveals. The bot tags @everyone once in each private grave after the choice, waits 2 minutes, then automatically draws and announces one winner at a time at least 15 seconds apart. Each grave has its own finalized Mystery NFT prize pool; ticket weighting and one winner per participant per pass are enforced. Existing Trick or Treat claims are unchanged, and prize transfers remain manual. See [the administrator setup, staging and recovery guide](docs/four-graves.md).
 
 
 ### Production Discord Four Graves private rehearsal

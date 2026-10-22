@@ -4,7 +4,8 @@ const {
   PermissionsBitField,
   ChannelType,
 } = require("discord.js");
-const { GRAVES } = require("./fourGravesCore");
+const { GRAVES, prizePoolForGrave } = require("./fourGravesCore");
+const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
   custom_id,
@@ -42,7 +43,6 @@ function publicPanel(e) {
 }
 function decisionPanel(e, g) {
   const i = GRAVES.findIndex((x) => x.id === g.grave_id),
-    meta = GRAVES[i],
     decision = g.decision;
   const eligible = e.snapshot?.entries.some((x) => x.grave_id === g.grave_id);
   const active = e.state === "BUTTONS_ACTIVE" && !decision && eligible;
@@ -53,7 +53,12 @@ function decisionPanel(e, g) {
     description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
   if (g.reveal_stage >= 2) description += "\n\nTHE GRAVE IS OPENING...";
   if (g.reveal_stage >= 3)
-    description += `\n\n**${e.config.names[i].toUpperCase()} HAS AWAKENED.**\n\nYour game: **${meta.game}**\n\n${e.config.rules[i]}\n\n**PRIZE POOL**\n${[...e.config.prizes, ...e.config.mystery].map((p) => `${p.quantity} × ${p.name}`).join("\n")}\n\nGames, prize wheels and all prize distribution are handled manually by the administrator. Stay Ugly.`;
+    description += "\n\n**" + e.config.names[i].toUpperCase() +
+      " HAS AWAKENED.**\n\n**YOUR GRAVE PRIZE POOL**\n" +
+      prizePoolForGrave(e.config,g.grave_id).map(p => p.quantity + " × " + p.name).join("\n") +
+      "\n\nWinners are drawn automatically, starting 2 minutes after the choice, " +
+      "one prize every 15 seconds. Each participant wins at most once per pass. " +
+      "The pool resets after everyone has won once. Prize transfers are manual. Stay Ugly.";
   return {
     embeds: [
       {
@@ -106,6 +111,7 @@ class FourGravesDiscord {
           P.ManageMessages,
           P.AttachFiles,
           P.EmbedLinks,
+          ...(e.config.testMode ? [] : [P.MentionEveryone]),
         ],
       },
     ];
@@ -258,7 +264,7 @@ class FourGravesDiscord {
         embed?.image?.url === payload.embeds[0].image?.url &&
         JSON.stringify(message.components.map((x) => x.toJSON())) ===
           JSON.stringify(payload.components);
-      if (!same) await message.edit(payload);
+      if (!same) await message.edit({ ...payload, allowedMentions: mentions });
       return message;
     }
     const marker = payload.embeds[0].footer.text;
@@ -278,7 +284,7 @@ class FourGravesDiscord {
               m.embeds.some((x) => x.footer?.text === marker),
           );
           if (found) {
-            await found.edit(payload);
+            await found.edit({ ...payload, allowedMentions: mentions });
             return found;
           }
           if (batch.size < 100) break;
@@ -363,6 +369,37 @@ class FourGravesDiscord {
                 previousStage,
               ],
             );
+          if (g.decision) {
+            // Send the one-time @everyone announcement; on replay the exact
+            // footer is adopted, and edits always suppress further pings.
+            await this.message(
+              e, channel, g.choice_message_id, "choice:"+g.grave_id,
+              choiceAnnouncement(e,g),
+              m => this.store.pool.query(
+                "UPDATE four_graves_graves SET choice_message_id=$3 WHERE event_id=$1 AND grave_id=$2",
+                [e.id,g.grave_id,m.id],
+              ),
+            );
+          }
+          if (g.decision && g.reveal_stage >= 3) {
+            // Only one due prize is selected and announced per pass.
+            // Failed sends are retried with the SAME recorded ticket.
+            const award = await this.store.nextPrize(e.guild_id,g.grave_id);
+            if (award) {
+              const m = await this.message(
+                e, channel, award.message_id,
+                "award:"+g.grave_id+":"+award.prize_index,
+                winnerAnnouncement(e,g.grave_id,award),
+                msg => this.store.pool.query(
+                  "UPDATE four_graves_awards SET message_id=$4 WHERE event_id=$1 AND grave_id=$2 AND prize_index=$3",
+                  [e.id,g.grave_id,award.prize_index,msg.id],
+                ),
+              );
+              await this.store.markPrizeAnnounced(
+                e.guild_id,g.grave_id,award.prize_index,m.id,
+              );
+            }
+          }
         }
         await this.store.operation(e.id, `reconcile:${g.grave_id}`);
       } catch (err) {
@@ -406,10 +443,14 @@ class FourGravesDiscord {
           ),
       );
     }
-    // Empty graves never reveal themselves and are excluded from event-completion readiness.
-    if (e.closed_at && graves.some((g) => g.decision))
+    // Do not mark the event complete until every populated grave has
+    // chosen and announced its entire prize pool of winners.
+    if (e.closed_at && graves.some(g => g.decision))
       await this.store.pool.query(
-        "UPDATE four_graves_events SET state='REVEALED' WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM four_graves_graves g WHERE g.event_id=$1 AND g.reveal_stage<3 AND EXISTS(SELECT 1 FROM four_graves_allocations a WHERE a.event_id=$1 AND a.grave_id=g.grave_id))",
+        "UPDATE four_graves_events SET state=\'REVEALED\' WHERE id=$1 AND NOT EXISTS (" +
+          "SELECT 1 FROM four_graves_graves g WHERE g.event_id=$1 " +
+          "AND EXISTS (SELECT 1 FROM four_graves_allocations a WHERE a.event_id=$1 AND a.grave_id=g.grave_id) " +
+          "AND (g.decision IS NULL OR g.draw_completed_at IS NULL))",
         [e.id],
       );
   }

@@ -355,6 +355,7 @@ async function reset(i) {
       owner(i, current);
       await c.query("DELETE FROM four_graves_audit WHERE event_id=$1", [e.id]);
       await c.query("DELETE FROM four_graves_operations WHERE event_id=$1", [e.id]);
+      await c.query("DELETE FROM four_graves_awards WHERE event_id=$1", [e.id]);
       await c.query("DELETE FROM four_graves_allocations WHERE event_id=$1", [e.id]);
       await c.query("DELETE FROM four_graves_graves WHERE event_id=$1", [e.id]);
       await c.query(

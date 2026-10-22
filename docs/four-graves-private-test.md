@@ -65,3 +65,7 @@ The GitHub Four Graves workflow checks JavaScript syntax and runs: test:trick-or
 The database tests require FOUR_GRAVES_TEST_DATABASE_URL pointing to a DISPOSABLE PostgreSQL instance. They never use a production database fallback. Actual production Discord/API permission behavior can only be confirmed after you merge and run /fourgravestest setup in your server.
 
 If you need an emergency off-switch, set FOUR_GRAVES_TEST_ENABLED=false and redeploy. That stops test commands and the test worker without touching any existing test data; use the guarded reset later when safe.
+
+## Updated finale mechanics
+
+The separate production test worker now rehearses the real grave-specific prize pools (13, 11, 12 and 13 prizes respectively), one choice per team, a two-minute initial draw delay and fifteen seconds between sequential winners. Test mode never sends @everyone, transfers prizes or reads actual October claims. Do not run production /fourgraves commands for rehearsal.
