@@ -369,6 +369,37 @@ class FourGravesDiscord {
                 previousStage,
               ],
             );
+          if (g.decision) {
+            // Send the one-time @everyone announcement; on replay the exact
+            // footer is adopted, and edits always suppress further pings.
+            await this.message(
+              e, channel, g.choice_message_id, "choice:"+g.grave_id,
+              choiceAnnouncement(e,g),
+              m => this.store.pool.query(
+                "UPDATE four_graves_graves SET choice_message_id=$3 WHERE event_id=$1 AND grave_id=$2",
+                [e.id,g.grave_id,m.id],
+              ),
+            );
+          }
+          if (g.decision && g.reveal_stage >= 3) {
+            // Only one due prize is selected and announced per pass.
+            // Failed sends are retried with the SAME recorded ticket.
+            const award = await this.store.nextPrize(e.guild_id,g.grave_id);
+            if (award) {
+              const m = await this.message(
+                e, channel, award.message_id,
+                "award:"+g.grave_id+":"+award.prize_index,
+                winnerAnnouncement(e,g.grave_id,award),
+                msg => this.store.pool.query(
+                  "UPDATE four_graves_awards SET message_id=$4 WHERE event_id=$1 AND grave_id=$2 AND prize_index=$3",
+                  [e.id,g.grave_id,award.prize_index,msg.id],
+                ),
+              );
+              await this.store.markPrizeAnnounced(
+                e.guild_id,g.grave_id,award.prize_index,m.id,
+              );
+            }
+          }
         }
         await this.store.operation(e.id, `reconcile:${g.grave_id}`);
       } catch (err) {
@@ -412,10 +443,14 @@ class FourGravesDiscord {
           ),
       );
     }
-    // Empty graves never reveal themselves and are excluded from event-completion readiness.
-    if (e.closed_at && graves.some((g) => g.decision))
+    // Do not mark the event complete until every populated grave has
+    // chosen and announced its entire prize pool of winners.
+    if (e.closed_at && graves.some(g => g.decision))
       await this.store.pool.query(
-        "UPDATE four_graves_events SET state='REVEALED' WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM four_graves_graves g WHERE g.event_id=$1 AND g.reveal_stage<3 AND EXISTS(SELECT 1 FROM four_graves_allocations a WHERE a.event_id=$1 AND a.grave_id=g.grave_id))",
+        "UPDATE four_graves_events SET state=\'REVEALED\' WHERE id=$1 AND NOT EXISTS (" +
+          "SELECT 1 FROM four_graves_graves g WHERE g.event_id=$1 " +
+          "AND EXISTS (SELECT 1 FROM four_graves_allocations a WHERE a.event_id=$1 AND a.grave_id=g.grave_id) " +
+          "AND (g.decision IS NULL OR g.draw_completed_at IS NULL))",
         [e.id],
       );
   }
