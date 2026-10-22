@@ -44,3 +44,17 @@ CREATE TABLE IF NOT EXISTS four_graves_test_tickets (
  treats INTEGER NOT NULL CHECK(treats>=0), tricks INTEGER NOT NULL CHECK(tricks>=0),
  PRIMARY KEY(event_key,guild_id,discord_id)
 );
+
+-- One immutable, administrator-triggered prize draw per event.
+-- Separate from legacy role/channel/decision fields retained for compatibility.
+CREATE TABLE IF NOT EXISTS four_graves_draws (
+ event_id BIGINT PRIMARY KEY REFERENCES four_graves_events(id),
+ snapshot_hash TEXT NOT NULL,
+ results JSONB NOT NULL,
+ results_hash TEXT NOT NULL,
+ drawn_by TEXT NOT NULL,
+ drawn_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ channel_id TEXT,
+ message_id TEXT,
+ published_at TIMESTAMPTZ
+);
