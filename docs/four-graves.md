@@ -63,3 +63,19 @@ Per-grave mystery adjustments (not needed for the approved default pools) are su
 Run test:trick-or-treat, test:four-graves, test:four-graves-auto-draw, test:four-graves-private and the two disposable PostgreSQL database suites. FOUR_GRAVES_TEST_DATABASE_URL must refer ONLY to a disposable database. GitHub CI provisions its own PostgreSQL 16 instance.
 
 **No external game is started and no automated NFT or $CHARM transfer is made.**
+
+## Diagnosing repeated worker errors
+
+Each Four Graves worker polls about every 15 seconds. If Railway reports repeated worker failures for an event ID, **do not reset the event, ticket allocations or stored awards**. Event IDs identify rows in the Four Graves database; they do not identify individual graves or tickets.
+
+The worker records the underlying error under its per-event operation key. Run **/fourgraves status** (live) and **/fourgravestest status** (private simulation); these statuses now display worker failures first to avoid Discord truncation. Logs now show a label **LIVE** or **TEST**, the event ID and the first 550 characters of the underlying error. Repeated identical lines are throttled to once per five minutes without slowing normal retries or draws.
+
+Common fixes depend on the **actual** exception:
+
+- Missing Manage Roles / Manage Channels or Discord code 50013: check the production bot's Discord permissions and role hierarchy. Verify its managed grave roles are below the bot's highest role.
+- Missing/invalid public panel destination: update the configured grave-panel channel in Discord (do not delete the private grave channels). A broken public panel is now isolated, so private team-role reconciliation and winner draws can continue. The public-panel operation retains a diagnostic until corrected.
+- Failed member fetch: check Discord's privileged Server Members Intent for the bot and whether the bot can access this guild. Do not fabricate member roles from incomplete data.
+- Database/schema error: verify the additive Four Graves migration ran on the configured prizes database; do not drop or recreate the ticket or prize tables.
+- Missing finalized per-grave prizes or frozen-snapshot integrity mismatch: stop the affected draw and inspect event configuration and frozen snapshot; **do not reroll or overwrite winners**. Previously closed legacy events require explicit review.
+
+If an error persists after a deployment, provide the **single first line with the actual error code/message** from Railway or the top of the private admin status. Sensitive values are redacted by worker logging; never paste secrets into chat.
