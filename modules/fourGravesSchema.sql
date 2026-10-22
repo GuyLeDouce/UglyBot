@@ -37,3 +37,10 @@ CREATE TABLE IF NOT EXISTS four_graves_audit (
  actor_id TEXT NOT NULL, action TEXT NOT NULL, detail JSONB NOT NULL DEFAULT '{}',
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+CREATE TABLE IF NOT EXISTS four_graves_test_tickets (
+ event_key TEXT NOT NULL CHECK(event_key LIKE 'four-graves-private-test-%'),
+ guild_id TEXT NOT NULL, discord_id TEXT NOT NULL,
+ treats INTEGER NOT NULL CHECK(treats>=0), tricks INTEGER NOT NULL CHECK(tricks>=0),
+ PRIMARY KEY(event_key,guild_id,discord_id)
+);
