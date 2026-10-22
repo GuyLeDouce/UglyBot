@@ -2,7 +2,8 @@
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const { drawPrizeWinners, winnersHash } = require("./fourGravesDraw");
+const { prizeSlots } = require("./fourGravesCore");
+const { pickNextTicket } = require("./fourGravesDraw");
 const {
   GRAVES,
   DEFAULT_CONFIG,
@@ -17,12 +18,10 @@ class FourGravesStore {
       eventKey = "squigs-four-graves-2026",
       sourceEventKey = "squigs-trick-or-treat-2026",
       testMode = false,
-      simpleDraw = false,
     } = {},
   ) {
     if (testMode && !eventKey.startsWith("four-graves-private-test-")) throw Error("Invalid sandbox key.");
-    if (simpleDraw && testMode) throw Error("The real prize draw cannot use fake tickets.");
-    Object.assign(this, { pool, eventKey, sourceEventKey, testMode, simpleDraw });
+    Object.assign(this, { pool, eventKey, sourceEventKey, testMode });
   }
   async migrate() {
     await this.pool.query(
@@ -68,8 +67,13 @@ class FourGravesStore {
         ],
       );
       const e = await this.event(c, guild, true);
-      if (this.simpleDraw && (e.config?.testMode || e.source_event_key !== this.sourceEventKey))
-        throw Error("Live Four Graves event/source mismatch. Refusing setup.");
+      if (!e.closed_at && !e.config?.mysteryByGrave) {
+        // Upgrade an existing, not-yet-closed event to the confirmed four pools.
+        // Do not alter any frozen/closed event snapshot or prize configuration.
+        await c.query("UPDATE four_graves_events SET config=$2 WHERE id=$1",
+          [e.id, JSON.stringify({ ...e.config, mysteryByGrave: DEFAULT_CONFIG.mysteryByGrave,
+            prizesFinalized: true })]);
+      }
       if (this.testMode && (e.config?.testMode !== true || e.config.testOwnerId !== String(actor) || e.source_event_key !== this.sourceEventKey))
         throw Error("Test ownership or source mismatch: refusing to operate.");
       for (const g of GRAVES)
@@ -78,7 +82,7 @@ class FourGravesStore {
           [e.id, g.id, g.game],
         );
       await this.audit(c, e.id, actor, "setup");
-      return e;
+      return this.event(c, guild);
     });
   }
   async audit(c, id, actor, action, detail = {}) {
@@ -133,9 +137,9 @@ class FourGravesStore {
             [e.id],
           )
         ).rows,
-        draw: this.simpleDraw
-          ? (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1", [e.id])).rows[0] || null
-          : null,
+        awards: (
+          await c.query("SELECT * FROM four_graves_awards WHERE event_id=$1 ORDER BY grave_id,prize_index", [e.id])
+        ).rows,
       };
     });
   }
@@ -220,22 +224,18 @@ class FourGravesStore {
         if (e.closed_at) return e;
         if (e.state !== "OPEN") throw Error("Open the graves before closing.");
         if (!e.config.prizesFinalized)
-          throw Error(
-            "Finalize the identical prize pool (including an explicit empty mystery list) before closing.",
-          );
+          throw Error("Finalize the four prize pools before closing.");
+        for (const grave of GRAVES) prizeSlots(e.config, grave.id);
         // SHARE excludes concurrent claim INSERTs while taking the exact close snapshot. Existing claim code is unchanged.
         if (!this.testMode) await c.query(
           "LOCK TABLE trick_or_treat_treats,trick_or_treat_tricks IN SHARE MODE",
         );
         const s = await this.snapshot(c, e, identities);
         await c.query(
-          this.simpleDraw
-            ? "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=NULL,generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1"
-            : "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=clock_timestamp()+interval '15 minutes',generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1",
+          "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=clock_timestamp()+interval '15 minutes',generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1",
           [e.id, JSON.stringify(s), hash(s), randomUUID()],
         );
       } else if (action === "restart") {
-        if (this.simpleDraw) throw Error("The simplified draw has no countdown to restart.");
         if (!["CLOSED_COUNTDOWN", "BUTTONS_ACTIVE"].includes(e.state))
           throw Error("No countdown to restart.");
         if (
@@ -257,7 +257,6 @@ class FourGravesStore {
     });
   }
   async decide(guild, user, grave, choice, generation) {
-    if (this.simpleDraw) throw Error("Grave decisions are retired; prizes are drawn randomly.");
     if (!["TRICK", "TREAT"].includes(choice)) throw Error("Invalid choice.");
     return this.transaction(async (c) => {
       const e = await this.event(c, guild, true);
@@ -284,7 +283,7 @@ class FourGravesStore {
         at: new Date(e.db_now).toISOString(),
       };
       const r = await c.query(
-        "UPDATE four_graves_graves SET decision=$3,next_reveal_at=clock_timestamp() WHERE event_id=$1 AND grave_id=$2 AND decision IS NULL RETURNING *",
+        "UPDATE four_graves_graves SET decision=$3,next_reveal_at=clock_timestamp(),next_draw_at=clock_timestamp()+interval '2 minutes' WHERE event_id=$1 AND grave_id=$2 AND decision IS NULL RETURNING *",
         [e.id, grave, JSON.stringify(decision)],
       );
       if (!r.rowCount)
@@ -293,49 +292,76 @@ class FourGravesStore {
       return r.rows[0];
     });
   }
-  async draw(guild, actor) {
-    if (!this.simpleDraw) throw Error("The random prize draw is not active for this store.");
-    return this.transaction(async (c) => {
-      const e = await this.event(c, guild, true);
-      if (e.config?.testMode || e.source_event_key !== this.sourceEventKey)
-        throw Error("Event source mismatch; refusing live draw.");
-      const prior = (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1", [e.id])).rows[0];
-      if (prior) return prior; // Never re-roll if button/command is retried.
-      if (e.state !== "CLOSED_COUNTDOWN" || !e.closed_at || e.deadline || !e.snapshot || !e.snapshot_hash)
-        throw Error("Close the simplified graves first. A legacy countdown/reveal must be reviewed separately.");
-      if (hash(e.snapshot) !== e.snapshot_hash)
-        throw Error("Frozen ticket snapshot hash mismatch; refusing draw.");
-      const winners = drawPrizeWinners(e.snapshot, e.config);
-      const result = (await c.query(
-        "INSERT INTO four_graves_draws(event_id,snapshot_hash,results,results_hash,drawn_by) VALUES($1,$2,$3,$4,$5) RETURNING *",
-        [e.id,e.snapshot_hash,JSON.stringify(winners),winnersHash(winners),actor],
-      )).rows[0];
-      await this.audit(c, e.id, actor, "random-prize-draw", { snapshotHash: e.snapshot_hash, resultsHash: result.results_hash });
-      return result;
-    });
-  }
-  async markPublished(guild, actor, channelId, messageId) {
-    if (!this.simpleDraw) throw Error("Not a simplified draw.");
+  // Draw precisely one prize at a time, using the immutable close snapshot.
+  // A pending, unannounced draw is always returned first, so a reconnect never rerolls it.
+  async nextPrize(guild, graveId) {
+    if (!GRAVES.some(g=>g.id===graveId)) throw Error("Unknown grave.");
     return this.transaction(async c => {
       const e = await this.event(c, guild, true);
-      const d = (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1 FOR UPDATE", [e.id])).rows[0];
-      if (!d) throw Error("Draw the winners before publishing.");
-      if (d.published_at) {
-        if (d.channel_id !== channelId || d.message_id !== messageId)
-          throw Error("Winners were already published elsewhere.");
-        return d;
-      }
-      if (e.config?.testMode || e.source_event_key !== this.sourceEventKey || e.state !== "CLOSED_COUNTDOWN" || e.deadline)
-        throw Error("Unsafe event state; cannot publish.");
-      if (d.snapshot_hash !== e.snapshot_hash || winnersHash(d.results) !== d.results_hash)
-        throw Error("Draw integrity mismatch; refusing publication.");
-      const result = (await c.query(
-        "UPDATE four_graves_draws SET channel_id=$2,message_id=$3,published_at=clock_timestamp() WHERE event_id=$1 RETURNING *",
-        [e.id,channelId,messageId],
+      if (!e.closed_at || !e.snapshot || !e.snapshot_hash ||
+          hash(e.snapshot) !== e.snapshot_hash)
+        throw Error("Frozen ticket snapshot integrity check failed.");
+      const g = (await c.query(
+        "SELECT * FROM four_graves_graves WHERE event_id=$1 AND grave_id=$2 FOR UPDATE",
+        [e.id,graveId],
       )).rows[0];
-      await c.query("UPDATE four_graves_events SET state='REVEALED' WHERE id=$1", [e.id]);
-      await this.audit(c,e.id,actor,"publish-prize-results",{channelId,messageId});
-      return result;
+      if (!g || !g.decision) return null;
+      const prior = (await c.query(
+        "SELECT * FROM four_graves_awards WHERE event_id=$1 AND grave_id=$2 ORDER BY prize_index",
+        [e.id,graveId],
+      )).rows;
+      const outstanding = prior.find(a=>!a.announced_at);
+      if (outstanding) return outstanding;
+      const slots = prizeSlots(e.config, graveId);
+      if (prior.length >= slots.length || g.draw_completed_at || !g.next_draw_at ||
+          !g.reveal_stage || g.reveal_stage < 3 ||
+          new Date(g.next_draw_at) > new Date(e.db_now)) return null;
+      const entries = e.snapshot.entries.filter(x=>x.grave_id===graveId);
+      if (!entries.length) return null;
+      const chosen = pickNextTicket(entries,prior);
+      const prize = slots[prior.length];
+      const inserted = (await c.query(
+        "INSERT INTO four_graves_awards(event_id,grave_id,prize_index,prize_name,prize_unit,winner_discord_id,winner_display_name,ticket_entry_id,pass_number) " +
+        "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+        [e.id,graveId,prior.length+1,prize.name,prize.unit,
+          chosen.ticket.discord_id,chosen.ticket.display_name,
+          chosen.ticket.id,chosen.pass_number],
+      )).rows[0];
+      await this.audit(c,e.id,"AUTO_DRAW","prize-drawn",{
+        graveId,prizeIndex:inserted.prize_index,ticket:inserted.ticket_entry_id,
+        pass:inserted.pass_number,
+      });
+      return inserted;
+    });
+  }
+  async markPrizeAnnounced(guild, graveId, prizeIndex, messageId) {
+    return this.transaction(async c => {
+      const e = await this.event(c, guild, true);
+      const g = (await c.query(
+        "SELECT * FROM four_graves_graves WHERE event_id=$1 AND grave_id=$2 FOR UPDATE",
+        [e.id,graveId],
+      )).rows[0];
+      const award = (await c.query(
+        "SELECT * FROM four_graves_awards WHERE event_id=$1 AND grave_id=$2 AND prize_index=$3 FOR UPDATE",
+        [e.id,graveId,prizeIndex],
+      )).rows[0];
+      if (!g || !g.decision || !award) throw Error("Unrecognized grave prize.");
+      if (award.announced_at) {
+        if (award.message_id !== messageId) throw Error("Prize announcement ID mismatch.");
+        return award;
+      }
+      const updated = (await c.query(
+        "UPDATE four_graves_awards SET message_id=$4,announced_at=clock_timestamp() " +
+        "WHERE event_id=$1 AND grave_id=$2 AND prize_index=$3 RETURNING *",
+        [e.id,graveId,prizeIndex,messageId],
+      )).rows[0];
+      const complete = prizeIndex >= prizeSlots(e.config,graveId).length;
+      if (complete)
+        await c.query("UPDATE four_graves_graves SET next_draw_at=NULL,draw_completed_at=clock_timestamp() WHERE event_id=$1 AND grave_id=$2", [e.id,graveId]);
+      else
+        await c.query("UPDATE four_graves_graves SET next_draw_at=clock_timestamp()+interval '15 seconds' WHERE event_id=$1 AND grave_id=$2", [e.id,graveId]);
+      await this.audit(c,e.id,"AUTO_DRAW","prize-announced",{graveId,prizeIndex,messageId});
+      return updated;
     });
   }
   async operation(id, key, error = null) {
