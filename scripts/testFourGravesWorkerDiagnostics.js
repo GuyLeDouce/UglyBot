@@ -9,7 +9,7 @@ async function main() {
       if (sql.includes("pg_try_advisory_lock"))
         return { rows: [{locked:true}] };
       if (sql.includes("SELECT * FROM four_graves_events"))
-        return {rows:[{id:params[0]}]};
+        return {rows:[{id:params[0], config:{testMode:true, category:"test-cat"}, panel_channel_id:"test-control"}]};
       return {rows:[],rowCount:1};
     },
     release: () => {},
