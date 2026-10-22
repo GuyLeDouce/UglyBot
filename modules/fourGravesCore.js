@@ -41,10 +41,37 @@ const DEFAULT_CONFIG = {
     { name: "Ugly Monster", quantity: 1 },
     { name: "5,000 $CHARM", quantity: 5 },
   ],
-  mystery: [],
-  prizesFinalized: false,
+  mystery: [], // Legacy field retained for stored pre-finale records.
+  mysteryByGrave: {
+    barry_buckets: [{ name: "Scribble Otter Yoink Club", quantity: 3 }],
+    barbara_bowkins: [{ name: "Visions of the Void", quantity: 1 }],
+    cletus_von_wrinkles: [{ name: "Doruzu (ApeChain)", quantity: 2 }],
+    scuba_steve_3000: [{ name: "Chill Bugs", quantity: 3 }],
+  },
+  prizesFinalized: true,
   revealDelaySeconds: 3,
 };
+function prizePoolForGrave(config, graveId) {
+  if (!GRAVES.some(g => g.id === graveId)) throw Error("Unknown grave.");
+  if (!config?.prizesFinalized) throw Error("Finalize the prize pools before drawing.");
+  if (!config.mysteryByGrave || !Object.prototype.hasOwnProperty.call(config.mysteryByGrave, graveId))
+    throw Error("This grave has no finalized mystery prize configuration.");
+  const pool = [...(config.prizes || []), ...config.mysteryByGrave[graveId]];
+  if (pool.length > 30 || pool.some(p =>
+    !p || typeof p.name !== "string" || !p.name.trim() ||
+    !Number.isSafeInteger(p.quantity) || p.quantity < 1 || p.quantity > 100))
+    throw Error("Invalid prize configuration for " + graveId);
+  if (pool.reduce((n,p)=>n+p.quantity,0) > 1000)
+    throw Error("Too many prize units in " + graveId);
+  return pool.map(p=>({ name: p.name, quantity: p.quantity }));
+}
+function prizeSlots(config, graveId) {
+  const out=[];
+  for(const prize of prizePoolForGrave(config, graveId))
+    for(let index=1;index<=prize.quantity;index++)
+      out.push({ name: prize.name, unit: index, total: prize.quantity });
+  return out;
+}
 function quantity(value) {
   if (
     !/^[1-9]\d*$/.test(String(value)) ||
@@ -340,6 +367,8 @@ module.exports = {
   csvRecords,
   GRAVES,
   DEFAULT_CONFIG,
+  prizePoolForGrave,
+  prizeSlots,
   quantity,
   safeName,
   csv,
