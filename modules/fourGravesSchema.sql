@@ -45,16 +45,25 @@ CREATE TABLE IF NOT EXISTS four_graves_test_tickets (
  PRIMARY KEY(event_key,guild_id,discord_id)
 );
 
--- One immutable, administrator-triggered prize draw per event.
--- Separate from legacy role/channel/decision fields retained for compatibility.
-CREATE TABLE IF NOT EXISTS four_graves_draws (
- event_id BIGINT PRIMARY KEY REFERENCES four_graves_events(id),
- snapshot_hash TEXT NOT NULL,
- results JSONB NOT NULL,
- results_hash TEXT NOT NULL,
- drawn_by TEXT NOT NULL,
- drawn_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
- channel_id TEXT,
+-- Per-grave durable 2-minute wait, 15-second draw pacing, and recovery markers.
+ALTER TABLE four_graves_graves
+ ADD COLUMN IF NOT EXISTS choice_message_id TEXT,
+ ADD COLUMN IF NOT EXISTS next_draw_at TIMESTAMPTZ,
+ ADD COLUMN IF NOT EXISTS draw_completed_at TIMESTAMPTZ;
+
+-- One immutable winning ticket per prize; publication is reconciled by marker.
+CREATE TABLE IF NOT EXISTS four_graves_awards (
+ event_id BIGINT NOT NULL,
+ grave_id TEXT NOT NULL,
+ prize_index INTEGER NOT NULL CHECK (prize_index > 0),
+ prize_name TEXT NOT NULL,
+ prize_unit INTEGER NOT NULL CHECK (prize_unit > 0),
+ winner_discord_id TEXT NOT NULL,
+ winner_display_name TEXT NOT NULL,
+ ticket_entry_id TEXT NOT NULL,
+ pass_number INTEGER NOT NULL CHECK (pass_number > 0),
  message_id TEXT,
- published_at TIMESTAMPTZ
+ announced_at TIMESTAMPTZ,
+ PRIMARY KEY(event_id,grave_id,prize_index),
+ FOREIGN KEY(event_id,grave_id) REFERENCES four_graves_graves(event_id,grave_id)
 );
