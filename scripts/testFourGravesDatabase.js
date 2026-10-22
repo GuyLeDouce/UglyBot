@@ -272,6 +272,7 @@ async function main() {
           "UPDATE four_graves_events SET panel_channel_id=NULL WHERE id=$1",
           [original.id],
         );
+        await s.operation(original.id, "public-panel");
       }
     });
     await test("membership assigned for every allocated grave", async () => {
