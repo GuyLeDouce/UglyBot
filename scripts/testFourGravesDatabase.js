@@ -423,6 +423,52 @@ async function main() {
         else process.env.FOUR_GRAVES_ENABLED = old;
       }
     });
+    await test("Cletus RugDollz upgrade updates only unclosed matching pools", async () => {
+      const legacy = new FourGravesStore(pool, {
+        eventKey: "squigs-four-graves-prize-change-fixture",
+        sourceEventKey: s.sourceEventKey,
+      });
+      const oldPrize = [{ name: "Doruzu (ApeChain)", quantity: 2 }];
+      const newPrize = [{ name: "RugDollz 3D", quantity: 3 }];
+      const customPrize = [{ name: "Alternate Custom NFT", quantity: 2 }];
+      for (const guildId of ["prize-open", "prize-closed", "prize-custom"]) {
+        const e = await legacy.setup(guildId, "admin");
+        const old = guildId === "prize-custom" ? customPrize : oldPrize;
+        await pool.query(
+          "UPDATE four_graves_events SET config=jsonb_set(config,'{mysteryByGrave,cletus_von_wrinkles}',$2::jsonb,false) WHERE id=$1",
+          [e.id, JSON.stringify(old)],
+        );
+        if (guildId !== "prize-custom") await legacy.transition(guildId, "admin", "open");
+        if (guildId === "prize-closed") await legacy.transition(guildId, "admin", "close");
+      }
+      const frozenBefore = (await legacy.read("prize-closed")).event;
+      await legacy.migrate();
+      const open = (await legacy.read("prize-open")).event;
+      const closed = (await legacy.read("prize-closed")).event;
+      const custom = (await legacy.read("prize-custom")).event;
+      assert.deepEqual(open.config.mysteryByGrave.cletus_von_wrinkles, newPrize);
+      assert.equal(open.config.prizesFinalized, true);
+      assert.equal(open.state, "OPEN");
+      assert.deepEqual(closed.config.mysteryByGrave.cletus_von_wrinkles, oldPrize);
+      assert.equal(closed.snapshot_hash, frozenBefore.snapshot_hash);
+      assert.equal(closed.state, "CLOSED_COUNTDOWN");
+      assert.deepEqual(custom.config.mysteryByGrave.cletus_von_wrinkles, customPrize);
+      assert.equal(open.config.mysteryByGrave.barry_buckets[0].name, "Scribble Otter Yoink Club");
+      const audits = () => pool.query(
+        "SELECT event_id,action,detail FROM four_graves_audit WHERE action='cletus-bonus-prize-update'",
+      );
+      const first = await audits();
+      assert.equal(first.rows.length, 1);
+      assert.equal(String(first.rows[0].event_id), String(open.id));
+      assert.deepEqual(first.rows[0].detail.old, oldPrize);
+      assert.deepEqual(first.rows[0].detail.new, newPrize);
+      await legacy.migrate();
+      assert.equal((await audits()).rows.length, 1);
+      assert.deepEqual(
+        (await legacy.read("prize-open")).event.config.mysteryByGrave.cletus_von_wrinkles,
+        newPrize,
+      );
+    });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,
     );
