@@ -509,7 +509,8 @@ async function handle(i) {
       }
       throw Error("Unknown TEST command.");
     }
-    return await handleTestComponent(i, e, parts), true;
+    await handleTestComponent(i, e, parts);
+    return true;
   } catch (err) {
     await reply(i, "🧪 TEST ERROR: " + String(err.message).slice(0, 1500));
   }
