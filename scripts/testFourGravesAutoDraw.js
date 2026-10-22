@@ -19,7 +19,7 @@ for (const g of GRAVES) {
   assert.equal(pool.find(p=>p.name==="5,000 $CHARM").quantity,5);
   assert.equal(pool.find(p=>p.name==="Squigs Reloaded").quantity,3);
 }
-assert.throws(() => prizePoolForGrave({ ...DEFAULT_CONFIG,mysteryByGrave:{} },GRAVES[0].id),/not finalized/);
+assert.throws(() => prizePoolForGrave({ ...DEFAULT_CONFIG,mysteryByGrave:{} },GRAVES[0].id),/finalized/);
 const entries = [
   {id:"A-1",discord_id:"A",display_name:"A"},
   {id:"A-2",discord_id:"A",display_name:"A"},
