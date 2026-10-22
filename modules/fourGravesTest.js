@@ -268,8 +268,10 @@ async function status(i) {
       ", " + (x.decision?.choice || "waiting"));
   }
   const problems = d.operations.filter(x => x.last_error);
-  lines.push("Worker errors: " + (problems.length ?
-    problems.map(x => x.operation_key + ": " + x.last_error).join("; ") : "none"));
+  if (problems.length) lines.splice(1,0,
+    "**⚠️ TEST WORKER ERRORS**\n" + problems.slice(0,5).map(x=>
+      x.operation_key+": "+String(x.last_error).slice(0,240)).join("\n"));
+  else lines.splice(1,0,"Worker errors: none");
   return lines.join("\n").slice(0, 1850);
 }
 
