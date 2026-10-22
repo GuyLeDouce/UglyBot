@@ -20,8 +20,12 @@ function publicPanel(e) {
     embeds: [
       {
         title: e.config.testMode ? "🧪 TEST ONLY — THE FOUR GRAVES" : "TRICK OR TREAT: THE FOUR GRAVES",
-        description:
-          "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
+        description: e.config.testMode
+          ? "🧪 **PRIVATE SIMULATION — NO REAL TICKETS OR PRIZES.**\n\n" +
+            "Use the test controls to practice burying fake tickets. These four graves " +
+            "are separate from the real October Trick or Treat event. " +
+            "Test allocations can be removed with /fourgravestest reset.\n\nSTAY UGLY."
+          : "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
         ...(e.config.image ? { image: { url: e.config.image } } : {}),
         footer: { text: `four-graves:${e.id}:public` },
       },
@@ -440,6 +444,7 @@ class FourGravesDiscord {
               event.id,
             ])
           ).rows[0];
+          if (this.store.testMode && (!e.config?.category || !e.panel_channel_id)) continue;
           await this.reconcile(e);
           await this.store.operation(e.id, "worker");
         } catch (err) {
