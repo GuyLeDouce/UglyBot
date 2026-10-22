@@ -8,6 +8,7 @@ const {
 function fixture(guildId) {
   let id = 1000;
   const fail = { role: false, message: false };
+  const calls = { gatewayFetch: 0, restList: 0 };
   const roles = new Collection(),
     channels = new Collection(),
     members = new Collection();
@@ -37,14 +38,32 @@ function fixture(guildId) {
   const guild = {
     id: guildId,
     members: {
-      fetch: async () => members,
+      // Unbounded member fetch uses opcode 8 and must never be called by the
+      // recurring Four Graves worker.
+      fetch: async () => {
+        calls.gatewayFetch++;
+        throw Error("Forbidden gateway opcode 8 full-member fetch");
+      },
+      list: async ({ limit = 1000, after } = {}) => {
+        calls.restList++;
+        const ordered = [...members.values()].sort((a, b) =>
+          BigInt(a.id) < BigInt(b.id) ? -1 : 1,
+        ).filter(m => !after || BigInt(m.id) > BigInt(after))
+         .slice(0, limit);
+        return new Collection(ordered.map(m => [m.id, m]));
+      },
       fetchMe: async () => ({
         permissions: new PermissionsBitField([P.ManageRoles, P.ManageChannels]),
       }),
     },
     roles: {
       cache: roles,
-      fetch: async () => roles,
+      fetch: async (roleId) => {
+        if (!roleId) return roles;
+        const found = roles.get(roleId);
+        if (!found) throw Object.assign(Error("Unknown Role"), { code: 10011, status: 404 });
+        return found;
+      },
       create: async (args) => {
         const role = {
           id: String(++id),
@@ -112,6 +131,7 @@ function fixture(guildId) {
     roles,
     channels,
     fail,
+    calls,
     deps: {
       client: { user: { id: "bot" }, guilds: { fetch: async () => guild } },
       enabled: () => true,

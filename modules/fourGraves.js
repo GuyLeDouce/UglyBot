@@ -1,7 +1,7 @@
 "use strict";
 const { SlashCommandBuilder, ChannelType } = require("discord.js");
 const { FourGravesStore } = require("./fourGravesStore");
-const { FourGravesDiscord, button, row, cid } = require("./fourGravesDiscord");
+const { FourGravesDiscord, button, row, cid, getGuildMemberRoster } = require("./fourGravesDiscord");
 const { prizeWinnerCsv } = require("./fourGravesDraw");
 const {
   GRAVES,
@@ -249,9 +249,17 @@ async function exportsReply(i, grave = "all", format = "all") {
   });
 }
 async function identities(i) {
-  const members = await i.guild.members.fetch();
+  // Avoid gateway opcode 8 when closing graves. A REST roster is already
+  // shared with LIVE/TEST workers and cached. Saved allocation identities
+  // remain available if Discord member listing is temporarily unavailable.
+  let members;
+  try { members = await getGuildMemberRoster(i.guild); }
+  catch (err) {
+    console.warn("[FourGraves] Member names unavailable during CLOSE; using saved allocation identities.");
+    return {};
+  }
   return Object.fromEntries(
-    [...members.values()].map((m) => [
+    [...members.values()].map(m => [
       m.id,
       { username: m.user.username, display_name: m.displayName },
     ]),
