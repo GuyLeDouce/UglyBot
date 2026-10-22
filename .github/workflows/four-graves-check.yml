@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: '20'
       - run: npm install --ignore-scripts
-      - run: node --check index.js && node --check modules/fourGravesTest.js && npm run test:trick-or-treat && npm run test:four-graves && npm run test:four-graves-private && node --check modules/fourGravesDraw.js && npm run test:four-graves-auto-draw
+      - run: node --check index.js && node --check modules/fourGravesTest.js && npm run test:trick-or-treat && npm run test:four-graves && npm run test:four-graves-private && node --check modules/fourGravesDraw.js && npm run test:four-graves-auto-draw && npm run test:four-graves-worker-diagnostics
       - run: npm run test:four-graves-db && npm run test:four-graves-private-db
         env:
           FOUR_GRAVES_TEST_DATABASE_URL: postgres://postgres:test_only@localhost:5432/four_graves_test
