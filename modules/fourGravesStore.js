@@ -15,9 +15,11 @@ class FourGravesStore {
     {
       eventKey = "squigs-four-graves-2026",
       sourceEventKey = "squigs-trick-or-treat-2026",
+      testMode = false,
     } = {},
   ) {
-    Object.assign(this, { pool, eventKey, sourceEventKey });
+    if (testMode && !eventKey.startsWith("four-graves-private-test-")) throw Error("Invalid sandbox key.");
+    Object.assign(this, { pool, eventKey, sourceEventKey, testMode });
   }
   async migrate() {
     await this.pool.query(
@@ -50,16 +52,21 @@ class FourGravesStore {
   }
   async setup(guild, actor) {
     return this.transaction(async (c) => {
+      const config = this.testMode
+        ? { ...DEFAULT_CONFIG, testMode: true, testOwnerId: String(actor), prizesFinalized: true }
+        : DEFAULT_CONFIG;
       await c.query(
         "INSERT INTO four_graves_events(event_key,guild_id,source_event_key,config) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
         [
           this.eventKey,
           guild,
           this.sourceEventKey,
-          JSON.stringify(DEFAULT_CONFIG),
+          JSON.stringify(config),
         ],
       );
       const e = await this.event(c, guild, true);
+      if (this.testMode && (e.config?.testMode !== true || e.config.testOwnerId !== String(actor) || e.source_event_key !== this.sourceEventKey))
+        throw Error("Test ownership or source mismatch: refusing to operate.");
       for (const g of GRAVES)
         await c.query(
           "INSERT INTO four_graves_graves(event_id,grave_id,fixed_game) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
@@ -76,6 +83,7 @@ class FourGravesStore {
     );
   }
   async earned(c, e) {
+    if (this.testMode) return (await c.query("SELECT discord_id,treats,tricks FROM four_graves_test_tickets WHERE event_key=$1 AND guild_id=$2 ORDER BY discord_id", [this.eventKey,e.guild_id])).rows;
     return (
       await c.query(
         `WITH claims AS (
@@ -208,7 +216,7 @@ class FourGravesStore {
             "Finalize the identical prize pool (including an explicit empty mystery list) before closing.",
           );
         // SHARE excludes concurrent claim INSERTs while taking the exact close snapshot. Existing claim code is unchanged.
-        await c.query(
+        if (!this.testMode) await c.query(
           "LOCK TABLE trick_or_treat_treats,trick_or_treat_tricks IN SHARE MODE",
         );
         const s = await this.snapshot(c, e, identities);

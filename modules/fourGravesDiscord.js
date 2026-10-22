@@ -19,9 +19,13 @@ function publicPanel(e) {
   return {
     embeds: [
       {
-        title: "TRICK OR TREAT: THE FOUR GRAVES",
-        description:
-          "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
+        title: e.config.testMode ? "🧪 TEST ONLY — THE FOUR GRAVES" : "TRICK OR TREAT: THE FOUR GRAVES",
+        description: e.config.testMode
+          ? "🧪 **PRIVATE SIMULATION — NO REAL TICKETS OR PRIZES.**\n\n" +
+            "Use the test controls to practice burying fake tickets. These four graves " +
+            "are separate from the real October Trick or Treat event. " +
+            "Test allocations can be removed with /fourgravestest reset.\n\nSTAY UGLY."
+          : "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
         ...(e.config.image ? { image: { url: e.config.image } } : {}),
         footer: { text: `four-graves:${e.id}:public` },
       },
@@ -46,16 +50,14 @@ function decisionPanel(e, g) {
     ? `Your tickets are buried. Your team has been chosen.\n\nTRICK or TREAT. One person decides for everyone here. Discuss it. Argue about it. Or be the asshole who presses first.\n\nButtons eligible <t:${Math.floor(new Date(e.deadline).getTime() / 1000)}:R>.`
     : "This grave has no eligible contestants. The administrator will handle its unused prize pool manually.";
   if (decision)
-    description = `<@${decision.user_id}> HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
+    description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
   if (g.reveal_stage >= 2) description += "\n\nTHE GRAVE IS OPENING...";
   if (g.reveal_stage >= 3)
     description += `\n\n**${e.config.names[i].toUpperCase()} HAS AWAKENED.**\n\nYour game: **${meta.game}**\n\n${e.config.rules[i]}\n\n**PRIZE POOL**\n${[...e.config.prizes, ...e.config.mystery].map((p) => `${p.quantity} × ${p.name}`).join("\n")}\n\nGames, prize wheels and all prize distribution are handled manually by the administrator. Stay Ugly.`;
   return {
     embeds: [
       {
-        title: decision
-          ? "THE FATE OF THIS GRAVE IS SEALED"
-          : "YOUR FATE AWAITS",
+        title: `${e.config.testMode ? "🧪 TEST — " : ""}${decision ? "THE FATE OF THIS GRAVE IS SEALED" : "YOUR FATE AWAITS"}`,
         description,
         footer: { text: `four-graves:${e.id}:${g.grave_id}` },
       },
@@ -107,8 +109,9 @@ class FourGravesDiscord {
         ],
       },
     ];
-    const adminIds = new Set(this.deps.adminIds());
-    for (const r of guild.roles.cache.values())
+    const isTest = e.config.testMode === true;
+    const adminIds = new Set(isTest ? [e.config.testOwnerId] : this.deps.adminIds());
+    for (const r of (isTest ? [] : guild.roles.cache.values()))
       if (
         r.id !== guild.id &&
         r.id !== role.id &&
@@ -155,7 +158,8 @@ class FourGravesDiscord {
   }
   async resources(guild, e, g) {
     const i = GRAVES.findIndex((x) => x.id === g.grave_id);
-    const roleName = `Grave — ${e.config.names[i]} [FG${e.id}]`;
+    const isTest = e.config.testMode === true;
+    const roleName = `${isTest ? "[TEST] " : ""}Grave — ${e.config.names[i]} [FG${e.id}]`;
     await guild.roles.fetch();
     let role = g.role_id ? guild.roles.cache.get(g.role_id) : null;
     if (!role)
@@ -213,7 +217,7 @@ class FourGravesDiscord {
         },
         () =>
           guild.channels.create({
-            name: "grave-" + g.grave_id.replaceAll("_", "-"),
+            name: (isTest ? "test-" : "") + "grave-" + g.grave_id.replaceAll("_", "-"),
             type: ChannelType.GuildText,
             topic: marker,
             parent: e.config.category || undefined,
@@ -287,6 +291,8 @@ class FourGravesDiscord {
     );
   }
   async reconcile(e) {
+    if (this.store.testMode !== (e.config?.testMode === true))
+      throw Error("Four Graves event-mode mismatch; refusing Discord changes.");
     const guild = await this.deps.client.guilds.fetch(e.guild_id);
     const me = await guild.members.fetchMe();
     if (!me.permissions.has([P.ManageRoles, P.ManageChannels]))
@@ -369,7 +375,7 @@ class FourGravesDiscord {
           )
         ).rows[0];
         await this.store.operation(e.id, key, error);
-        if (previous?.last_error !== error && this.deps.postAdminSystemLog)
+        if (!e.config.testMode && previous?.last_error !== error && this.deps.postAdminSystemLog)
           await this.deps
             .postAdminSystemLog({
               guildId: e.guild_id,
@@ -438,6 +444,7 @@ class FourGravesDiscord {
               event.id,
             ])
           ).rows[0];
+          if (this.store.testMode && (!e.config?.category || !e.panel_channel_id)) continue;
           await this.reconcile(e);
           await this.store.operation(e.id, "worker");
         } catch (err) {
