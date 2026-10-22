@@ -260,12 +260,12 @@ test("invalid per-grave mystery quantities rejected", () => {
   assert.throws(() => validatePatch({ mysteryByGrave: choices }));
   assert.throws(() => validatePatch({ mystery: [] }));
 });
-test("four finalized distinct grave pools total 49 prizes", () => {
+test("four finalized distinct grave pools total 50 prizes", () => {
   const { prizeSlots } = require("../modules/fourGravesCore");
-  assert.deepEqual(GRAVES.map(g=>prizeSlots(DEFAULT_CONFIG,g.id).length),[13,11,12,13]);
+  assert.deepEqual(GRAVES.map(g=>prizeSlots(DEFAULT_CONFIG,g.id).length),[13,11,13,13]);
   assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[0].id).some(p=>p.name==="Scribble Otter Yoink Club"));
   assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[1].id).some(p=>p.name==="Visions of the Void"));
-  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[2].id).some(p=>p.name==="Doruzu (ApeChain)"));
+  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[2].id).some(p=>p.name==="RugDollz 3D"));
   assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[3].id).some(p=>p.name==="Chill Bugs"));
 });
 test("slash command serializes with Discord builders", () =>

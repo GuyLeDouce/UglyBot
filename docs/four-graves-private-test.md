@@ -68,4 +68,4 @@ If you need an emergency off-switch, set FOUR_GRAVES_TEST_ENABLED=false and rede
 
 ## Updated finale mechanics
 
-The separate production test worker now rehearses the real grave-specific prize pools (13, 11, 12 and 13 prizes respectively), one choice per team, a two-minute initial draw delay and fifteen seconds between sequential winners. Test mode never sends @everyone, transfers prizes or reads actual October claims. Do not run production /fourgraves commands for rehearsal.
+The separate production test worker now rehearses the real grave-specific prize pools (13, 11, 13 and 13 prizes respectively), one choice per team, a two-minute initial draw delay and fifteen seconds between sequential winners. Test mode never sends @everyone, transfers prizes or reads actual October claims. Do not run production /fourgraves commands for rehearsal.

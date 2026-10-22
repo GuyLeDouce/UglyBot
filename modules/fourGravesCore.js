@@ -45,7 +45,7 @@ const DEFAULT_CONFIG = {
   mysteryByGrave: {
     barry_buckets: [{ name: "Scribble Otter Yoink Club", quantity: 3 }],
     barbara_bowkins: [{ name: "Visions of the Void", quantity: 1 }],
-    cletus_von_wrinkles: [{ name: "Doruzu (ApeChain)", quantity: 2 }],
+    cletus_von_wrinkles: [{ name: "RugDollz 3D", quantity: 3 }],
     scuba_steve_3000: [{ name: "Chill Bugs", quantity: 3 }],
   },
   prizesFinalized: true,
