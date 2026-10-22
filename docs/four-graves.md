@@ -79,3 +79,19 @@ Common fixes depend on the **actual** exception:
 - Missing finalized per-grave prizes or frozen-snapshot integrity mismatch: stop the affected draw and inspect event configuration and frozen snapshot; **do not reroll or overwrite winners**. Previously closed legacy events require explicit review.
 
 If an error persists after a deployment, provide the **single first line with the actual error code/message** from Railway or the top of the private admin status. Sensitive values are redacted by worker logging; never paste secrets into chat.
+
+## Fix for Discord gateway opcode 8 rate limiting (October 22, 2026)
+
+If Railway logs show **Request with opcode 8 was rate limited**, the cause is repeated requests for the full guild membership. Do **not** reset Four Graves, delete channels, clear tickets, or change prize results.
+
+- The Four Graves polling worker no longer invokes the gateway full-member fetch method. It lists guild members using Discord's paginated **HTTP List Guild Members** endpoint (up to 1,000 per page), not gateway opcode 8.
+- The LIVE and TEST workers share one in-process roster request and a 15-minute membership cache per Discord guild, and refresh after expiry. A failed listing triggers a minimum two-minute cooldown. Both workers continue reconciling grave panels, countdowns and saved prize announcements even if membership refreshing is temporarily unavailable.
+- Before close, no guild-wide membership list is required for resource setup, so the worker skips it entirely.
+- New member join/leave events update the shared cache immediately. Routine reconciliation then restores or removes any relevant private grave roles, without a full membership re-request.
+- During CLOSE, current member names come from the same safe REST roster. If this listing is temporarily unavailable, the frozen snapshot preserves the existing allocation identities without blocking closure.
+- The worker reuses cached guild roles, channels and messages rather than issuing bulk resource requests every 15 seconds.
+- This change does not alter any earned ticket, allocation, prize pool, previously drawn winner, draw schedule, or event state.
+
+**Rollout:** Merge the rate-limit hotfix PR manually, redeploy the existing UglyBot, and verify the old opcode-8 errors stop. Keep FOUR_GRAVES_ENABLED unchanged. If the private rehearsal is not in use, set FOUR_GRAVES_TEST_ENABLED=false temporarily to reduce unnecessary work. Discord requires Server Members Intent to list guild members.
+
+**Verification:** GitHub's Four Graves check now runs test:four-graves-member-roster, which validates cache sharing, HTTP pagination, guild join/leave updates, blocked-request cooldown, and no gateway member fetch on OPEN/SETUP. Production Discord HTTP and permissions behavior still requires post-deployment confirmation.
