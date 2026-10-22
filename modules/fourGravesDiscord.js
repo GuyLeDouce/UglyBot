@@ -287,6 +287,8 @@ class FourGravesDiscord {
     );
   }
   async reconcile(e) {
+    if (this.store.testMode !== (e.config?.testMode === true))
+      throw Error("Four Graves event-mode mismatch; refusing Discord changes.");
     const guild = await this.deps.client.guilds.fetch(e.guild_id);
     const me = await guild.members.fetchMe();
     if (!me.permissions.has([P.ManageRoles, P.ManageChannels]))
