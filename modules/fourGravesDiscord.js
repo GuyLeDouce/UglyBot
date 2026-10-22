@@ -3,6 +3,7 @@ const {
   PermissionFlagsBits: P,
   PermissionsBitField,
   ChannelType,
+  Collection,
 } = require("discord.js");
 const { GRAVES, prizePoolForGrave } = require("./fourGravesCore");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
@@ -26,6 +27,82 @@ function diagnosticError(err) {
     .replace(/\s+/g, " ").slice(0, 550);
   return (code ? "[" + String(code).slice(0, 32) + "] " : "") + msg;
 }
+
+const MEMBER_ROSTER_TTL_MS = 15 * 60 * 1000;
+const MEMBER_ROSTER_BACKOFF_MS = 2 * 60 * 1000;
+// Keyed by the actual Discord guild instance, so LIVE and TEST share the
+// exact same fetch and cache within this bot process.
+const memberRosterStates = new WeakMap();
+
+function memberRosterState(guild) {
+  let state = memberRosterStates.get(guild);
+  if (!state) {
+    state = { members: null, refreshedAt: 0, retryAt: 0, pending: null };
+    memberRosterStates.set(guild, state);
+  }
+  return state;
+}
+
+function noteGuildMemberChange(member, joined) {
+  if (!member?.guild || !member.id) return;
+  const state = memberRosterStates.get(member.guild);
+  if (!state?.members) return;
+  if (joined) state.members.set(member.id, member);
+  else state.members.delete(member.id);
+}
+
+// Discord's guild.members.fetch() without a user ID emits gateway opcode 8.
+// NEVER use it in periodic workers. GuildMemberManager.list uses the paginated
+// REST List Guild Members route, and is shared/cached across LIVE + TEST.
+async function listGuildMembersRest(guild) {
+  if (typeof guild.members.list !== "function")
+    throw Error("discord.js GuildMemberManager.list() is required for safe member reconciliation.");
+  const members = new Collection();
+  let after = undefined;
+  for (let page = 0; page < 500; page++) {
+    const batch = await guild.members.list({ limit: 1000, ...(after ? { after } : {}) });
+    if (!batch || typeof batch.values !== "function" || typeof batch.size !== "number")
+      throw Error("REST member listing returned an invalid page.");
+    const pageMembers = [...batch.values()];
+    for (const member of pageMembers) members.set(member.id, member);
+    if (batch.size < 1000) return members;
+    const last = typeof batch.lastKey === "function"
+      ? batch.lastKey() : pageMembers.at(-1)?.id;
+    if (!last || last === after)
+      throw Error("REST member listing pagination stalled.");
+    after = last;
+  }
+  throw Error("Member listing exceeded the maximum safe number of pages.");
+}
+
+async function getGuildMemberRoster(guild) {
+  const state = memberRosterState(guild);
+  const now = Date.now();
+  if (state.members && now - state.refreshedAt < MEMBER_ROSTER_TTL_MS)
+    return state.members;
+  if (state.pending) return state.pending;
+  if (now < state.retryAt) {
+    if (state.members) return state.members;
+    const err = Error("Member roster refresh cooling down after a failed REST request.");
+    err.code = "MEMBER_ROSTER_BACKOFF";
+    throw err;
+  }
+  const pending = listGuildMembersRest(guild).then(members => {
+    state.members = members;
+    state.refreshedAt = Date.now();
+    state.retryAt = 0;
+    return members;
+  }).catch(err => {
+    const msg = String(err?.message || "");
+    const retry = Number(/retry after ([\d.]+) seconds?/i.exec(msg)?.[1] || 0);
+    state.retryAt = Date.now() + Math.max(MEMBER_ROSTER_BACKOFF_MS, retry * 1000 + 5000);
+    if (state.members) return state.members;
+    throw err;
+  }).finally(() => { state.pending = null; });
+  state.pending = pending;
+  return pending;
+}
+
 function publicPanel(e) {
   return {
     embeds: [
@@ -110,20 +187,20 @@ class FourGravesDiscord {
   }
   logFailure(scope, eventId, err) {
     const detail = diagnosticError(err);
+    const fingerprint = detail.replace(/Retry after [\d.]+ seconds?/gi, "Retry after [variable] seconds");
     const key = scope + ":" + eventId;
     const previous = this.lastLoggedFailures.get(key);
     const now = Date.now();
     // Distinct failures appear immediately; identical messages repeat at most every 5 minutes.
-    if (!previous || previous.detail !== detail || now - previous.time >= 300000) {
+    if (!previous || previous.fingerprint !== fingerprint || now - previous.time >= 300000) {
       console.warn(
         "[FourGraves:" + (this.store.testMode ? "TEST" : "LIVE") + "] " +
         scope + " failed for event " + eventId + ": " + detail,
       );
-      this.lastLoggedFailures.set(key, { detail, time: now });
+      this.lastLoggedFailures.set(key, { detail, fingerprint, time: now });
     }
   }
   async permissions(guild, e, role) {
-    await guild.roles.fetch();
     const allow = [P.ViewChannel, P.SendMessages, P.ReadMessageHistory];
     const overwrites = [
       { id: guild.id, deny: [P.ViewChannel] },
@@ -191,8 +268,11 @@ class FourGravesDiscord {
     const i = GRAVES.findIndex((x) => x.id === g.grave_id);
     const isTest = e.config.testMode === true;
     const roleName = `${isTest ? "[TEST] " : ""}Grave — ${e.config.names[i]} [FG${e.id}]`;
-    await guild.roles.fetch();
     let role = g.role_id ? guild.roles.cache.get(g.role_id) : null;
+    if (!role && g.role_id) {
+      try { role = await guild.roles.fetch(g.role_id); }
+      catch (err) { if (Number(err.code) !== 10011 && Number(err.status) !== 404) throw err; }
+    }
     if (!role)
       role = await this.managedResource(
         e,
@@ -228,8 +308,11 @@ class FourGravesDiscord {
       );
     if (role.name !== roleName && role.setName) await role.setName(roleName);
     g.role_id = role.id;
-    await guild.channels.fetch();
     let channel = g.channel_id ? guild.channels.cache.get(g.channel_id) : null;
+    if (!channel && g.channel_id) {
+      try { channel = await guild.channels.fetch(g.channel_id); }
+      catch (err) { if (Number(err.code) !== 10003 && Number(err.status) !== 404) throw err; }
+    }
     const marker = `four-graves:${e.id}:${g.grave_id}`;
     const overwrites = await this.permissions(guild, e, role);
     if (!channel)
@@ -274,7 +357,7 @@ class FourGravesDiscord {
     let message;
     if (messageId) {
       try {
-        message = await channel.messages.fetch(messageId);
+        message = channel.messages.cache?.get(messageId) || await channel.messages.fetch(messageId);
       } catch (err) {
         if (Number(err.code) !== 10008) throw err;
       }
@@ -325,7 +408,7 @@ class FourGravesDiscord {
     if (this.store.testMode !== (e.config?.testMode === true))
       throw Error("Four Graves event-mode mismatch; refusing Discord changes.");
     const guild = await this.deps.client.guilds.fetch(e.guild_id);
-    const me = await guild.members.fetchMe();
+    const me = guild.members.me || await guild.members.fetchMe();
     if (!me.permissions.has([P.ManageRoles, P.ManageChannels]))
       throw Error("Bot needs Manage Roles and Manage Channels.");
     const graves = (
@@ -334,8 +417,23 @@ class FourGravesDiscord {
         [e.id],
       )
     ).rows;
-    // Fetch complete membership so a wrongly assigned dedicated team role cannot grant unintended access.
-    const members = await guild.members.fetch();
+    // The 15-second timer must NEVER issue gateway opcode 8.
+    // Before CLOSE, all grave roles are invisible, so no member scan is needed.
+    // After CLOSE, one shared REST pagination/cache feeds LIVE and TEST.
+    let members = null;
+    if (e.closed_at) {
+      try {
+        members = await getGuildMemberRoster(guild);
+        await this.store.operation(e.id, "member-roster");
+      } catch (err) {
+        // Do not stall already-saved choices, announcements, or prize draws
+        // merely because a roster refresh is temporarily unavailable.
+        if (err.code !== "MEMBER_ROSTER_BACKOFF") {
+          await this.store.operation(e.id, "member-roster", diagnosticError(err));
+          this.logFailure("member-roster", e.id, err);
+        }
+      }
+    }
     for (const g of graves) {
       try {
         const { role, channel, overwrites } = await this.resources(guild, e, g);
@@ -344,7 +442,7 @@ class FourGravesDiscord {
             .filter((x) => x.grave_id === g.grave_id)
             .map((x) => x.discord_id),
         );
-        const changes = [...members.values()].some(
+        const changes = members && [...members.values()].some(
           (member) =>
             (!!e.closed_at && eligible.has(member.id)) !==
             member.roles.cache.has(role.id),
@@ -356,7 +454,7 @@ class FourGravesDiscord {
               x.id === role.id ? { id: role.id, deny: [P.ViewChannel] } : x,
             ),
           );
-        for (const member of members.values()) {
+        for (const member of members?.values() || []) {
           const wanted = !!e.closed_at && eligible.has(member.id),
             has = member.roles.cache.has(role.id);
           if (wanted && !has) await member.roles.add(role);
@@ -449,7 +547,8 @@ class FourGravesDiscord {
     }
     if (e.panel_channel_id) {
       try {
-        const channel = await guild.channels.fetch(e.panel_channel_id);
+        const channel = guild.channels.cache.get(e.panel_channel_id) ||
+          await guild.channels.fetch(e.panel_channel_id);
         if (
           !channel ||
           channel.guildId !== e.guild_id ||
@@ -554,6 +653,8 @@ class FourGravesDiscord {
 }
 module.exports = {
   FourGravesDiscord,
+  getGuildMemberRoster,
+  noteGuildMemberChange,
   publicPanel,
   decisionPanel,
   button,
