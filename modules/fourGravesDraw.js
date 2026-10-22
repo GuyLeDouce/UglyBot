@@ -1,110 +1,87 @@
 "use strict";
-const { randomInt, createHash } = require("node:crypto");
-const { GRAVES, csv } = require("./fourGravesCore");
+const { randomInt } = require("node:crypto");
+const { GRAVES, prizeSlots, csv } = require("./fourGravesCore");
 
-/**
- * Immutable raffle result: every individual buried ticket is one entry.
- * A selected ticket leaves the pool until every ticket has been picked once.
- * When there are fewer tickets than prize slots, start another fresh pass.
- * Holders with multiple tickets may win multiple awards.
- */
-function drawPrizeWinners(snapshot, config, pick = randomInt) {
-  if (!snapshot || !Array.isArray(snapshot.entries))
-    throw Error("A frozen ticket snapshot is required.");
-  if (!config || config.prizesFinalized !== true)
-    throw Error("Finalize prizes before drawing.");
-  const prizes = [...(config.prizes || []), ...(config.mystery || [])];
-  if (!prizes.length) throw Error("There are no configured prizes.");
-  let totalSlots = 0;
-  for (const prize of prizes) {
-    if (typeof prize.name !== "string" || !prize.name.trim() ||
-        !Number.isSafeInteger(prize.quantity) || prize.quantity < 1 ||
-        prize.quantity > 1000)
-      throw Error("Invalid finalized prize pool.");
-    totalSlots += prize.quantity;
-  }
-  if (totalSlots > 2000)
-    throw Error("Prize configuration exceeds the supported draw size.");
-  const output = [];
-  for (const g of GRAVES) {
-    const tickets = snapshot.entries.filter(x => x.grave_id === g.id);
-    let pool = [];
-    for (const prize of prizes) {
-      for (let unit = 1; unit <= prize.quantity; unit++) {
-        let winner = null;
-        if (tickets.length) {
-          if (!pool.length) pool = tickets.slice();
-          const index = pick(pool.length);
-          if (!Number.isInteger(index) || index < 0 || index >= pool.length)
-            throw Error("Random picker returned an invalid ticket index.");
-          const t = pool[index];
-          pool[index] = pool[pool.length - 1];
-          pool.pop();
-          winner = {
-            ticket_entry_id: t.id,
-            discord_id: t.discord_id,
-            display_name: t.display_name,
-            allocation_id: t.allocation_id,
-          };
-        }
-        output.push({
-          grave_id: g.id,
-          prize_name: prize.name,
-          prize_number: unit,
-          winner,
-        });
-      }
-    }
-  }
-  return output;
+// One account wins once per pass; tickets weight the selection within that pass.
+// The exact winning ticket is consumed. When all participating accounts have
+// won once, start a new pass with the complete frozen ticket pool.
+function pickNextTicket(entries, previousAwards, pick = randomInt) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  const pass = previousAwards.length ?
+    Number(previousAwards[previousAwards.length - 1].pass_number) : 1;
+  const won = new Set(previousAwards
+    .filter(a => Number(a.pass_number) === pass).map(a => a.winner_discord_id));
+  let eligible = entries.filter(t => !won.has(t.discord_id));
+  const nextPass = eligible.length ? pass : pass + 1;
+  if (!eligible.length) eligible = entries;
+  const index = pick(eligible.length);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= eligible.length)
+    throw Error("Random number generator returned an invalid ticket index.");
+  return { ticket: eligible[index], pass_number: nextPass };
 }
-function winnersHash(records) {
-  return createHash("sha256").update(JSON.stringify(records)).digest("hex");
-}
-function winnersCsv(event, records) {
+
+function prizeWinnerCsv(event, awards, grave = "all") {
   return csv(
-    ["grave","prize","prize_number","winner_discord_id","winner_display_name",
-      "winning_ticket_entry_id","allocation_id","snapshot_hash"],
-    records.map(x => [
-      event.config.names[GRAVES.findIndex(g => g.id === x.grave_id)],
-      x.prize_name,x.prize_number,x.winner?.discord_id || "",
-      x.winner?.display_name || "",x.winner?.ticket_entry_id || "",
-      x.winner?.allocation_id || "",event.snapshot_hash || "",
+    ["grave","prize_order","prize","prize_unit","winner_discord_id",
+      "winner_display_name","winning_ticket_entry_id","pass_number",
+      "announced_at","message_id","snapshot_hash"],
+    awards.filter(a => grave === "all" || a.grave_id === grave).map(a => [
+      event.config.names[GRAVES.findIndex(g => g.id === a.grave_id)],
+      a.prize_index, a.prize_name, a.prize_unit,
+      a.winner_discord_id, a.winner_display_name,
+      a.ticket_entry_id, a.pass_number, a.announced_at || "",
+      a.message_id || "",event.snapshot_hash || "",
     ]),
   );
 }
-function safeDiscordName(value) {
-  return String(value || "Unknown").replace(/[\r\n\t]/g, " ")
-    .replace(/[@]/g, "@\u200b")
-    .replace(/[<>*_~`|]/g, "\\$&")
-    .slice(0, 90);
+function escapeDiscord(value) {
+  return String(value || "Unknown").replace(/[\u0000-\u001f\u007f]/g," ")
+    .replace(/@/g,"@\u200b").replace(/[<>*_`~|]/g,"\\$&").slice(0,100);
 }
-function drawSummary(event, records) {
-  const cards = GRAVES.map((g, idx) => {
-    const chosen = records.filter(x => x.grave_id === g.id);
-    const lines = chosen.map(x =>
-      "**" + safeDiscordName(x.prize_name) +
-      (chosen.filter(y => y.prize_name === x.prize_name).length > 1
-        ? " #" + x.prize_number : "") + "** — " +
-      (x.winner ? safeDiscordName(x.winner.display_name) : "No entries — unawarded")
-    );
-    const description = lines.join("\n");
-    return {
-      title: event.config.names[idx] + " — WINNERS",
-      description,
-      color: 0x7655a6,
-    };
-  });
-  // Discord allows 4096 per embed and 6000 characters across a message.
-  const length = cards.reduce((n,x)=>n+x.title.length+x.description.length,0);
-  if (cards.some(x=>x.description.length>3900) || length>5800)
-    throw Error("Too many winners for one announcement. Use the private winners CSV export and announce them in multiple posts.");
+function choiceAnnouncement(event, grave) {
+  const i = GRAVES.findIndex(g => g.id === grave.grave_id);
+  const d = grave.decision;
+  if (!d) throw Error("Cannot announce an undecided grave.");
+  const test = event.config?.testMode === true;
+  const who = test ? "the test operator" : "<@" + d.user_id + ">";
   return {
-    content: "**TRICK OR TREAT: THE FOUR GRAVES — WINNERS**\n" +
-      "Each buried ticket was a chance. All four grave draws are complete. " +
-      "No prize distribution is automatic.",
-    embeds: cards,
+    content: (test ? "🧪 TEST ONLY — " : "@everyone ") +
+      who + " chose **" + d.choice + "** for everyone buried in **" +
+      escapeDiscord(event.config.names[i]) + "**!\n" +
+      "Your team's prize pool is being revealed. " +
+      "The first winner will be drawn in **2 minutes**; " +
+      "one prize winner every **15 seconds** after that.",
+    embeds: [{
+      title: (test ? "🧪 TEST — " : "") + d.choice + " HAS BEEN CHOSEN",
+      description: "First choice wins for the entire grave. " +
+        "TRICK and TREAT reveal the exact same prizes.",
+      footer: { text: "four-graves:" + event.id + ":" + grave.grave_id + ":choice" },
+    }],
+    components: [],
+    allowedMentions: test ? {parse:[]} :
+      { parse: ["everyone"], users: [d.user_id] },
+  };
+}
+function winnerAnnouncement(event, graveId, award) {
+  const i = GRAVES.findIndex(g => g.id === graveId);
+  const total = prizeSlots(event.config, graveId).length;
+  const test = event.config?.testMode === true;
+  return {
+    content: (test ? "🧪 TEST — " : "") + "🎁 **PRIZE " +
+      award.prize_index + " / " + total + "** — **" +
+      escapeDiscord(event.config.names[i]) + "**",
+    embeds: [{
+      title: escapeDiscord(award.prize_name) + " — Winner!",
+      description: "🏆 **" + escapeDiscord(award.winner_display_name) +
+        "**\nWinning ticket: `" + award.ticket_entry_id +
+        "`\nDraw pass: " + award.pass_number +
+        "\n\nNext winner in approximately 15 seconds, unless this was the last prize. " +
+        "Prize distribution is handled manually.",
+      footer: { text: "four-graves:" + event.id + ":" +
+        graveId + ":prize:" + award.prize_index },
+    }],
+    components: [],
     allowedMentions: { parse: [] },
   };
 }
-module.exports = { drawPrizeWinners, winnersHash, winnersCsv, safeDiscordName, drawSummary };
+module.exports = { pickNextTicket, prizeWinnerCsv, choiceAnnouncement, winnerAnnouncement };
