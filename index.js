@@ -45,6 +45,7 @@ const madlib = require('./modules/madlib');
 const trickOrTreat = require('./modules/trickOrTreat');
 const fourGraves = require('./modules/fourGraves');
 const fourGravesTest = require('./modules/fourGravesTest');
+const { noteGuildMemberChange } = require('./modules/fourGravesDiscord');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
   loadMawRankingIndex,
@@ -299,6 +300,10 @@ const client = new Client({
     ...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : []),
   ]
 });
+// Keep the shared REST roster current for rejoining participants without
+// repeatedly requesting the full guild member list via gateway opcode 8.
+client.on('guildMemberAdd', (member) => noteGuildMemberChange(member, true));
+client.on('guildMemberRemove', (member) => noteGuildMemberChange(member, false));
 
 // ===== UTILS =====
 async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
