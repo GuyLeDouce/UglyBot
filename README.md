@@ -143,3 +143,8 @@ Configure the review and draw channels so the bot can view channels, send messag
 ## Trick or Treat: The Four Graves
 
 The Halloween finale is a separately gated extension (`FOUR_GRAVES_ENABLED=false` by default). It adds permanent ticket allocation, private grave teams, a persistent 15-minute countdown, fixed reveals and private contestant exports. Existing claims and draws remain unchanged. Games and prizes are operated manually. See [the administrator setup, staging and recovery guide](docs/four-graves.md).
+
+
+### Production Discord Four Graves private rehearsal
+
+Opt-in admin-only /fourgravestest commands let you create private test-only grave channels and roles on the existing production Discord server, simulate 20 fake users and tickets, rehearse the actual countdown and reveal, and reset verified test resources. The feature defaults to disabled: set FOUR_GRAVES_TEST_ENABLED=true only when ready. Real Trick or Treat claims, source tickets and finale event state remain untouched. See [the private rehearsal guide](docs/four-graves-private-test.md).
