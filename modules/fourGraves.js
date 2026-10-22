@@ -1,414 +1,538 @@
 "use strict";
 const { SlashCommandBuilder, ChannelType } = require("discord.js");
 const { FourGravesStore } = require("./fourGravesStore");
-const { publicPanel, button, row, cid } = require("./fourGravesDiscord");
-const { GRAVES, quantity, exportFiles, privateArchives } = require("./fourGravesCore");
-const { drawSummary, winnersCsv } = require("./fourGravesDraw");
-
-let deps, store, ready;
+const { FourGravesDiscord, button, row, cid } = require("./fourGravesDiscord");
+const { prizeWinnerCsv } = require("./fourGravesDraw");
+const {
+  GRAVES,
+  quantity,
+  exportFiles,
+  privateArchives,
+} = require("./fourGravesCore");
+let deps, store, worker, ready;
 const enabled = () =>
   String(process.env.FOUR_GRAVES_ENABLED || "false").toLowerCase() === "true";
-
 function initFourGraves(d) {
   deps = d;
   store = new FourGravesStore(d.pool, {
     eventKey: process.env.FOUR_GRAVES_EVENT_KEY || "squigs-four-graves-2026",
     sourceEventKey:
       process.env.TRICK_OR_TREAT_EVENT_KEY || "squigs-trick-or-treat-2026",
-    simpleDraw: true,
   });
+  worker = new FourGravesDiscord(store, { ...d, enabled });
 }
 async function start() {
-  if (!ready) ready = store.migrate().catch(err => { ready = null; throw err; });
+  if (!ready)
+    ready = store.migrate().catch((e) => {
+      ready = null;
+      throw e;
+    });
   await ready;
-  // NO recovery worker, private-team roles, 15-minute timer, or decision buttons.
+  if (enabled()) worker.start();
 }
 function buildSlashCommand() {
   return new SlashCommandBuilder()
     .setName("fourgraves")
-    .setDescription("Trick or Treat: bury tickets in four graves, then draw winners")
-    .addSubcommand(s => s.setName("admin").setDescription("Admin: open control panel"))
-    .addSubcommand(s => s.setName("status").setDescription("View grave entry totals"))
-    .addSubcommand(s => s.setName("draw").setDescription("Admin: confirm one random draw per prize"))
-    .addSubcommand(s => s.setName("publish").setDescription("Admin: publish saved winners without tagging anyone"))
-    .addSubcommand(s => s.setName("configure")
-      .setDescription("Admin: configure panels, names, and prize pool")
-      .addChannelOption(o => o.setName("channel")
-        .setDescription("Grave ticket-allocation panel channel")
-        .addChannelTypes(ChannelType.GuildText))
-      .addChannelOption(o => o.setName("results-channel")
-        .setDescription("Channel for winners; defaults to grave panel channel")
-        .addChannelTypes(ChannelType.GuildText))
-      .addAttachmentOption(o => o.setName("image")
-        .setDescription("Optional grave panel artwork"))
-      .addStringOption(o => o.setName("image-url")
-        .setDescription("Durable HTTPS artwork URL"))
-      .addStringOption(o => o.setName("config-json")
-        .setDescription("Optional four grave names and mystery prizes"))
-      .addBooleanOption(o => o.setName("finalize-prizes")
-        .setDescription("Confirm configured prize pool before closing")))
-    .addSubcommand(s => s.setName("export")
-      .setDescription("Admin: private ticket, audit and drawn-winner CSV ZIP")
-      .addStringOption(o => o.setName("grave").setDescription("Grave")
-        .addChoices({name:"All",value:"all"},
-          ...GRAVES.map(g => ({name:g.name,value:g.id}))))
-      .addStringOption(o => o.setName("format").setDescription("Ticket export format")
-        .addChoices(...["all","contestants","master","audit"].map(value =>
-          ({name:value,value})))));
+    .setDescription("Trick or Treat: The Four Graves")
+    .addSubcommand((s) =>
+      s.setName("admin").setDescription("Administrator management panel"),
+    )
+    .addSubcommand((s) =>
+      s.setName("status").setDescription("View grave event status"),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName("configure")
+        .setDescription(
+          "Admin: configure destinations, image and prize finalization",
+        )
+        .addChannelOption((o) =>
+          o
+            .setName("channel")
+            .setDescription("Public panel destination")
+            .addChannelTypes(ChannelType.GuildText),
+        )
+        .addChannelOption((o) =>
+          o
+            .setName("category")
+            .setDescription("Private team category")
+            .addChannelTypes(ChannelType.GuildCategory),
+        )
+        .addAttachmentOption((o) =>
+          o.setName("image").setDescription("Grave artwork attachment"),
+        )
+        .addStringOption((o) =>
+          o.setName("image-url").setDescription("HTTPS artwork URL"),
+        )
+        .addStringOption((o) =>
+          o
+            .setName("config-json")
+            .setDescription(
+              "Four names, per-grave mysteryByGrave lists; see docs",
+            ),
+        )
+        .addBooleanOption((o) =>
+          o
+            .setName("finalize-prizes")
+            .setDescription(
+              "Confirm the full identical prize pool, including mystery prizes",
+            ),
+        ),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName("export")
+        .setDescription("Admin: private contestant exports")
+        .addStringOption((o) =>
+          o
+            .setName("grave")
+            .setDescription("Grave")
+            .addChoices(
+              { name: "All", value: "all" },
+              ...GRAVES.map((g) => ({ name: g.name, value: g.id })),
+            ),
+        )
+        .addStringOption((o) =>
+          o
+            .setName("format")
+            .setDescription("Export format")
+            .addChoices(
+              ...["all", "contestants", "master", "audit"].map((v) => ({
+                name: v,
+                value: v,
+              })),
+            ),
+        ),
+    );
 }
-async function reply(i, payload) {
-  const p = typeof payload === "string" ? { content: payload } : payload;
-  const safe = { ...p, allowedMentions: { parse: [] } };
-  if (i.deferred || i.replied) return i.editReply(safe);
-  return i.reply({ ...safe, flags: 64 });
-}
+const reply = (i, p) =>
+  i.deferred || i.replied
+    ? i.editReply(typeof p === "string" ? { content: p } : p)
+    : i.reply(
+        typeof p === "string" ? { content: p, flags: 64 } : { ...p, flags: 64 },
+      );
 function admin(i) {
   if (!deps.isAdmin(i)) throw Error("Administrator access required.");
 }
-function sourceCheck(e) {
-  if (e.config?.testMode ||
-      e.source_event_key !== store.sourceEventKey ||
-      e.event_key !== store.eventKey)
-    throw Error("Four Graves event identity mismatch; refusing to operate.");
-  return e;
-}
-function status(data, isAdmin) {
-  const { event: e, snapshot: s, draw } = data;
-  const state = e.state === "CLOSED_COUNTDOWN" ? "CLOSED" :
-    e.state === "REVEALED" ? "RESULTS PUBLISHED" : e.state;
-  let out = "**TRICK OR TREAT — FOUR GRAVES: " + state + "**\n" +
-    "Participants: " + s.users.filter(u => u.allocated).length +
-    "\nBuried tickets: " + s.entries.length + "\n";
-  for (const [index,g] of GRAVES.entries()) {
-    const entries = s.entries.filter(x => x.grave_id === g.id);
-    out += e.config.names[index] + ": " + entries.length +
-      " tickets from " + new Set(entries.map(x=>x.discord_id)).size +
-      " holders\n";
-  }
-  if (!isAdmin) return {content:out.slice(0,1900)};
-  const total=s.users.reduce((n,u)=>n+u.total,0);
-  const awarded=draw ? draw.results.filter(x=>x.winner).length : 0;
-  out += "\nEarned: " + total + "; not buried: " + (total-s.entries.length) +
-    "\nPrize pool finalized: " + !!e.config.prizesFinalized +
-    "\nSnapshot: " + (e.snapshot_id || "live") +
-    "\nRandom draw: " + (draw ? awarded + "/" + draw.results.length +
-      " awarded (" + draw.results_hash.slice(0,16) + "...)" : "not yet run") +
-    "\nWinners published: " + (draw?.published_at || "no");
-  return {content:out.slice(0,1900)};
-}
 function controls(e) {
-  const actions=[
-    ["post","POST GRAVE PANEL"],
-    ["open","OPEN GRAVES"],
-    ["close","CLOSE GRAVES"],
-    ["draw","DRAW WINNERS"],
-    ["publish","PUBLISH RESULTS"],
-    ["status","STATUS"],
-    ["export","EXPORT"],
+  const actions = [
+    ["setup", "SETUP EVENT"],
+    ["post", "POST GRAVE PANEL"],
+    ["open", "OPEN GRAVES"],
+    ["close", "CLOSE GRAVES"],
+    ["status", "STATUS"],
+    ["export", "EXPORT ENTRIES"],
+    ["restart", "RESTART COUNTDOWN"],
+    ["repair", "RECONCILE ROLES"],
+    ["refresh", "REFRESH PANELS"],
+    ["retry-resources", "RETRY UNCERTAIN CREATES"],
   ];
   return {
-    content:"**FOUR GRAVES — ADMIN**\n" +
-      "1. Configure prizes and panel. 2. Post and open the graves. " +
-      "3. Close to freeze tickets. 4. Draw once. 5. Publish the saved winners.\n" +
-      "No separate games, roles or countdown.",
-    components:[
-      row(...actions.slice(0,4).map(([action,label])=>button(cid(e,"admin",action),label))),
-      row(...actions.slice(4).map(([action,label])=>button(cid(e,"admin",action),label))),
+    content:
+      "FOUR GRAVES — ADMIN\nUse /fourgraves configure for image, destinations, prize configuration and finalization.",
+    components: [
+      row(
+        ...actions.slice(0, 5).map(([a, l]) => button(cid(e, "admin", a), l)),
+      ),
+      row(...actions.slice(5).map(([a, l]) => button(cid(e, "admin", a), l))),
     ],
   };
 }
+function status(data, isAdmin) {
+  const { event: e, snapshot: s, graves, operations, awards = [] } = data;
+  const total = s.users.reduce((n,u)=>n+u.total,0);
+  let text = "**FOUR GRAVES — " + e.state + "**\n" +
+    "Participants: " + s.users.filter(u=>u.allocated).length +
+    "\nTickets buried: " + s.entries.length + "\n";
+  if(e.deadline && e.state === "CLOSED_COUNTDOWN")
+    text += "Team choice unlocks: <t:" + Math.floor(new Date(e.deadline)/1000) + ":R>\n";
+  for(const [i,g] of GRAVES.entries()){
+    const state=graves.find(x=>x.grave_id===g.id);
+    const entries=s.entries.filter(x=>x.grave_id===g.id);
+    const awarded=awards.filter(x=>x.grave_id===g.id);
+    text += e.config.names[i] + ": " + entries.length + " buried, " +
+      new Set(entries.map(x=>x.discord_id)).size + " holders; " +
+      (state.decision ? state.decision.choice + " chosen" : "waiting on choice") +
+      "; winners announced " + awarded.filter(x=>x.announced_at).length +
+      "/" + (e.config.mysteryByGrave ? require("./fourGravesCore").prizeSlots(e.config,g.id).length : "not configured") + "\n";
+    if(isAdmin) text += "Role " + (state.role_id||"missing") +
+      "; channel " + (state.channel_id||"missing") +
+      "; next winner " + (state.next_draw_at||"not scheduled") +
+      "; completed " + (state.draw_completed_at||"no") + "\n";
+  }
+  if(isAdmin) text += "\nEarned: "+total+"; unallocated: "+(total-s.entries.length)+
+    "\nSnapshot: "+(e.snapshot_id||"live")+
+    "\nPrizes finalized: "+!!e.config.prizesFinalized+
+    "\nWorker errors: "+(operations.filter(x=>x.last_error).map(x=>
+      x.operation_key+": "+x.last_error).join("; ")||"none");
+  return {content:text.slice(0,1940),allowedMentions:{parse:[]}};
+}
 function validatePatch(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input))
+  if (!input || typeof input!=="object" || Array.isArray(input))
     throw Error("Configuration must be a JSON object.");
   const patch={};
-  for (const k of Object.keys(input))
-    if (!["names","mystery"].includes(k))
-      throw Error("Unsupported configuration: " + k);
-  if (input.names !== undefined) {
-    if (!Array.isArray(input.names) || input.names.length !== 4 ||
-        input.names.some(x=>typeof x!=="string" || !x.trim() || x.length>40))
-      throw Error("Provide exactly four nonempty grave names (max 40 characters).");
-    patch.names=input.names;
-  }
-  if (input.mystery !== undefined) {
-    if (!Array.isArray(input.mystery) || input.mystery.length>10 ||
-        input.mystery.some(x=>!x || typeof x.name!=="string" ||
-          !x.name.trim() || x.name.length>80 ||
-          !Number.isInteger(x.quantity) || x.quantity<1 || x.quantity>100))
-      throw Error("Mystery rewards need a name and quantity between 1 and 100.");
-    patch.mystery=input.mystery;
+  for(const key of Object.keys(input))
+    if(!["names","rules","mysteryByGrave","revealDelaySeconds"].includes(key))
+      throw Error("Unsupported config key: "+key);
+  for(const key of ["names","rules"])
+    if(input[key]!==undefined) {
+      if(!Array.isArray(input[key]) || input[key].length!==4 ||
+        input[key].some(value=>typeof value!=="string" || !value.trim() ||
+          value.length>(key==="names"?40:900)))
+        throw Error("Provide exactly four valid "+key+" strings.");
+      patch[key]=input[key];
+    }
+  if(input.mysteryByGrave!==undefined){
+    const obj=input.mysteryByGrave;
+    if(!obj || typeof obj!=="object" || Array.isArray(obj) ||
+      Object.keys(obj).length!==GRAVES.length ||
+      Object.keys(obj).some(key=>!GRAVES.some(g=>g.id===key)) ||
+      GRAVES.some(g=>!Array.isArray(obj[g.id]) || obj[g.id].length>10 ||
+        obj[g.id].some(p=>!p || typeof p.name!=="string" || !p.name.trim() ||
+          p.name.length>80 || !Number.isInteger(p.quantity) ||
+          p.quantity<1 || p.quantity>100)))
+      throw Error("Supply a list of real mystery prizes for each of the four graves.");
+    patch.mysteryByGrave=obj;
     patch.prizesFinalized=false;
+  }
+  if(input.revealDelaySeconds!==undefined){
+    if(!Number.isInteger(input.revealDelaySeconds) ||
+      input.revealDelaySeconds<1 || input.revealDelaySeconds>30)
+      throw Error("Reveal delay must be between 1 and 30 seconds.");
+    patch.revealDelaySeconds=input.revealDelaySeconds;
   }
   return patch;
 }
-async function getChannel(guild,id) {
-  if (!id) throw Error("Configure the destination channel first.");
-  const channel=await guild.channels.fetch(id);
-  if (!channel || channel.guildId!==guild.id ||
-      channel.type!==ChannelType.GuildText)
-    throw Error("Configured destination is not a text channel in this server.");
-  return channel;
-}
-async function findMessage(channel, messageId, marker) {
-  if (messageId) {
-    let m;
-    try { m=await channel.messages.fetch(messageId); }
-    catch (err) {if (Number(err.code)!==10008) throw err;}
-    if (m) {
-      if (m.author.id!==deps.client.user.id ||
-          !m.embeds.some(e=>e.footer?.text===marker))
-        throw Error("Saved message identity mismatch; refusing to edit it.");
-      return m;
-    }
-  }
-  // Recover a sent-but-not-persisted message, rather than posting duplicates.
-  let before;
-  for (let i=0;i<10;i++) {
-    const batch=await channel.messages.fetch({limit:100,...(before?{before}:{})});
-    const found=[...batch.values()].find(m=>
-      m.author.id===deps.client.user.id &&
-      m.embeds.some(e=>e.footer?.text===marker));
-    if (found) return found;
-    if (batch.size<100) break;
-    before=batch.last().id;
-  }
-  return null;
-}
-async function postPanel(i) {
-  const d=await store.read(i.guildId);
-  const e=sourceCheck(d.event);
-  const dest=e.panel_channel_id || i.channelId;
-  const channel=await getChannel(i.guild,dest);
-  const payload=publicPanel(e);
-  const marker="four-graves:"+e.id+":public";
-  const previous=await findMessage(channel,e.panel_message_id,marker);
-  const m=previous ? await previous.edit(payload) : await channel.send(payload);
-  await deps.pool.query(
-    "UPDATE four_graves_events SET panel_channel_id=$2,panel_message_id=$3 WHERE id=$1 AND event_key=$4",
-    [e.id,channel.id,m.id,store.eventKey]
-  );
-  return "Grave ticket panel " + (previous?"refreshed":"posted") +
-    " in <#"+channel.id+">. No private team channels or roles were created.";
-}
-async function publish(i) {
+async function exportsReply(i, grave = "all", format = "all") {
   admin(i);
-  const d=await store.read(i.guildId);
-  const e=sourceCheck(d.event);
-  if (!d.draw) throw Error("Draw the winners before publishing.");
-  if (d.draw.published_at) return "Winners already published in <#"+
-    d.draw.channel_id+">. Draw and announcement are immutable.";
-  if (e.state!=="CLOSED_COUNTDOWN" || e.deadline)
-    throw Error("Cannot publish from a legacy countdown or unexpected event state.");
-  const payload=drawSummary(e,d.draw.results);
-  payload.embeds[0].footer={text:"four-graves:"+e.id+":winners"};
-  const channel=await getChannel(i.guild,e.config.resultsChannelId||e.panel_channel_id);
-  const client=await deps.pool.connect();
-  let locked=false;
-  try {
-    locked=(await client.query("SELECT pg_try_advisory_lock(46292,$1::int) AS locked",[e.id])).rows[0].locked;
-    if (!locked) throw Error("A winner announcement is already in progress.");
-    const latest=await store.read(i.guildId);
-    if (latest.draw?.published_at)
-      return "Winners already published in <#"+latest.draw.channel_id+">.";
-    if (!latest.draw || latest.draw.results_hash!==d.draw.results_hash)
-      throw Error("Stored draw changed unexpectedly; refusing to publish.");
-    const marker="four-graves:"+e.id+":winners";
-    const found=await findMessage(channel,latest.draw.message_id,marker);
-    const m=found ? await found.edit(payload) : await channel.send(payload);
-    await store.markPublished(i.guildId,i.user.id,channel.id,m.id);
-  } finally {
-    if (locked) await client.query("SELECT pg_advisory_unlock(46292,$1::int)",[e.id]);
-    client.release();
-  }
-  try { await postPanel(i); }
-  catch (err) { console.warn("[FourGraves] Results published but panel refresh failed:",err.message); }
-  return "Winners published in <#"+channel.id+"> without mentions. " +
-    "Prizes still need to be delivered manually.";
-}
-async function exportReply(i,grave="all",format="all") {
-  admin(i);
-  const d=await store.read(i.guildId);
-  const files=exportFiles(d.event,d.snapshot,grave,format);
-  if (d.draw) files["four_graves_prize_winners.csv"]=
-    winnersCsv(d.event,d.draw.results.filter(x=>grave==="all" || x.grave_id===grave));
-  const parts=privateArchives(files,i.attachmentSizeLimit||8*1024*1024);
-  await reply(i,{
-    content:"Private ZIP: "+d.snapshot.entries.length+" buried tickets"+
-      (d.draw?" and permanently recorded prize winners.":" (no draw yet)."),
-    files:[parts[0]],
+  const { event, snapshot, awards } = await store.read(i.guildId);
+  const files = exportFiles(event, snapshot, grave, format);
+  if (awards.length) files["four_graves_prize_winners.csv"] = prizeWinnerCsv(event, awards, grave);
+  const parts = privateArchives(files, i.attachmentSizeLimit || 8 * 1024 * 1024);
+  await reply(i, {
+    content: `Private export: ${snapshot.entries.length} allocated tickets (${event.snapshot_id || "live snapshot"}). ${parts.length} ZIP part(s).`,
+    files: [parts[0]],
+    components: [],
   });
   for (const part of parts.slice(1))
-    await i.followUp({files:[part],flags:64,allowedMentions:{parse:[]}});
+    await i.followUp({
+      files: [part],
+      flags: 64,
+      allowedMentions: { parse: [] },
+    });
+  await store.pool.query(
+    "UPDATE four_graves_events SET last_export_at=clock_timestamp() WHERE id=$1",
+    [event.id],
+  );
+  await store.audit(store.pool, event.id, i.user.id, "export", {
+    grave,
+    format,
+  });
 }
-async function doAction(i,e,action,confirmed=false) {
+async function identities(i) {
+  const members = await i.guild.members.fetch();
+  return Object.fromEntries(
+    [...members.values()].map((m) => [
+      m.id,
+      { username: m.user.username, display_name: m.displayName },
+    ]),
+  );
+}
+async function adminAction(i, e, action, confirmed = false) {
   admin(i);
-  const hazardous=["open","close","draw","publish"];
-  if (hazardous.includes(action) && !confirmed) {
-    const warnings={
-      open:"OPEN the four graves? Holders can permanently bury tickets.",
-      close:"CLOSE all four graves permanently? Freeze all buried entries now. "+
-        "There is no countdown and no re-opening.",
-      draw:"DRAW all prizes now? Every grave draws from its own frozen tickets. "+
-        "The winners are saved once; THERE IS NO REDRAW.",
-      publish:"PUBLISH the recorded winners publicly? This announces the final "+
-        "draw without tagging users. It does not transfer rewards.",
-    };
-    return reply(i,{
-      content:"**CONFIRM: "+warnings[action]+"**",
-      components:[row(
-        button(cid(e,"confirm-admin",action,e.generation),"CONFIRM "+action.toUpperCase(),false,4),
-        button(cid(e,"cancel"),"CANCEL"),
-      )],
+  if (action === "retry-resources") {
+    if (!confirmed)
+      return reply(i, {
+        content:
+          "Before retrying any uncertain Discord resource creation, inspect its grave channel/role markers. This does not alter ticket balances or recorded winners.",
+        components: [
+          row(
+            button(
+              cid(e, "confirm-admin", action, e.generation),
+              "CONFIRM RECOVERY",
+              false,
+              4,
+            ),
+            button(cid(e, "cancel"), "CANCEL"),
+          ),
+        ],
+      });
+    const c = await store.pool.connect();
+    try {
+      const locked = (
+        await c.query("SELECT pg_try_advisory_lock(46291,$1::int) AS locked", [
+          e.id,
+        ])
+      ).rows[0].locked;
+      if (!locked)
+        throw Error("Recovery is already running. Try again shortly.");
+      try {
+        await c.query(
+          "UPDATE four_graves_operations SET last_error='ADMIN_CONFIRMED_RETRY' WHERE event_id=$1 AND last_error='CREATE_IN_FLIGHT'",
+          [e.id],
+        );
+        await store.audit(c, e.id, i.user.id, "retry-uncertain-resources");
+      } finally {
+        await c.query("SELECT pg_advisory_unlock(46291,$1::int)", [e.id]);
+      }
+    } finally {
+      c.release();
+    }
+    await reply(
+      i,
+      "Recovery authorized. Existing marked resources will be reused.",
+    );
+    void worker
+      .tick()
+      .catch(() =>
+        console.warn("[FourGraves] recovery deferred; see admin status."),
+      );
+    return;
+  }
+  if (["open", "close", "restart"].includes(action) && !confirmed)
+    return reply(i, {
+      content:
+        action === "close"
+          ? "**CLOSE ALL FOUR GRAVES?**\nFreeze tickets, grant team-channel access and start the existing 15-minute decision countdown. Choices trigger the team prize reveal and then automatically draw winners."
+          : `Confirm ${action.toUpperCase()}? ${action === "restart" ? "This invalidates old decision buttons and starts a fresh 15 minutes. Allocations remain closed." : "Participants may permanently bury tickets."}`,
+      components: [
+        row(
+          button(
+            cid(e, "confirm-admin", action, e.generation),
+            `CONFIRM ${action.toUpperCase()}`,
+            false,
+            4,
+          ),
+          button(cid(e, "cancel"), "CANCEL"),
+        ),
+      ],
+    });
+  if (["open", "close", "restart"].includes(action)) {
+    await store.transition(
+      i.guildId,
+      i.user.id,
+      action,
+      action === "close" ? await identities(i) : {},
+    );
+    await reply(i, {
+      content: `${action.toUpperCase()} recorded. Discord reconciliation will follow.`,
+      components: [],
+    });
+    void worker
+      .tick()
+      .catch(() =>
+        console.warn("[FourGraves] recovery deferred; see admin status."),
+      );
+    return;
+  }
+  if (action === "export") return exportsReply(i);
+  if (action === "status")
+    return reply(i, status(await store.read(i.guildId), true));
+  if (action === "setup") await store.setup(i.guildId, i.user.id);
+  if (action === "post") {
+    await store.transaction(async (c) => {
+      const ev = await store.event(c, i.guildId, true);
+      await c.query(
+        "UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
+        [ev.id, ev.panel_channel_id || i.channelId],
+      );
     });
   }
-  if (action==="status") return reply(i,status(await store.read(i.guildId),true));
-  if (action==="export") return exportReply(i);
-  if (action==="post") return reply(i,await postPanel(i));
-  if (action==="open" || action==="close") {
-    await store.transition(i.guildId,i.user.id,action);
-    const after=await store.read(i.guildId);
-    if (after.event.panel_channel_id) await postPanel(i);
-    return reply(i,action==="open"
-      ?"The four graves are OPEN. Tickets can now be buried."
-      :"The graves are CLOSED. Entries are frozen. "+
-       "Next: DRAW WINNERS, then PUBLISH RESULTS.");
-  }
-  if (action==="draw") {
-    const record=await store.draw(i.guildId,i.user.id);
-    return reply(i,"The one-time draw is saved and cannot be re-rolled.\n"+
-      "Awarded prizes: "+record.results.filter(x=>x.winner).length+
-      "/"+record.results.length+".\n"+
-      "Verification hash: "+record.results_hash+
-      "\nUse /fourgraves export to review winners before publishing.");
-  }
-  if (action==="publish") return reply(i,await publish(i));
-  throw Error("Unknown or retired Four Graves action.");
+  await worker.tick();
+  await reply(i, {
+    ...status(await store.read(i.guildId), true),
+    components: controls(e).components,
+  });
 }
 async function handle(i) {
-  const isCommand=i.isChatInputCommand?.() && i.commandName==="fourgraves";
-  if (!isCommand && !String(i.customId||"").startsWith("fg1:")) return false;
+  const isCommand = i.isChatInputCommand?.() && i.commandName === "fourgraves";
+  if (!isCommand && !String(i.customId || "").startsWith("fg1:")) return false;
   try {
-    if (!enabled()) throw Error("Four Graves is currently disabled. Existing claims are unchanged.");
+    if (!enabled())
+      throw Error(
+        "The Four Graves is disabled. Existing ticket claims are unchanged.",
+      );
     if (!i.guildId) throw Error("Use this in the server.");
     if (isCommand) {
-      await i.deferReply({flags:64});
-      const sub=i.options.getSubcommand();
-      if (sub==="admin") {
+      await i.deferReply({ flags: 64 });
+      const sub = i.options.getSubcommand();
+      if (sub === "admin") {
         admin(i);
-        const e=sourceCheck(await store.setup(i.guildId,i.user.id));
-        return reply(i,controls(e));
-      }
-      if (sub==="status")
-        return reply(i,status(await store.read(i.guildId),deps.isAdmin(i)));
-      if (sub==="draw" || sub==="publish") {
+        const e = await store.setup(i.guildId, i.user.id);
+        await reply(i, controls(e));
+      } else if (sub === "status")
+        await reply(i, status(await store.read(i.guildId), deps.isAdmin(i)));
+      else if (sub === "export")
+        await exportsReply(
+          i,
+          i.options.getString("grave") || "all",
+          i.options.getString("format") || "all",
+        );
+      else if (sub === "configure") {
         admin(i);
-        const e=sourceCheck((await store.read(i.guildId)).event);
-        return doAction(i,e,sub);
-      }
-      if (sub==="export") return exportReply(i,
-        i.options.getString("grave")||"all",
-        i.options.getString("format")||"all");
-      if (sub==="configure") {
-        admin(i);
-        const e=sourceCheck(await store.setup(i.guildId,i.user.id));
-        const patch=validatePatch(JSON.parse(i.options.getString("config-json")||"{}"));
-        const channel=i.options.getChannel("channel");
-        const results=i.options.getChannel("results-channel");
-        const attachment=i.options.getAttachment("image");
-        const image=attachment?.url||i.options.getString("image-url");
+        const patch = validatePatch(
+          JSON.parse(i.options.getString("config-json") || "{}"),
+        );
+        const cat = i.options.getChannel("category"),
+          channel = i.options.getChannel("channel"),
+          attachment = i.options.getAttachment("image");
+        const image = attachment?.url || i.options.getString("image-url");
         if (image) {
-          const url=new URL(image);
-          if (url.protocol!=="https:" || url.username || url.password)
+          const url = new URL(image);
+          if (url.protocol !== "https:" || url.username || url.password)
             throw Error("Use an HTTPS image URL.");
-          if (attachment && !/^image\/(png|jpeg|webp|gif)$/.test(attachment.contentType||""))
-            throw Error("Use a PNG, JPG, WebP, or GIF.");
-          patch.image=image;
+          if (
+            attachment &&
+            !/^image\/(png|jpeg|webp|gif)$/.test(attachment.contentType || "")
+          )
+            throw Error("Use a PNG, JPG, WebP or GIF.");
+          patch.image = image;
         }
-        const flag=i.options.getBoolean("finalize-prizes");
-        if (flag!==null) patch.prizesFinalized=flag;
-        if (results) patch.resultsChannelId=results.id;
-        if (Object.keys(patch).length) await store.configure(i.guildId,i.user.id,patch);
-        if (channel) await store.transaction(async c=>{
-          const current=sourceCheck(await store.event(c,i.guildId,true));
-          if (current.closed_at) throw Error("Destinations are frozen after closing.");
-          if (current.panel_message_id && current.panel_channel_id!==channel.id)
-            throw Error("The existing ticket panel cannot be moved.");
-          await c.query("UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
-            [current.id,channel.id]);
-        });
-        return reply(i,"Configuration saved. Use POST GRAVE PANEL in the admin controls. "+
-          "No game setup is required.");
+        if (cat) patch.category = cat.id;
+        if (i.options.getBoolean("finalize-prizes") !== null)
+          patch.prizesFinalized = i.options.getBoolean("finalize-prizes");
+        await store.configure(i.guildId, i.user.id, patch);
+        if (channel)
+          await store.transaction(async (c) => {
+            const e = await store.event(c, i.guildId, true);
+            if (e.panel_message_id && e.panel_channel_id !== channel.id)
+              throw Error(
+                "An existing panel cannot be moved; retain its destination.",
+              );
+            await c.query(
+              "UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
+              [e.id, channel.id],
+            );
+          });
+        await reply(
+          i,
+          "Configuration saved. Use POST GRAVE PANEL / REFRESH PANELS.",
+        );
       }
-      throw Error("Unknown Four Graves command.");
+      return true;
     }
-    const [,eventId,action,...args]=i.customId.split(":");
-    // Discord requires showing modals immediately. The submit is rechecked transactionally.
-    if (action==="quantity") {
-      if (args[1]!==i.user.id) throw Error("That private button belongs to someone else.");
+    const [, eventId, action, ...args] = i.customId.split(":");
+    // Modal presentation does not perform I/O; its submit handler validates every field again.
+    if (action === "quantity") {
+      const [gi, owner] = args;
+      if (owner !== i.user.id)
+        throw Error("This private interaction belongs to another user.");
       await i.showModal({
-        custom_id:cid({id:eventId},"amount",args[0]),
-        title:"Bury your tickets",
-        components:[row({
-          type:4,custom_id:"quantity",
-          label:"Positive whole-number ticket quantity",
-          style:1,required:true,max_length:10,
-        })],
+        custom_id: cid({ id: eventId }, "amount", gi),
+        title: "Bury your tickets",
+        components: [
+          row({
+            type: 4,
+            custom_id: "quantity",
+            label: "Positive whole-number ticket quantity",
+            style: 1,
+            required: true,
+            max_length: 10,
+          }),
+        ],
       });
       return true;
     }
-    await i.deferReply({flags:64});
-    const d=await store.read(i.guildId),e=sourceCheck(d.event);
-    if (String(e.id)!==eventId) throw Error("This button belongs to another event.");
-    if (action==="cancel") return reply(i,"Cancelled. No tickets were buried.");
-    if (action==="admin" || action==="confirm-admin") {
-      if (action==="confirm-admin" && Number(args[1])!==e.generation)
-        throw Error("Stale confirmation. Open a new admin panel.");
-      return doAction(i,e,args[0],action==="confirm-admin");
+    await i.deferReply({ flags: 64 });
+    const data = await store.read(i.guildId),
+      e = data.event;
+    if (String(e.id) !== eventId)
+      throw Error("This panel belongs to another event.");
+    const [gi] = args,
+      g = GRAVES[Number(gi)],
+      user = {
+        id: i.user.id,
+        username: i.user.username,
+        display_name:
+          i.member.displayName || i.user.globalName || i.user.username,
+      };
+    if (action === "cancel") {
+      await reply(i, "Cancelled. No tickets were buried.");
+      return true;
     }
-    const gi=Number(args[0]), g=GRAVES[gi];
+    if (action === "admin" || action === "confirm-admin") {
+      if (action === "confirm-admin" && Number(args[1]) !== e.generation)
+        throw Error(
+          "Stale administrative confirmation. Open a fresh admin panel.",
+        );
+      await adminAction(i, e, args[0], action === "confirm-admin");
+      return true;
+    }
     if (!g) throw Error("Unknown grave.");
-    const user={
-      id:i.user.id,
-      username:i.user.username,
-      display_name:i.member?.displayName||i.user.globalName||i.user.username,
-    };
-    const balance=d.snapshot.users.find(u=>u.discord_id===i.user.id);
-    const available=balance?balance.total-balance.allocated:0;
-    if (action==="grave") {
-      if (e.state!=="OPEN") throw Error("THE GRAVES ARE SEALED.");
-      return reply(i,{
-        content:"**"+e.config.names[gi]+"**\nEarned: "+(balance?.total||0)+
-          "\nAlready buried: "+(balance?.allocated||0)+
-          "\nAvailable: "+available+"\nIn this grave: "+(balance?.graves[gi]||0),
-        components:[row(button(cid(e,"quantity",gi,i.user.id),"ENTER QUANTITY"))],
+    const balance = data.snapshot.users.find((u) => u.discord_id === i.user.id);
+    const available = balance ? balance.total - balance.allocated : 0;
+    if (action === "grave") {
+      if (e.state !== "OPEN") throw Error("THE GRAVES ARE SEALED.");
+      await reply(i, {
+        content: `**${e.config.names[Number(gi)]}**\nEarned: ${balance?.total || 0}\nAlready buried: ${balance?.allocated || 0}\nAvailable: ${available}\nIn this grave: ${balance?.graves[Number(gi)] || 0}`,
+        components: [
+          row(button(cid(e, "quantity", gi, i.user.id), "ENTER QUANTITY")),
+        ],
       });
-    }
-    if (action==="amount") {
-      if (e.state!=="OPEN") throw Error("THE GRAVES ARE SEALED.");
-      const amount=quantity(i.fields.getTextInputValue("quantity"));
-      if (amount>available) throw Error("NOT ENOUGH TICKETS. Available: "+available);
-      return reply(i,{
-        content:"Bury **"+amount+"** tickets in **"+e.config.names[gi]+
-          "**?\nOnce buried, tickets cannot be moved or withdrawn.",
-        components:[row(
-          button(cid(e,"bury",gi,amount,i.user.id,i.id),"BURY MY TICKETS",false,4),
-          button(cid(e,"cancel"),"CANCEL"),
-        )],
+    } else if (action === "amount") {
+      if (e.state !== "OPEN") throw Error("THE GRAVES ARE SEALED.");
+      const amount = quantity(i.fields.getTextInputValue("quantity"));
+      if (amount > available)
+        throw Error(`NOT ENOUGH TICKETS. Only ${available} available.`);
+      await reply(i, {
+        content: `**BURY YOUR TICKETS?**\nYou're about to bury **${amount}** tickets in **${e.config.names[Number(gi)]}**.\nCurrent available balance: ${available}.\n\nOnce confirmed, they cannot be withdrawn, transferred or reassigned. An administrator cannot casually reverse this allocation.\n\n**THIS DECISION IS PERMANENT.**`,
+        components: [
+          row(
+            button(
+              cid(e, "bury", gi, amount, i.user.id, i.id),
+              "BURY MY TICKETS",
+              false,
+              4,
+            ),
+            button(cid(e, "cancel"), "CANCEL"),
+          ),
+        ],
       });
-    }
-    if (action==="bury") {
-      if (args[2]!==i.user.id) throw Error("This confirmation belongs to another user.");
-      const receipt=await store.allocate(i.guildId,user,g.id,quantity(args[1]),args[3]);
-      const after=await store.read(i.guildId);
-      const u=after.snapshot.users.find(x=>x.discord_id===i.user.id);
-      return reply(i,"YOUR TICKETS ARE BURIED.\n"+
-        receipt.quantity+" tickets in "+e.config.names[gi]+
-        ". Remaining: "+(u.total-u.allocated)+".");
-    }
-    throw Error("That old grave action was retired. Prizes are now drawn randomly.");
+    } else if (action === "bury") {
+      const [, amount, owner, key] = args;
+      if (owner !== i.user.id)
+        throw Error("This confirmation belongs to another user.");
+      const receipt = await store.allocate(
+        i.guildId,
+        user,
+        g.id,
+        quantity(amount),
+        key,
+      );
+      const after = await store.read(i.guildId);
+      const u = after.snapshot.users.find((u) => u.discord_id === i.user.id);
+      await reply(
+        i,
+        `YOUR TICKETS HAVE BEEN BURIED.\nAllocation #${receipt.id}: ${receipt.quantity} tickets with ${e.config.names[Number(gi)]}.\nRemaining tickets: ${u.total - u.allocated}.`,
+      );
+    } else if (action === "decide") {
+      const [, generation, choice] = args;
+      const state = data.graves.find((x) => x.grave_id === g.id);
+      if (i.channelId !== state.channel_id)
+        throw Error("Use the decision panel in your grave channel.");
+      await store.decide(i.guildId, user, g.id, choice, generation);
+      await reply(i, "Your choice is sealed. The grave is opening...");
+      void worker
+        .tick()
+        .catch(() =>
+          console.warn("[FourGraves] recovery deferred; see admin status."),
+        );
+    } else throw Error("Unknown Four Graves interaction.");
   } catch (err) {
-    await reply(i,{content:String(err.message).slice(0,1700),components:[]});
+    await reply(i, {
+      content: String(err.message).slice(0, 1800),
+      components: [],
+      allowedMentions: { parse: [] },
+    });
   }
   return true;
 }
-module.exports={initFourGraves,start,buildSlashCommand,handle,enabled,validatePatch,status};
+module.exports = {
+  initFourGraves,
+  start,
+  buildSlashCommand,
+  handle,
+  enabled,
+  validatePatch,
+  status,
+};
