@@ -18,7 +18,8 @@
     "test:four-graves": "node scripts/testFourGravesLogic.js",
     "test:four-graves-db": "node scripts/testFourGravesDatabase.js",
     "test:four-graves-private": "node scripts/testFourGravesPrivate.js",
-    "test:four-graves-private-db": "node scripts/testFourGravesPrivateDatabase.js"
+    "test:four-graves-private-db": "node scripts/testFourGravesPrivateDatabase.js",
+    "test:four-graves-auto-draw": "node scripts/testFourGravesAutoDraw.js"
   },
   "engines": {
     "node": "20.x"
