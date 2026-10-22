@@ -4,7 +4,8 @@ const {
   PermissionsBitField,
   ChannelType,
 } = require("discord.js");
-const { GRAVES } = require("./fourGravesCore");
+const { GRAVES, prizePoolForGrave } = require("./fourGravesCore");
+const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
   custom_id,
@@ -42,7 +43,6 @@ function publicPanel(e) {
 }
 function decisionPanel(e, g) {
   const i = GRAVES.findIndex((x) => x.id === g.grave_id),
-    meta = GRAVES[i],
     decision = g.decision;
   const eligible = e.snapshot?.entries.some((x) => x.grave_id === g.grave_id);
   const active = e.state === "BUTTONS_ACTIVE" && !decision && eligible;
@@ -53,7 +53,12 @@ function decisionPanel(e, g) {
     description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
   if (g.reveal_stage >= 2) description += "\n\nTHE GRAVE IS OPENING...";
   if (g.reveal_stage >= 3)
-    description += `\n\n**${e.config.names[i].toUpperCase()} HAS AWAKENED.**\n\nYour game: **${meta.game}**\n\n${e.config.rules[i]}\n\n**PRIZE POOL**\n${[...e.config.prizes, ...e.config.mystery].map((p) => `${p.quantity} × ${p.name}`).join("\n")}\n\nGames, prize wheels and all prize distribution are handled manually by the administrator. Stay Ugly.`;
+    description += "\n\n**" + e.config.names[i].toUpperCase() +
+      " HAS AWAKENED.**\n\n**YOUR GRAVE PRIZE POOL**\n" +
+      prizePoolForGrave(e.config,g.grave_id).map(p => p.quantity + " × " + p.name).join("\n") +
+      "\n\nWinners are drawn automatically, starting 2 minutes after the choice, " +
+      "one prize every 15 seconds. Each participant wins at most once per pass. " +
+      "The pool resets after everyone has won once. Prize transfers are manual. Stay Ugly.";
   return {
     embeds: [
       {
@@ -106,6 +111,7 @@ class FourGravesDiscord {
           P.ManageMessages,
           P.AttachFiles,
           P.EmbedLinks,
+          ...(e.config.testMode ? [] : [P.MentionEveryone]),
         ],
       },
     ];
@@ -258,7 +264,7 @@ class FourGravesDiscord {
         embed?.image?.url === payload.embeds[0].image?.url &&
         JSON.stringify(message.components.map((x) => x.toJSON())) ===
           JSON.stringify(payload.components);
-      if (!same) await message.edit(payload);
+      if (!same) await message.edit({ ...payload, allowedMentions: mentions });
       return message;
     }
     const marker = payload.embeds[0].footer.text;
@@ -278,7 +284,7 @@ class FourGravesDiscord {
               m.embeds.some((x) => x.footer?.text === marker),
           );
           if (found) {
-            await found.edit(payload);
+            await found.edit({ ...payload, allowedMentions: mentions });
             return found;
           }
           if (batch.size < 100) break;
