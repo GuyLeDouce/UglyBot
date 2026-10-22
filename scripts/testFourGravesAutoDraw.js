@@ -5,12 +5,12 @@ const { pickNextTicket, prizeWinnerCsv, choiceAnnouncement, winnerAnnouncement }
 const { decisionPanel } = require("../modules/fourGravesDiscord");
 
 const totals = GRAVES.map(g => prizeSlots(DEFAULT_CONFIG,g.id).length);
-assert.deepEqual(totals,[13,11,12,13]);
-assert.equal(totals.reduce((a,b)=>a+b,0),49);
+assert.deepEqual(totals,[13,11,13,13]);
+assert.equal(totals.reduce((a,b)=>a+b,0),50);
 const mystery = {
   barry_buckets: ["Scribble Otter Yoink Club",3],
   barbara_bowkins: ["Visions of the Void",1],
-  cletus_von_wrinkles: ["Doruzu (ApeChain)",2],
+  cletus_von_wrinkles: ["RugDollz 3D",3],
   scuba_steve_3000: ["Chill Bugs",3],
 };
 for (const g of GRAVES) {
