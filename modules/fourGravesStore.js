@@ -2,6 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
+const { drawPrizeWinners, winnersHash } = require("./fourGravesDraw");
 const {
   GRAVES,
   DEFAULT_CONFIG,
@@ -16,10 +17,12 @@ class FourGravesStore {
       eventKey = "squigs-four-graves-2026",
       sourceEventKey = "squigs-trick-or-treat-2026",
       testMode = false,
+      simpleDraw = false,
     } = {},
   ) {
     if (testMode && !eventKey.startsWith("four-graves-private-test-")) throw Error("Invalid sandbox key.");
-    Object.assign(this, { pool, eventKey, sourceEventKey, testMode });
+    if (simpleDraw && testMode) throw Error("The real prize draw cannot use fake tickets.");
+    Object.assign(this, { pool, eventKey, sourceEventKey, testMode, simpleDraw });
   }
   async migrate() {
     await this.pool.query(
@@ -65,6 +68,8 @@ class FourGravesStore {
         ],
       );
       const e = await this.event(c, guild, true);
+      if (this.simpleDraw && (e.config?.testMode || e.source_event_key !== this.sourceEventKey))
+        throw Error("Live Four Graves event/source mismatch. Refusing setup.");
       if (this.testMode && (e.config?.testMode !== true || e.config.testOwnerId !== String(actor) || e.source_event_key !== this.sourceEventKey))
         throw Error("Test ownership or source mismatch: refusing to operate.");
       for (const g of GRAVES)
@@ -128,6 +133,9 @@ class FourGravesStore {
             [e.id],
           )
         ).rows,
+        draw: this.simpleDraw
+          ? (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1", [e.id])).rows[0] || null
+          : null,
       };
     });
   }
@@ -221,10 +229,13 @@ class FourGravesStore {
         );
         const s = await this.snapshot(c, e, identities);
         await c.query(
-          "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=clock_timestamp()+interval '15 minutes',generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1",
+          this.simpleDraw
+            ? "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=NULL,generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1"
+            : "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=clock_timestamp()+interval '15 minutes',generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1",
           [e.id, JSON.stringify(s), hash(s), randomUUID()],
         );
       } else if (action === "restart") {
+        if (this.simpleDraw) throw Error("The simplified draw has no countdown to restart.");
         if (!["CLOSED_COUNTDOWN", "BUTTONS_ACTIVE"].includes(e.state))
           throw Error("No countdown to restart.");
         if (
@@ -246,6 +257,7 @@ class FourGravesStore {
     });
   }
   async decide(guild, user, grave, choice, generation) {
+    if (this.simpleDraw) throw Error("Grave decisions are retired; prizes are drawn randomly.");
     if (!["TRICK", "TREAT"].includes(choice)) throw Error("Invalid choice.");
     return this.transaction(async (c) => {
       const e = await this.event(c, guild, true);
@@ -279,6 +291,51 @@ class FourGravesStore {
         throw Error("TOO LATE. Someone already sealed this grave's fate.");
       await this.audit(c, e.id, user.id, "decision", { grave, choice });
       return r.rows[0];
+    });
+  }
+  async draw(guild, actor) {
+    if (!this.simpleDraw) throw Error("The random prize draw is not active for this store.");
+    return this.transaction(async (c) => {
+      const e = await this.event(c, guild, true);
+      if (e.config?.testMode || e.source_event_key !== this.sourceEventKey)
+        throw Error("Event source mismatch; refusing live draw.");
+      const prior = (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1", [e.id])).rows[0];
+      if (prior) return prior; // Never re-roll if button/command is retried.
+      if (e.state !== "CLOSED_COUNTDOWN" || !e.closed_at || e.deadline || !e.snapshot || !e.snapshot_hash)
+        throw Error("Close the simplified graves first. A legacy countdown/reveal must be reviewed separately.");
+      if (hash(e.snapshot) !== e.snapshot_hash)
+        throw Error("Frozen ticket snapshot hash mismatch; refusing draw.");
+      const winners = drawPrizeWinners(e.snapshot, e.config);
+      const result = (await c.query(
+        "INSERT INTO four_graves_draws(event_id,snapshot_hash,results,results_hash,drawn_by) VALUES($1,$2,$3,$4,$5) RETURNING *",
+        [e.id,e.snapshot_hash,JSON.stringify(winners),winnersHash(winners),actor],
+      )).rows[0];
+      await this.audit(c, e.id, actor, "random-prize-draw", { snapshotHash: e.snapshot_hash, resultsHash: result.results_hash });
+      return result;
+    });
+  }
+  async markPublished(guild, actor, channelId, messageId) {
+    if (!this.simpleDraw) throw Error("Not a simplified draw.");
+    return this.transaction(async c => {
+      const e = await this.event(c, guild, true);
+      const d = (await c.query("SELECT * FROM four_graves_draws WHERE event_id=$1 FOR UPDATE", [e.id])).rows[0];
+      if (!d) throw Error("Draw the winners before publishing.");
+      if (d.published_at) {
+        if (d.channel_id !== channelId || d.message_id !== messageId)
+          throw Error("Winners were already published elsewhere.");
+        return d;
+      }
+      if (e.config?.testMode || e.source_event_key !== this.sourceEventKey || e.state !== "CLOSED_COUNTDOWN" || e.deadline)
+        throw Error("Unsafe event state; cannot publish.");
+      if (d.snapshot_hash !== e.snapshot_hash || winnersHash(d.results) !== d.results_hash)
+        throw Error("Draw integrity mismatch; refusing publication.");
+      const result = (await c.query(
+        "UPDATE four_graves_draws SET channel_id=$2,message_id=$3,published_at=clock_timestamp() WHERE event_id=$1 RETURNING *",
+        [e.id,channelId,messageId],
+      )).rows[0];
+      await c.query("UPDATE four_graves_events SET state='REVEALED' WHERE id=$1", [e.id]);
+      await this.audit(c,e.id,actor,"publish-prize-results",{channelId,messageId});
+      return result;
     });
   }
   async operation(id, key, error = null) {
