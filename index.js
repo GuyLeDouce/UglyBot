@@ -44,6 +44,7 @@ const squigDuels = require('./modules/squigDuels');
 const madlib = require('./modules/madlib');
 const trickOrTreat = require('./modules/trickOrTreat');
 const fourGraves = require('./modules/fourGraves');
+const fourGravesTest = require('./modules/fourGravesTest');
 const {
   MAW_EXPECTED_TOKEN_COUNT,
   loadMawRankingIndex,
@@ -292,7 +293,7 @@ const DAILY_HOLDER_REFRESH_PROGRESS_EVERY = Math.max(
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    ...(fourGraves.enabled() ? [GatewayIntentBits.GuildMembers] : []),
+    ...(fourGraves.enabled() || fourGravesTest.enabled() ? [GatewayIntentBits.GuildMembers] : []),
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     ...(madlib.isEnabled() ? [GatewayIntentBits.GuildMessageReactions] : []),
@@ -1300,6 +1301,7 @@ function buildSlashCommands() {
     ...madlib.buildMadlibSlashCommands(),
     trickOrTreat.buildSlashCommand().toJSON(),
     fourGraves.buildSlashCommand().toJSON(),
+    fourGravesTest.buildSlashCommand().toJSON(),
   ];
 }
 
@@ -1361,7 +1363,7 @@ client.once(Events.ClientReady, async (c) => {
   }
   // Mad Libs awaits its own schema; existing ready jobs above are not delayed.
   Promise.resolve(madlib.startMadlibWorkers()).catch(() => console.warn('[MadLibs] Worker startup failed.'));
-  Promise.resolve(trickOrTreat.ensureTables()).then(() => fourGraves.start()).catch(() => console.warn('[FourGraves] schema/startup failed; inspect database connectivity.'));
+  Promise.resolve(trickOrTreat.ensureTables()).then(async () => { await fourGraves.start(); await fourGravesTest.start(); }).catch(() => console.warn('[FourGraves] schema/startup failed; inspect database connectivity.'));
 });
 
 const RECEIPT_CHANNEL_ID = '1403005536982794371';
@@ -7694,6 +7696,7 @@ bountyVault.initBountyVault({
 });
 
 fourGraves.initFourGraves({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds, postAdminSystemLog });
+fourGravesTest.init({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds });
 
 trickOrTreat.initTrickOrTreat({
   client,
@@ -7755,6 +7758,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGravesTest.handle(interaction)) return;
       if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleCommand(interaction)) {
         return;
@@ -8802,6 +8806,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGravesTest.handle(interaction)) return;
       if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleButton(interaction)) {
         return;
@@ -10387,6 +10392,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (await fourGravesTest.handle(interaction)) return;
       if (await fourGraves.handle(interaction)) return;
       if (await trickOrTreat.handleModalSubmit(interaction)) {
         return;
