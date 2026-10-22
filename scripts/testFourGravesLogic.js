@@ -252,12 +252,22 @@ test("decision identifies presser", () =>
   ));
 test("rules cannot change fixed games", () =>
   assert.throws(() => validatePatch({ game: "wrong" })));
-test("mystery update invalidates finalization", () =>
-  assert.equal(validatePatch({ mystery: [] }).prizesFinalized, false));
-test("invalid mystery quantities rejected", () =>
-  assert.throws(() =>
-    validatePatch({ mystery: [{ name: "NFT", quantity: 0 }] }),
-  ));
+test("per-grave prize updates require re-finalization", () =>
+  assert.equal(validatePatch({ mysteryByGrave: structuredClone(DEFAULT_CONFIG.mysteryByGrave) }).prizesFinalized, false));
+test("invalid per-grave mystery quantities rejected", () => {
+  const choices = structuredClone(DEFAULT_CONFIG.mysteryByGrave);
+  choices.barry_buckets[0].quantity = 0;
+  assert.throws(() => validatePatch({ mysteryByGrave: choices }));
+  assert.throws(() => validatePatch({ mystery: [] }));
+});
+test("four finalized distinct grave pools total 49 prizes", () => {
+  const { prizeSlots } = require("../modules/fourGravesCore");
+  assert.deepEqual(GRAVES.map(g=>prizeSlots(DEFAULT_CONFIG,g.id).length),[13,11,12,13]);
+  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[0].id).some(p=>p.name==="Scribble Otter Yoink Club"));
+  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[1].id).some(p=>p.name==="Visions of the Void"));
+  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[2].id).some(p=>p.name==="Doruzu (ApeChain)"));
+  assert.ok(prizeSlots(DEFAULT_CONFIG,GRAVES[3].id).some(p=>p.name==="Chill Bugs"));
+});
 test("slash command serializes with Discord builders", () =>
   assert.equal(buildSlashCommand().toJSON().name, "fourgraves"));
 test("ZIP signatures", () => {
