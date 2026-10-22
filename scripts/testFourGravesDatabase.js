@@ -126,6 +126,7 @@ async function main() {
       );
       await s.allocate(guild, user, GRAVES[3].id, 1, "new");
     });
+    await s.configure(guild, "admin", { prizesFinalized: false });
     await test("close requires prize finalization", () =>
       assert.rejects(() => s.transition(guild, "admin", "close"), /Finalize/));
     await s.configure(guild, "admin", { prizesFinalized: true });
@@ -247,8 +248,10 @@ async function main() {
       await worker.reconcile(await current());
       assert.equal(mock.channels.size, 4);
       assert.equal(mock.roles.size, 5);
-      for (const c of mock.channels.values())
-        assert.equal((await c.messages.fetch({})).size, 1);
+      const graves = (await s.read(guild)).graves;
+      for (const g of graves)
+        assert.equal((await mock.channels.get(g.channel_id).messages.fetch({})).size,
+          1 + Number(!!g.decision));
     });
     await test("membership assigned for every allocated grave", async () => {
       const d = await s.read(guild);
@@ -312,8 +315,10 @@ async function main() {
       await worker.reconcile(await current());
       mock.fail.message = false;
       await worker.reconcile(await current());
-      for (const c of mock.channels.values())
-        assert.equal((await c.messages.fetch({})).size, 1);
+      const graves = (await s.read(guild)).graves;
+      for (const g of graves)
+        assert.equal((await mock.channels.get(g.channel_id).messages.fetch({})).size,
+          1 + Number(!!g.decision));
     });
     await test("restart completes reveal using persisted decision", async () => {
       const next = new FourGravesDiscord(new FourGravesStore(pool), mock.deps);
@@ -326,6 +331,46 @@ async function main() {
       const d = await s.read(guild);
       for (const g of d.graves.filter((g) => g.decision))
         assert.equal(g.reveal_stage, 3);
+    });
+    await test("first decision publishes exact one-time team choice ping", async () => {
+      const d = await s.read(guild);
+      for (const g of d.graves.filter(x=>x.decision)) {
+        assert.ok(g.choice_message_id);
+        const messages = await mock.channels.get(g.channel_id).messages.fetch({});
+        const choice = [...messages.values()].find(m =>
+          m.embeds?.some(x=>x.footer?.text ===
+            "four-graves:"+d.event.id+":"+g.grave_id+":choice"));
+        assert.ok(choice, "Choice notification must survive worker recovery");
+      }
+    });
+    await test("two-minute wait and one winner every 15 seconds", async () => {
+      const d = await s.read(guild);
+      const g = d.graves.find(x=>x.decision && d.snapshot.entries.some(t=>t.grave_id===x.grave_id));
+      assert.ok(g);
+      assert.equal(await s.nextPrize(guild,g.grave_id),null);
+      await pool.query(
+        "UPDATE four_graves_graves SET next_draw_at=clock_timestamp()-interval '1 second' WHERE event_id=$1 AND grave_id=$2",
+        [d.event.id,g.grave_id],
+      );
+      const winner = await s.nextPrize(guild,g.grave_id);
+      assert.equal(winner.prize_index,1);
+      assert.ok(winner.ticket_entry_id);
+      const same = await s.nextPrize(guild,g.grave_id);
+      assert.equal(String(same.ticket_entry_id),String(winner.ticket_entry_id));
+      await s.markPrizeAnnounced(guild,g.grave_id,1,"fake-prize-message-1");
+      assert.equal(await s.nextPrize(guild,g.grave_id),null);
+      await pool.query(
+        "UPDATE four_graves_graves SET next_draw_at=clock_timestamp()-interval '1 second' WHERE event_id=$1 AND grave_id=$2",
+        [d.event.id,g.grave_id],
+      );
+      const second = await s.nextPrize(guild,g.grave_id);
+      assert.equal(second.prize_index,2);
+      if(d.snapshot.entries.some(x=>x.grave_id===g.grave_id && x.discord_id!==winner.winner_discord_id))
+        assert.notEqual(second.winner_discord_id,winner.winner_discord_id);
+      await s.markPrizeAnnounced(guild,g.grave_id,2,"fake-prize-message-2");
+      const stored = await s.read(guild);
+      assert.equal(stored.awards.filter(a=>a.grave_id===g.grave_id).length,2);
+      assert.ok(stored.awards.every(a=>a.announced_at));
     });
     await test("admin export and configuration are permission checked", async () => {
       const api = require("../modules/fourGraves");
