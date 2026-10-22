@@ -177,11 +177,19 @@ function buildSnapshot(earned, allocations, identities = {}) {
   }
   return { users: people, entries };
 }
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === "object") {
+    // A closed snapshot is persisted as PostgreSQL JSONB, which reorders keys.
+    // Canonical ordering makes pre- and post-persistence digests identical.
+    if (value instanceof Date) return value.toISOString();
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key,stableJson(value[key])]));
+  }
+  return value;
+}
 function hash(snapshot) {
-  return crypto
-    .createHash("sha256")
-    .update(JSON.stringify(snapshot))
-    .digest("hex");
+  return crypto.createHash("sha256")
+    .update(JSON.stringify(stableJson(snapshot))).digest("hex");
 }
 function exportFiles(
   event,
