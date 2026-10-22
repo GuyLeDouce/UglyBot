@@ -253,6 +253,28 @@ async function main() {
         assert.equal((await mock.channels.get(g.channel_id).messages.fetch({})).size,
           1 + Number(!!g.decision));
     });
+    await test("missing public panel is recorded without breaking private graves", async () => {
+      const original = await current();
+      await pool.query(
+        "UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
+        [original.id, "deleted-public-channel"],
+      );
+      try {
+        // The private graves and winner workflow must still reconcile.
+        await worker.reconcile(await current());
+        const d = await s.read(guild);
+        const failure = d.operations.find(x => x.operation_key === "public-panel");
+        assert.match(String(failure?.last_error), /missing|not a text channel/i);
+        assert.equal(mock.channels.size, 4);
+        for (const g of d.graves) assert.ok(mock.channels.get(g.channel_id));
+      } finally {
+        await pool.query(
+          "UPDATE four_graves_events SET panel_channel_id=NULL WHERE id=$1",
+          [original.id],
+        );
+        await s.operation(original.id, "public-panel");
+      }
+    });
     await test("membership assigned for every allocated grave", async () => {
       const d = await s.read(guild);
       for (const g of d.graves)

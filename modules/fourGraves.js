@@ -141,7 +141,19 @@ function controls(e) {
 function status(data, isAdmin) {
   const { event: e, snapshot: s, graves, operations, awards = [] } = data;
   const total = s.users.reduce((n,u)=>n+u.total,0);
-  let text = "**FOUR GRAVES — " + e.state + "**\n" +
+  // Put failures FIRST so Discord's 2,000-character message limit does not
+  // silently truncate the only actionable diagnosis.
+  const errors = isAdmin ? operations.filter(x=>x.last_error) : [];
+  const priority = ["worker","public-panel"];
+  const ordered = errors.sort((a,b)=>
+    (priority.indexOf(a.operation_key) < 0 ? 2 : priority.indexOf(a.operation_key)) -
+    (priority.indexOf(b.operation_key) < 0 ? 2 : priority.indexOf(b.operation_key)));
+  const diagnostics = ordered.length
+    ? "**⚠️ Four Graves diagnostics (event " + e.id + ")**\n" +
+      ordered.slice(0,5).map(x => x.operation_key + ": " +
+        String(x.last_error).slice(0,240)).join("\n") + "\n\n"
+    : "";
+  let text = diagnostics + "**FOUR GRAVES — " + e.state + "**\n" +
     "Participants: " + s.users.filter(u=>u.allocated).length +
     "\nTickets buried: " + s.entries.length + "\n";
   if(e.deadline && e.state === "CLOSED_COUNTDOWN")
@@ -150,9 +162,14 @@ function status(data, isAdmin) {
     const state=graves.find(x=>x.grave_id===g.id);
     const entries=s.entries.filter(x=>x.grave_id===g.id);
     const awarded=awards.filter(x=>x.grave_id===g.id);
+    let expected = "not configured";
+    if (e.config.mysteryByGrave) {
+      try { expected = require("./fourGravesCore").prizeSlots(e.config,g.id).length; }
+      catch { expected = "configuration error"; }
+    }
     const progress=state.decision && state.reveal_stage>=3
       ? "; winners announced " + awarded.filter(x=>x.announced_at).length +
-        "/" + (e.config.mysteryByGrave ? require("./fourGravesCore").prizeSlots(e.config,g.id).length : "not configured")
+        "/" + expected
       : "; prize pool hidden until team choice";
     text += e.config.names[i] + ": " + entries.length + " buried, " +
       new Set(entries.map(x=>x.discord_id)).size + " holders; " +
@@ -166,8 +183,7 @@ function status(data, isAdmin) {
   if(isAdmin) text += "\nEarned: "+total+"; unallocated: "+(total-s.entries.length)+
     "\nSnapshot: "+(e.snapshot_id||"live")+
     "\nPrizes finalized: "+!!e.config.prizesFinalized+
-    "\nWorker errors: "+(operations.filter(x=>x.last_error).map(x=>
-      x.operation_key+": "+x.last_error).join("; ")||"none");
+    "\nWorker errors: "+(errors.length ? errors.length : "none");
   return {content:text.slice(0,1940),allowedMentions:{parse:[]}};
 }
 function validatePatch(input) {

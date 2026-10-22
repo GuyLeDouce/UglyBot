@@ -16,6 +16,16 @@ const button = (custom_id, label, disabled = false, style = 2) => ({
 const row = (...components) => ({ type: 1, components });
 const cid = (e, action, ...args) => ["fg1", e.id, action, ...args].join(":");
 const mentions = { parse: [] };
+
+// Surface the real failure without logging credentials or flooding Railway every 15s.
+function diagnosticError(err) {
+  const code = err?.code ?? err?.rawError?.code ?? err?.status ?? "";
+  const msg = String(err?.message || err || "Unknown worker error")
+    .replace(/(postgres(?:ql)?:\/\/)[^\s]+/gi, "$1[redacted]")
+    .replace(/(password|token|authorization)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ").slice(0, 550);
+  return (code ? "[" + String(code).slice(0, 32) + "] " : "") + msg;
+}
 function publicPanel(e) {
   return {
     embeds: [
@@ -96,6 +106,21 @@ class FourGravesDiscord {
     this.store = store;
     this.deps = deps;
     this.busy = false;
+    this.lastLoggedFailures = new Map();
+  }
+  logFailure(scope, eventId, err) {
+    const detail = diagnosticError(err);
+    const key = scope + ":" + eventId;
+    const previous = this.lastLoggedFailures.get(key);
+    const now = Date.now();
+    // Distinct failures appear immediately; identical messages repeat at most every 5 minutes.
+    if (!previous || previous.detail !== detail || now - previous.time >= 300000) {
+      console.warn(
+        "[FourGraves:" + (this.store.testMode ? "TEST" : "LIVE") + "] " +
+        scope + " failed for event " + eventId + ": " + detail,
+      );
+      this.lastLoggedFailures.set(key, { detail, time: now });
+    }
   }
   async permissions(guild, e, role) {
     await guild.roles.fetch();
@@ -423,25 +448,33 @@ class FourGravesDiscord {
       }
     }
     if (e.panel_channel_id) {
-      const channel = await guild.channels.fetch(e.panel_channel_id);
-      if (
-        !channel ||
-        channel.guildId !== e.guild_id ||
-        channel.type !== ChannelType.GuildText
-      )
-        throw Error("Invalid public panel channel.");
-      await this.message(
-        e,
-        channel,
-        e.panel_message_id,
-        "public-panel",
-        publicPanel(e),
-        (m) =>
-          this.store.pool.query(
-            "UPDATE four_graves_events SET panel_message_id=$2 WHERE id=$1",
-            [e.id, m.id],
-          ),
-      );
+      try {
+        const channel = await guild.channels.fetch(e.panel_channel_id);
+        if (
+          !channel ||
+          channel.guildId !== e.guild_id ||
+          channel.type !== ChannelType.GuildText
+        )
+          throw Error("Configured grave-selection panel channel is missing or not a text channel: " + e.panel_channel_id);
+        await this.message(
+          e,
+          channel,
+          e.panel_message_id,
+          "public-panel",
+          publicPanel(e),
+          (m) =>
+            this.store.pool.query(
+              "UPDATE four_graves_events SET panel_message_id=$2 WHERE id=$1",
+              [e.id, m.id],
+            ),
+        );
+        await this.store.operation(e.id, "public-panel");
+      } catch (err) {
+        // A deleted or inaccessible public panel must not block already-open
+        // private grave channels, countdowns or persisted winner announcements.
+        await this.store.operation(e.id, "public-panel", diagnosticError(err));
+        this.logFailure("public-panel", e.id, err);
+      }
     }
     // Do not mark the event complete until every populated grave has
     // chosen and announced its entire prize pool of winners.
@@ -489,16 +522,13 @@ class FourGravesDiscord {
           await this.reconcile(e);
           await this.store.operation(e.id, "worker");
         } catch (err) {
-          await this.store.operation(
-            event.id,
-            "worker",
-            String(err.message).slice(0, 500),
-          );
-          console.warn(
-            "[FourGraves] worker failed for event",
-            event.id,
-            "; see private admin status.",
-          );
+          // Preserve the original error even if the database audit write also fails.
+          try {
+            await this.store.operation(event.id, "worker", diagnosticError(err));
+          } catch (auditErr) {
+            this.logFailure("worker-audit", event.id, auditErr);
+          }
+          this.logFailure("worker", event.id, err);
         } finally {
           if (locked)
             await c.query("SELECT pg_advisory_unlock(46291,$1::int)", [
@@ -515,15 +545,11 @@ class FourGravesDiscord {
     if (this.timer) return;
     this.timer = setInterval(
       () =>
-        this.tick().catch(() =>
-          console.warn("[FourGraves] recovery deferred; inspect admin status."),
-        ),
+        this.tick().catch(err => this.logFailure("worker-loop", "all", err)),
       15000,
     );
     this.timer.unref?.();
-    void this.tick().catch(() =>
-      console.warn("[FourGraves] recovery startup deferred."),
-    );
+    void this.tick().catch(err => this.logFailure("worker-startup", "all", err));
   }
 }
 module.exports = {
