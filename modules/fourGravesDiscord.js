@@ -143,10 +143,14 @@ function decisionPanel(e, g) {
   const eligible = e.snapshot?.entries.some((x) => x.grave_id === g.grave_id);
   const active = e.state === "BUTTONS_ACTIVE" && !decision && eligible;
   let description = eligible
-    ? `Your tickets are buried. Your team has been chosen.\n\nTRICK or TREAT. One person decides for everyone here. Discuss it. Argue about it. Or be the asshole who presses first.\n\nButtons eligible <t:${Math.floor(new Date(e.deadline).getTime() / 1000)}:R>.`
-    : "This grave has no eligible contestants. The administrator will handle its unused prize pool manually.";
+    ? "**THE DIRT HAS SETTLED.**\n\n" +
+      "Every Squig in here buried tickets under the same stone. You're a team now, whether you like it or not.\n\n" +
+      "Once the buttons wake up, the **first** hand on 👻 TRICK or 🍬 TREAT chooses for the ENTIRE grave. No vote. No do-overs.\n\n" +
+      "The rest of you get to wonder what they just signed you up for.\n\n" +
+      "Buttons eligible <t:" + Math.floor(new Date(e.deadline).getTime() / 1000) + ":R>."
+    : "Nobody buried a ticket here. Even the ghosts look disappointed. No team, no decision, no draw.";
   if (decision)
-    description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
+    description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}** for the entire grave.\n\nNo changing minds now. Something is stirring under the stone...`;
   if (g.reveal_stage >= 2) description += "\n\nTHE GRAVE IS OPENING...";
   if (g.reveal_stage >= 3)
     description += "\n\n**" + e.config.names[i].toUpperCase() +
