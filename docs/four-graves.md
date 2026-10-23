@@ -14,6 +14,19 @@ The existing daily Treat and verified Trick mechanisms continue unchanged. One e
 
 **There are no separate Squigwreck, Wheel, Duck Race, or Ugly City games.** Old fixed-game database metadata remains only to preserve compatibility with existing schema and tests.
 
+## Grave selection panel artwork and button order
+
+The main Four Graves selection panel displays **https://i.imgur.com/CQPVlFX.png** above four buttons, left to right:
+
+1. Cletus Von Wrinkles
+2. Barry Buckets
+3. Barbara Bowkins
+4. Scuba Steve 3000
+
+The spelling **Wrinkles** matches the original character and grave ID. Button placement is visual only; stable grave IDs, existing ticket allocations, private team channels, contest exports and winners are unchanged.
+
+New events use the image by default. A one-time, audited startup update also refreshes stored LIVE and TEST panels, including already-closed panels, without changing frozen tickets, prizes, decisions or results. Future explicit administrator image overrides remain respected. The recovery worker edits existing bot panels to display this image and button order; it does not post duplicate selection panels.
+
 ## Finalized prize pools
 
 Every grave has 1 DollzOnApe, 3 Squigs Reloaded, 1 Ugly Monster and 5 separate prizes of 5,000 $CHARM. In addition:
