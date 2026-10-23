@@ -528,9 +528,10 @@ async function main() {
         newPrize,
       );
     });
-    await test("one roster message appears after first burial and updates without duplicating", async () => {
+    await test("four player-count rosters follow first burial, update, and freeze without duplicates", async () => {
       const { fixture } = require("./fourGravesDiscordFixture");
       const { FourGravesDiscord } = require("../modules/fourGravesDiscord");
+      const { PANEL_INDICES } = require("../modules/fourGravesCore");
       const simulatedGuild = "roster-test-guild";
       const env = fixture(simulatedGuild);
       const panel = await env.guild.channels.create({name:"select-your-grave"});
@@ -541,64 +542,92 @@ async function main() {
       );
       const runner = new FourGravesDiscord(s,env.deps);
       const currentRoster = async () => (await s.read(simulatedGuild)).event;
+      const rosterId = async graveId =>
+        (await s.read(simulatedGuild)).graves.find(x=>x.grave_id===graveId).roster_message_id;
 
-      // No roster or ghost placeholder before anyone confirms a ticket burial.
       await runner.reconcile(await currentRoster());
       assert.equal((await panel.messages.fetch({})).size,1);
-      assert.equal((await currentRoster()).roster_message_id,null);
+      assert.ok((await s.read(simulatedGuild)).graves.every(g=>!g.roster_message_id));
 
-      for(const [userId, day] of [["10","roster-day-1"],["10","roster-day-2"],["20","roster-day-1"]]) {
-        await pool.query(
-          "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
-          "VALUES($1,$2,$3,$4,1,1)",
-          [s.sourceEventKey,simulatedGuild,userId,day],
-        );
-      }
+      for (const [userId, day] of [
+        ["10","roster-day-1"],["10","roster-day-2"],["20","roster-day-1"]
+      ]) await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,$3,$4,1,1)",
+        [s.sourceEventKey,simulatedGuild,userId,day],
+      );
       await s.transition(simulatedGuild,"admin","open");
       await s.allocate(simulatedGuild,
         {id:"10",username:"player_1",display_name:"Player 1"},
         GRAVES[2].id,2,"roster-test-ticket-1");
       await runner.reconcile(await currentRoster());
-
-      const afterFirst = await currentRoster();
-      assert.ok(afterFirst.roster_message_id,"Roster message ID must be durable");
-      const rosterId = afterFirst.roster_message_id;
-      const firstMessages = await panel.messages.fetch({});
-      assert.equal(firstMessages.size,2,"Selection then live roster — exactly two public messages");
-      const ordered = [...firstMessages.values()];
-      assert.equal(ordered[0].embeds[0].footer.text,"four-graves:"+afterFirst.id+":public");
-      assert.equal(ordered[1].embeds[0].footer.text,"four-graves:"+afterFirst.id+":roster");
-      assert.match(ordered[1].embeds[0].description,/Cletus' Grave/);
-      assert.match(ordered[1].embeds[0].description,/Player 1\(1\)/);
-      assert.doesNotMatch(ordered[1].embeds[0].description,/DollzOnApe|RugDollz/);
+      const ev = await currentRoster();
+      const graveIds = PANEL_INDICES.map(index=>GRAVES[index].id);
+      const rows = (await s.read(simulatedGuild)).graves;
+      assert.ok(rows.every(g=>g.roster_message_id));
+      const rosterIds = Object.fromEntries(rows.map(g=>[g.grave_id,g.roster_message_id]));
+      const messages = [...(await panel.messages.fetch({})).values()];
+      assert.equal(messages.length,5,"Selection + four distinct grave roster messages");
+      assert.deepEqual(messages.map(m=>m.embeds[0].footer?.text),[
+        "four-graves:"+ev.id+":public",
+        ...graveIds.map(id=>"four-graves:"+ev.id+":roster:"+id),
+      ]);
+      const cletus = await panel.messages.fetch(rosterIds.cletus_von_wrinkles);
+      assert.match(cletus.embeds[0].description,/Player 1 — 2 tickets/);
+      assert.doesNotMatch(cletus.embeds[0].description,/Player 1\(1\)/);
+      assert.match(cletus.embeds[0].fields[0].value,/2 tickets · 1 Squig/);
+      assert.doesNotMatch(cletus.embeds[0].description,/RugDollz|DollzOnApe/);
+      const barryEmpty = await panel.messages.fetch(rosterIds.barry_buckets);
+      assert.match(barryEmpty.embeds[0].description,/Nobody has buried/);
 
       await s.allocate(simulatedGuild,
         {id:"20",username:"player_2",display_name:"Player 2"},
         GRAVES[0].id,1,"roster-test-ticket-2");
       await runner.reconcile(await currentRoster());
-      assert.equal((await currentRoster()).roster_message_id,rosterId);
-      assert.equal((await panel.messages.fetch({})).size,2);
-      const board = await panel.messages.fetch(rosterId);
-      assert.match(board.embeds[0].description,/Barry's Grave/);
-      assert.match(board.embeds[0].description,/Player 2/);
+      assert.equal((await panel.messages.fetch({})).size,5);
+      assert.deepEqual(
+        Object.fromEntries((await s.read(simulatedGuild)).graves.map(g=>[g.grave_id,g.roster_message_id])),
+        rosterIds,
+      );
+      const barry = await panel.messages.fetch(rosterIds.barry_buckets);
+      assert.match(barry.embeds[0].description,/Player 2 — 1 ticket/);
+      assert.match(barry.embeds[0].fields[0].value,/1 ticket · 1 Squig/);
 
-      const beforeClosing = board.embeds[0].description;
+      // A third ticket by the same player updates their ONE roster line,
+      // never a second numbered line, while the draw still has 3 entries.
+      await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,'10','roster-day-3',1,1)",
+        [s.sourceEventKey,simulatedGuild],
+      );
+      await s.allocate(simulatedGuild,
+        {id:"10",username:"player_1",display_name:"Player 1"},
+        GRAVES[2].id,1,"roster-test-ticket-3");
+      await runner.reconcile(await currentRoster());
+      const updated = await panel.messages.fetch(rosterIds.cletus_von_wrinkles);
+      assert.match(updated.embeds[0].description,/Player 1 — 3 tickets/);
+      assert.doesNotMatch(updated.embeds[0].description,/Player 1\(/);
+      assert.equal((await s.read(simulatedGuild)).snapshot.entries.filter(
+        ticket=>ticket.grave_id===GRAVES[2].id).length,3);
+      assert.equal((await panel.messages.fetch({})).size,5);
+      const frozenDescriptions = Object.fromEntries(await Promise.all(
+        graveIds.map(async id=>[id,(await panel.messages.fetch(rosterIds[id])).embeds[0].description])
+      ));
       await s.transition(simulatedGuild,"admin","close");
       await runner.reconcile(await currentRoster());
-      assert.equal((await panel.messages.fetch({})).size,2);
-      assert.equal((await panel.messages.fetch(rosterId)).embeds[0].description,beforeClosing);
-
-      // New external claims never rewrite an already frozen grave team list.
       await pool.query(
         "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
         "VALUES($1,$2,'20','roster-day-2',1,1)",
         [s.sourceEventKey,simulatedGuild],
       );
       await runner.reconcile(await currentRoster());
-      assert.equal((await panel.messages.fetch(rosterId)).embeds[0].description,beforeClosing);
-      assert.equal((await panel.messages.fetch({})).size,2);
-      assert.ok((await s.read(simulatedGuild)).operations.some(o =>
-        o.operation_key==="public-roster" && !o.last_error));
+      for (const id of graveIds)
+        assert.equal((await panel.messages.fetch(rosterIds[id])).embeds[0].description,
+          frozenDescriptions[id]);
+      assert.equal((await panel.messages.fetch({})).size,5);
+      const ops = (await s.read(simulatedGuild)).operations;
+      assert.ok(graveIds.every(id=>ops.some(o=>
+        o.operation_key==="public-roster:"+id && !o.last_error)));
     });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,
