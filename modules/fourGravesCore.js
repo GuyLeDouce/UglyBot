@@ -1,5 +1,7 @@
 "use strict";
 const crypto = require("crypto");
+// Default artwork for the Four Graves public ticket-allocation panel.
+const PANEL_IMAGE_URL = "https://i.imgur.com/CQPVlFX.png";
 const GRAVES = Object.freeze([
   {
     id: "barry_buckets",
@@ -33,7 +35,7 @@ const GRAVES = Object.freeze([
 const DEFAULT_CONFIG = {
   names: GRAVES.map((g) => g.name),
   rules: GRAVES.map((g) => g.rules),
-  image: null,
+  image: PANEL_IMAGE_URL,
   category: null,
   prizes: [
     { name: "DollzOnApe", quantity: 1 },
@@ -375,6 +377,7 @@ module.exports = {
   csvRecords,
   GRAVES,
   DEFAULT_CONFIG,
+  PANEL_IMAGE_URL,
   prizePoolForGrave,
   prizeSlots,
   quantity,
