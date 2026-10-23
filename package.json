@@ -21,7 +21,8 @@
     "test:four-graves-private-db": "node scripts/testFourGravesPrivateDatabase.js",
     "test:four-graves-auto-draw": "node scripts/testFourGravesAutoDraw.js",
     "test:four-graves-worker-diagnostics": "node scripts/testFourGravesWorkerDiagnostics.js",
-    "test:four-graves-member-roster": "node scripts/testFourGravesMemberRoster.js"
+    "test:four-graves-member-roster": "node scripts/testFourGravesMemberRoster.js",
+    "test:four-graves-roster": "node scripts/testFourGravesRoster.js"
   },
   "engines": {
     "node": "20.x"
