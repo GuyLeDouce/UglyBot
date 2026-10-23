@@ -84,4 +84,4 @@ function winnerAnnouncement(event, graveId, award) {
     allowedMentions: { parse: [] },
   };
 }
-module.exports = { pickNextTicket, prizeWinnerCsv, choiceAnnouncement, winnerAnnouncement };
+module.exports = { pickNextTicket, prizeWinnerCsv, choiceAnnouncement, winnerAnnouncement, escapeDiscord };
