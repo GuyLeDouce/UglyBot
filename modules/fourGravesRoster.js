@@ -7,6 +7,13 @@ const { escapeDiscord } = require("./fourGravesDraw");
 const PREVIEW_BUDGET = 650;
 const PAGE_SIZE = 20;
 const mentions = { parse: [] };
+// The roster is about names in the dirt, not a public prize reveal.
+const GRAVE_HEADINGS = Object.freeze({
+  cletus_von_wrinkles: "Cletus' Grave",
+  barry_buckets: "Barry's Grave",
+  barbara_bowkins: "Barbara's Grave",
+  scuba_steve_3000: "Steve's Grave",
+});
 
 function graveTickets(snapshot, graveId) {
   return snapshot.entries.filter(entry => entry.grave_id === graveId);
@@ -32,12 +39,14 @@ function rosterPanel(event, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.entries) || !snapshot.entries.length)
     return null;
   const description = [
-    "Each name below is a **buried ticket**. Repeated names with (1), (2) and so on are separate entries.",
+    "**SOMEBODY DUG THE FIRST HOLE. NOW THE DEAD ARE KEEPING SCORE.**",
+    "Every name below is a buried ticket. Names with (1), (2), (3)... are more chances left in the dirt by the same Squig.",
+    "These are your grave-mates. When the graves seal, one of you will choose TRICK or TREAT for everyone on your team. **What happens after? The stones aren't talking.**",
     ...PANEL_INDICES.map(index => {
       const grave = GRAVES[index];
       const entries = graveTickets(snapshot, grave.id);
       const holders = new Set(entries.map(entry => entry.discord_id)).size;
-      return "🪦 **" + safe(event.config.names[index]) + "'s Grave** — " +
+      return "🪦 **" + GRAVE_HEADINGS[grave.id] + "** — " +
         entries.length + " ticket" + (entries.length === 1 ? "" : "s") +
         " / " + holders + " member" + (holders === 1 ? "" : "s") +
         "\n" + publicPreview(entries);
@@ -47,7 +56,7 @@ function rosterPanel(event, snapshot) {
     throw Error("Four Graves roster preview exceeds Discord embed limit.");
   return {
     embeds: [{
-      title: event.config.testMode ? "🧪 TEST — GRAVE TEAMS" : "🪦 THE FOUR GRAVES — TEAMS",
+      title: event.config.testMode ? "🧪 TEST — THE DEAD ARE KEEPING SCORE" : "🪦 THE DEAD ARE KEEPING SCORE",
       description,
       footer: { text: "four-graves:" + event.id + ":roster" },
     }],
@@ -89,13 +98,14 @@ function rosterPage(event, snapshot, graveIndex, requestedPage = 0) {
     ],
   }];
   return {
-    content: "**" + safe(event.config.names[graveIndex]) + "'s Grave** — " +
+    content: "**" + GRAVE_HEADINGS[grave.id] + "** — " +
       entries.length + " tickets / " + holders + " members. Page " + (page + 1) + " of " + pages + ".",
     embeds: [{
       title: event.config.testMode ? "🧪 TEST — BURIED TICKETS" : "🪦 BURIED TICKETS",
       description: current.length
-        ? current.map(x => safe(x.label)).join("\n")
-        : "*No tickets buried in this grave yet.*",
+        ? "**Every name is one ticket. Every ticket is a chance. Nobody knows what this grave has planned.**\n\n" +
+          current.map(x => safe(x.label)).join("\n")
+        : "*No names in this dirt yet. The grave is waiting.*",
       footer: { text: "four-graves:" + event.id + ":" + grave.id + ":roster-page" },
     }],
     components: pages > 1 ? actions : [],
