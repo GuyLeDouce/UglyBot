@@ -5,7 +5,7 @@ const {
   ChannelType,
   Collection,
 } = require("discord.js");
-const { GRAVES, prizePoolForGrave } = require("./fourGravesCore");
+const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL } = require("./fourGravesCore");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
@@ -17,6 +17,18 @@ const button = (custom_id, label, disabled = false, style = 2) => ({
 const row = (...components) => ({ type: 1, components });
 const cid = (e, action, ...args) => ["fg1", e.id, action, ...args].join(":");
 const mentions = { parse: [] };
+// Presentation order only: keep GRAVES indices stable for tickets, roles and exports.
+const PANEL_ORDER = Object.freeze([
+  "cletus_von_wrinkles",
+  "barry_buckets",
+  "barbara_bowkins",
+  "scuba_steve_3000",
+]);
+const PANEL_INDICES = Object.freeze(PANEL_ORDER.map(id => {
+  const index = GRAVES.findIndex(grave => grave.id === id);
+  if (index < 0) throw Error("Four Graves panel references an unknown grave: " + id);
+  return index;
+}));
 
 // Surface the real failure without logging credentials or flooding Railway every 15s.
 function diagnosticError(err) {
@@ -114,13 +126,15 @@ function publicPanel(e) {
             "are separate from the real October Trick or Treat event. " +
             "Test allocations can be removed with /fourgravestest reset.\n\nSTAY UGLY."
           : "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
-        ...(e.config.image ? { image: { url: e.config.image } } : {}),
+        // Refresh older persisted panels even when their config.image was null.
+        // An explicitly configured custom image still takes precedence.
+        image: { url: e.config.image || PANEL_IMAGE_URL },
         footer: { text: `four-graves:${e.id}:public` },
       },
     ],
     components: [
       row(
-        ...GRAVES.map((g, i) =>
+        ...PANEL_INDICES.map(i =>
           button(cid(e, "grave", i), e.config.names[i], e.state !== "OPEN"),
         ),
       ),
