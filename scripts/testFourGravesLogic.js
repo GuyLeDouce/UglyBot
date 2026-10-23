@@ -3,6 +3,7 @@ const assert = require("assert/strict");
 const {
   GRAVES,
   DEFAULT_CONFIG,
+  PANEL_IMAGE_URL,
   quantity,
   buildSnapshot,
   exportFiles,
@@ -198,6 +199,43 @@ test("public panel hides secrets", () => {
   const text = JSON.stringify(publicPanel(event));
   for (const g of GRAVES) assert.ok(!text.includes(g.game));
   assert.ok(!text.includes("DollzOnApe"));
+});
+test("panel image and requested visual order preserve grave action IDs", () => {
+  const panel = publicPanel(event);
+  assert.equal(DEFAULT_CONFIG.image, "https://i.imgur.com/CQPVlFX.png");
+  assert.equal(panel.embeds[0].image.url, PANEL_IMAGE_URL);
+  assert.deepEqual(panel.components[0].components.map(x => x.label), [
+    "Cletus Von Wrinkles",
+    "Barry Buckets",
+    "Barbara Bowkins",
+    "Scuba Steve 3000",
+  ]);
+  assert.deepEqual(panel.components[0].components.map(x => x.custom_id), [
+    "fg1:1:grave:2",
+    "fg1:1:grave:0",
+    "fg1:1:grave:1",
+    "fg1:1:grave:3",
+  ]);
+  // Grave indices stay unchanged, preserving stored allocations and exports.
+  assert.deepEqual(GRAVES.map(g => g.id), [
+    "barry_buckets", "barbara_bowkins", "cletus_von_wrinkles",
+    "scuba_steve_3000",
+  ]);
+});
+test("old saved panel configs without an image receive the new artwork", () => {
+  const oldEvent = {
+    ...event,
+    config: { ...event.config, image: null },
+  };
+  assert.equal(publicPanel(oldEvent).embeds[0].image.url, PANEL_IMAGE_URL);
+  const customizedEvent = {
+    ...event,
+    config: { ...event.config, image: "https://example.com/custom-graves.png" },
+  };
+  assert.equal(
+    publicPanel(customizedEvent).embeds[0].image.url,
+    "https://example.com/custom-graves.png",
+  );
 });
 test("setup buttons disabled", () =>
   assert.ok(
