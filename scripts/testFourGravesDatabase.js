@@ -423,6 +423,65 @@ async function main() {
         else process.env.FOUR_GRAVES_ENABLED = old;
       }
     });
+    await test("legacy live and test grave panels get one-time artwork updates", async () => {
+      const { PANEL_IMAGE_URL, PANEL_IMAGE_VERSION } = require("../modules/fourGravesCore");
+      const artStore = new FourGravesStore(pool, {
+        eventKey: "squigs-four-graves-panel-artwork-fixture",
+        sourceEventKey: s.sourceEventKey,
+      });
+      const oldIds = [];
+      for (const guildId of ["art-open", "art-closed"]) {
+        const e = await artStore.setup(guildId, "admin");
+        oldIds.push(String(e.id));
+        if (guildId === "art-closed") {
+          await artStore.transition(guildId, "admin", "open");
+          await artStore.transition(guildId, "admin", "close");
+        } else await artStore.transition(guildId, "admin", "open");
+        // Emulate an old production record, potentially with custom old art.
+        await pool.query(
+          "UPDATE four_graves_events SET config=jsonb_set(config - 'panelArtworkVersion', '{image}', to_jsonb($2::text), true) WHERE id=$1",
+          [e.id, "https://example.com/old-grave-art.png"],
+        );
+      }
+      const other = await artStore.setup("art-custom", "admin");
+      await artStore.configure("art-custom", "admin", {
+        image: "https://example.com/admin-overridden.png",
+      });
+      const before = (await artStore.read("art-closed")).event;
+      await artStore.migrate();
+      for (const guildId of ["art-open", "art-closed"]) {
+        const changed = (await artStore.read(guildId)).event;
+        assert.equal(changed.config.image, PANEL_IMAGE_URL);
+        assert.equal(changed.config.panelArtworkVersion, PANEL_IMAGE_VERSION);
+        assert.equal(changed.config.mysteryByGrave.cletus_von_wrinkles[0].name, "RugDollz 3D");
+        if (guildId === "art-closed") {
+          assert.equal(changed.state, "CLOSED_COUNTDOWN");
+          assert.equal(changed.snapshot_hash, before.snapshot_hash);
+          assert.equal(changed.snapshot_id, before.snapshot_id);
+        }
+      }
+      assert.equal((await artStore.read("art-custom")).event.config.image,
+        "https://example.com/admin-overridden.png");
+      const auditCount = async () => (
+        await pool.query(
+          "SELECT event_id,action FROM four_graves_audit WHERE action='grave-panel-artwork-update'"
+        )
+      ).rows;
+      const audited = await auditCount();
+      assert.deepEqual(audited.map(a => String(a.event_id)).sort(),oldIds.sort());
+      await artStore.migrate();
+      assert.equal((await auditCount()).length,2);
+      // Explicit admin image overrides after the one-time migration survive
+      // future restarts; the migration never becomes a recurring overwrite.
+      await artStore.configure("art-open", "admin", {
+        image: "https://example.com/new-custom-art.png",
+      });
+      await artStore.migrate();
+      assert.equal((await artStore.read("art-open")).event.config.image,
+        "https://example.com/new-custom-art.png");
+      assert.equal((await auditCount()).length,2);
+      assert.notEqual(String(other.id),"");
+    });
     await test("Cletus RugDollz upgrade updates only unclosed matching pools", async () => {
       const legacy = new FourGravesStore(pool, {
         eventKey: "squigs-four-graves-prize-change-fixture",
