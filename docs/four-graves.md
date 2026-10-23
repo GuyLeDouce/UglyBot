@@ -27,6 +27,25 @@ The spelling **Wrinkles** matches the original character and grave ID. Button pl
 
 New events use the image by default. A one-time, audited startup update also refreshes stored LIVE and TEST panels, including already-closed panels, without changing frozen tickets, prizes, decisions or results. Future explicit administrator image overrides remain respected. The recovery worker edits existing bot panels to display this image and button order; it does not post duplicate selection panels.
 
+## The living grave roster — the names in the dirt
+
+The public selection panel (including its illustrated artwork and four grave buttons) now tells a short eerie Squigs story about burying tickets and the unknown fate waiting beneath each stone. No grave-specific prizes or outcomes appear in the selection copy.
+
+**After the first confirmed burial**, UglyBot posts **one** updating embed directly after the selection message in the same Discord channel, called **THE DEAD ARE KEEPING SCORE**. It lists four teams in the same order as the selection buttons:
+
+1. Cletus' Grave
+2. Barry's Grave
+3. Barbara's Grave
+4. Steve's Grave
+
+Every line represents **one ticket**, using the existing deterministic contestant label generator. For example, someone who buried five tickets may appear as Player 1, Player 1(1), Player 1(2), Player 1(3) and Player 1(4). Duplicate display names from different Discord users remain distinguishable using the existing safe-name collision rules.
+
+The roster embed always shows grave ticket/member counts and as many entries as will fit neatly. A **View** button per grave opens all of that grave's entries in ephemeral pages of 20 tickets, so even a large event remains navigable and the public panel never exceeds Discord's embed limits.
+
+The background worker **edits the existing roster message** when more tickets are buried; after a holder confirms burial, the bot also requests an immediate worker refresh instead of relying solely on the 15-second poll. A restart discovers the existing message through its stored ID or unique footer marker, preventing duplicates. Once the graves close, the roster uses the frozen snapshot and remains stable even if additional October Treat/Trick claims are earned elsewhere.
+
+This is presentation only. No changes are made to ticket balances, permanent allocations, prize pools, private channels, Discord roles, countdowns or draw logic. Public roster text and full-list pages suppress all mentions. The roster is also available in the default-disabled private TEST mode without exposing real tickets.
+
 ## Finalized prize pools
 
 Every grave has 1 DollzOnApe, 3 Squigs Reloaded, 1 Ugly Monster and 5 separate prizes of 5,000 $CHARM. In addition:
