@@ -67,3 +67,8 @@ CREATE TABLE IF NOT EXISTS four_graves_awards (
  PRIMARY KEY(event_id,grave_id,prize_index),
  FOREIGN KEY(event_id,grave_id) REFERENCES four_graves_graves(event_id,grave_id)
 );
+
+-- One persistent team-roster message immediately after the grave selection
+-- panel; this is strictly UI metadata and never changes ticket allocations.
+ALTER TABLE four_graves_events
+ ADD COLUMN IF NOT EXISTS roster_message_id TEXT;
