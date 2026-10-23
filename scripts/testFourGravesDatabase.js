@@ -528,6 +528,78 @@ async function main() {
         newPrize,
       );
     });
+    await test("one roster message appears after first burial and updates without duplicating", async () => {
+      const { fixture } = require("./fourGravesDiscordFixture");
+      const { FourGravesDiscord } = require("../modules/fourGravesDiscord");
+      const simulatedGuild = "roster-test-guild";
+      const env = fixture(simulatedGuild);
+      const panel = await env.guild.channels.create({name:"select-your-grave"});
+      await s.setup(simulatedGuild,"admin");
+      await pool.query(
+        "UPDATE four_graves_events SET panel_channel_id=$2 WHERE event_key=$1 AND guild_id=$3",
+        [s.eventKey,panel.id,simulatedGuild],
+      );
+      const runner = new FourGravesDiscord(s,env.deps);
+      const currentRoster = async () => (await s.read(simulatedGuild)).event;
+
+      // No roster or ghost placeholder before anyone confirms a ticket burial.
+      await runner.reconcile(await currentRoster());
+      assert.equal((await panel.messages.fetch({})).size,1);
+      assert.equal((await currentRoster()).roster_message_id,null);
+
+      for(const [userId, day] of [["10","roster-day-1"],["10","roster-day-2"],["20","roster-day-1"]]) {
+        await pool.query(
+          "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+          "VALUES($1,$2,$3,$4,1,1)",
+          [s.sourceEventKey,simulatedGuild,userId,day],
+        );
+      }
+      await s.transition(simulatedGuild,"admin","open");
+      await s.allocate(simulatedGuild,
+        {id:"10",username:"player_1",display_name:"Player 1"},
+        GRAVES[2].id,2,"roster-test-ticket-1");
+      await runner.reconcile(await currentRoster());
+
+      const afterFirst = await currentRoster();
+      assert.ok(afterFirst.roster_message_id,"Roster message ID must be durable");
+      const rosterId = afterFirst.roster_message_id;
+      const firstMessages = await panel.messages.fetch({});
+      assert.equal(firstMessages.size,2,"Selection then live roster — exactly two public messages");
+      const ordered = [...firstMessages.values()];
+      assert.equal(ordered[0].embeds[0].footer.text,"four-graves:"+afterFirst.id+":public");
+      assert.equal(ordered[1].embeds[0].footer.text,"four-graves:"+afterFirst.id+":roster");
+      assert.match(ordered[1].embeds[0].description,/Cletus' Grave/);
+      assert.match(ordered[1].embeds[0].description,/Player 1\(1\)/);
+      assert.doesNotMatch(ordered[1].embeds[0].description,/DollzOnApe|RugDollz/);
+
+      await s.allocate(simulatedGuild,
+        {id:"20",username:"player_2",display_name:"Player 2"},
+        GRAVES[0].id,1,"roster-test-ticket-2");
+      await runner.reconcile(await currentRoster());
+      assert.equal((await currentRoster()).roster_message_id,rosterId);
+      assert.equal((await panel.messages.fetch({})).size,2);
+      const board = await panel.messages.fetch(rosterId);
+      assert.match(board.embeds[0].description,/Barry's Grave/);
+      assert.match(board.embeds[0].description,/Player 2/);
+
+      const beforeClosing = board.embeds[0].description;
+      await s.transition(simulatedGuild,"admin","close");
+      await runner.reconcile(await currentRoster());
+      assert.equal((await panel.messages.fetch({})).size,2);
+      assert.equal((await panel.messages.fetch(rosterId)).embeds[0].description,beforeClosing);
+
+      // New external claims never rewrite an already frozen grave team list.
+      await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,'20','roster-day-2',1,1)",
+        [s.sourceEventKey,simulatedGuild],
+      );
+      await runner.reconcile(await currentRoster());
+      assert.equal((await panel.messages.fetch(rosterId)).embeds[0].description,beforeClosing);
+      assert.equal((await panel.messages.fetch({})).size,2);
+      assert.ok((await s.read(simulatedGuild)).operations.some(o =>
+        o.operation_key==="public-roster" && !o.last_error));
+    });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,
     );
