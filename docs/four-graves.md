@@ -27,24 +27,32 @@ The spelling **Wrinkles** matches the original character and grave ID. Button pl
 
 New events use the image by default. A one-time, audited startup update also refreshes stored LIVE and TEST panels, including already-closed panels, without changing frozen tickets, prizes, decisions or results. Future explicit administrator image overrides remain respected. The recovery worker edits existing bot panels to display this image and button order; it does not post duplicate selection panels.
 
-## The living grave roster — the names in the dirt
+## The living grave rosters — four stones, four lists
 
-The public selection panel (including its illustrated artwork and four grave buttons) now tells a short eerie Squigs story about burying tickets and the unknown fate waiting beneath each stone. No grave-specific prizes or outcomes appear in the selection copy.
-
-**After the first confirmed burial**, UglyBot posts **one** updating embed directly after the selection message in the same Discord channel, called **THE DEAD ARE KEEPING SCORE**. It lists four teams in the same order as the selection buttons:
+The public selection panel still displays the Halloween artwork, four grave buttons and spoiler-free Squigs story. **After the very first confirmed burial**, the bot posts **four independent roster panels** beneath the selection message, top to bottom:
 
 1. Cletus' Grave
 2. Barry's Grave
 3. Barbara's Grave
 4. Steve's Grave
 
-Every line represents **one ticket**, using the existing deterministic contestant label generator. For example, someone who buried five tickets may appear as Player 1, Player 1(1), Player 1(2), Player 1(3) and Player 1(4). Duplicate display names from different Discord users remain distinguishable using the existing safe-name collision rules.
+Each panel displays **one line per participant**, followed by **their current count of tickets buried in that grave**, for example:
 
-The roster embed always shows grave ticket/member counts and as many entries as will fit neatly. A **View** button per grave opens all of that grave's entries in ephemeral pages of 20 tickets, so even a large event remains navigable and the public panel never exceeds Discord's embed limits.
+- Player 1 — 12 tickets
+- Player 2 — 3 tickets
+- Player 3 — 1 ticket
 
-The background worker **edits the existing roster message** when more tickets are buried; after a holder confirms burial, the bot also requests an immediate worker refresh instead of relying solely on the 15-second poll. A restart discovers the existing message through its stored ID or unique footer marker, preventing duplicates. Once the graves close, the roster uses the frozen snapshot and remains stable even if additional October Treat/Trick claims are earned elsewhere.
+These counts are dynamic; the displayed numbers are examples, not fixed prizes, initial balances or hardcoded values. The bot groups entries by Discord user ID using the existing deterministic contestant labels, so participants with the same display name are still distinguished. Participants can have tickets in more than one grave.
 
-This is presentation only. No changes are made to ticket balances, permanent allocations, prize pools, private channels, Discord roles, countdowns or draw logic. Public roster text and full-list pages suppress all mentions. The roster is also available in the default-disabled private TEST mode without exposing real tickets.
+**Crucially, this changes only the presentation.** Every actual buried ticket remains its own individual entry in the underlying immutable allocation/snapshot pool and is counted separately during random winner selection. A participant with twelve buried tickets has twelve ticket-level chances whenever they are eligible for a draw pass; the pre-existing winner rotation rules are unchanged.
+
+The top of each roster keeps an eerie explanation of what is happening without listing prizes or spoiling the final TRICK/TREAT choice. Each panel shows its **total buried tickets and total distinct Squigs**. A grave with no burials shows a deliberately eerie empty-state placeholder.
+
+All 58 participants can fit on a single grave panel at ordinary username lengths, even if the full 455 tickets were buried in that grave. For extreme username lengths or much larger groups, each panel shows as many names as fit under Discord's embed limit and offers **View full roster**; its ephemeral, 20-participant pages show the complete lists without spam.
+
+Each grave's roster has its own persisted message ID and unique recovery marker. The worker creates them in visual order after the selection panel, then edits each one in place as confirmed burials arrive. An immediate refresh is requested after a burial, with routine polling as a fallback. Once the graves close, these four rosters are frozen from the event's original ticket snapshot even if fresh October claims happen later.
+
+The rosters share nothing across live and test events, suppress Discord mentions, and are independent of the existing private grave roles/channels, countdowns, prize pools, automatic draws and stored winners. This feature does not create, destroy, combine or reassign any tickets.
 
 ## Finalized prize pools
 
