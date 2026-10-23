@@ -383,6 +383,10 @@ class FourGravesDiscord {
         embed?.title === payload.embeds[0].title &&
         embed?.description === payload.embeds[0].description &&
         embed?.image?.url === payload.embeds[0].image?.url &&
+        JSON.stringify((embed?.fields || []).map(f =>
+          ({ name: f.name, value: f.value, inline: !!f.inline }))) ===
+        JSON.stringify((payload.embeds[0].fields || []).map(f =>
+          ({ name: f.name, value: f.value, inline: !!f.inline }))) &&
         JSON.stringify(message.components.map((x) => x.toJSON())) ===
           JSON.stringify(payload.components);
       if (!same) await message.edit({ ...payload, allowedMentions: mentions });
