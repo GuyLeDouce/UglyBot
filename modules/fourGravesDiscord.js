@@ -581,27 +581,44 @@ class FourGravesDiscord {
             ),
         );
         await this.store.operation(e.id, "public-panel");
-        // Publish one persistent roster immediately BELOW the public selection
-        // message once the first ticket has actually been buried. It edits in
-        // place as further tickets are buried, and freezes when the graves close.
+        // After the first confirmed burial, create FOUR independent roster
+        // panels below the selection message, in its exact visual order.
+        // Each panel groups entries per Discord participant and counts their
+        // tickets, while the immutable snapshot still retains every ticket.
+        // Edit only the changed message on future ticks (never repost it).
         try {
           const data = await this.store.read(e.guild_id);
-          const roster = rosterPanel(data.event, data.snapshot);
-          if (roster) {
-            await this.message(
-              e, channel, e.roster_message_id, "public-roster", roster,
-              m => this.store.pool.query(
-                "UPDATE four_graves_events SET roster_message_id=$2 WHERE id=$1",
-                [e.id, m.id],
-              ),
-            );
+          if (data.snapshot.entries.length) {
+            for (const index of PANEL_INDICES) {
+              const graveId = GRAVES[index].id;
+              const row = data.graves.find(g => g.grave_id === graveId);
+              const key = "public-roster:" + graveId;
+              if (!row) {
+                await this.store.operation(e.id, key, "Missing grave row");
+                continue;
+              }
+              try {
+                const payload = rosterPanel(data.event, data.snapshot, graveId);
+                await this.message(
+                  e, channel, row.roster_message_id, key, payload,
+                  m => this.store.pool.query(
+                    "UPDATE four_graves_graves SET roster_message_id=$3 " +
+                    "WHERE event_id=$1 AND grave_id=$2",
+                    [e.id, graveId, m.id],
+                  ),
+                );
+                await this.store.operation(e.id, key);
+              } catch (err) {
+                await this.store.operation(e.id, key, diagnosticError(err));
+                this.logFailure(key, e.id, err);
+              }
+            }
           }
-          await this.store.operation(e.id, "public-roster");
         } catch (err) {
-          // Failure to update a public roster must never prevent ticket
-          // allocations, private grave decisions, or winner announcements.
-          await this.store.operation(e.id, "public-roster", diagnosticError(err));
-          this.logFailure("public-roster", e.id, err);
+          // Public roster rendering must never block team channel decisions,
+          // stored winning tickets, or the scheduled prize announcements.
+          await this.store.operation(e.id, "public-rosters", diagnosticError(err));
+          this.logFailure("public-rosters", e.id, err);
         }
       } catch (err) {
         // A deleted or inaccessible public panel must not block already-open
