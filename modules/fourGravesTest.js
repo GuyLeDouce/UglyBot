@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, ChannelType, PermissionFlagsBits: P } = require("discord.js");
 const { FourGravesStore } = require("./fourGravesStore");
 const { FourGravesDiscord, button, row, cid } = require("./fourGravesDiscord");
+const { rosterPage } = require("./fourGravesRoster");
 const { GRAVES, exportFiles, privateArchives } = require("./fourGravesCore");
 
 // Separate key, separate source table and separate Discord resources.
@@ -402,6 +403,12 @@ async function handleTestComponent(i, e, parts) {
   }
   await i.deferReply({ flags: 64 });
   if (action === "cancel") return reply(i, "Cancelled. No fake tickets buried.");
+  if (action === "roster") {
+    if (i.channelId !== e.panel_channel_id)
+      throw Error("Open this private test roster from its control channel.");
+    const data = await store.read(i.guildId);
+    return reply(i, rosterPage(e, data.snapshot, Number(args[0]), Number(args[1])));
+  }
   if (["grave", "amount", "bury"].includes(action) &&
       i.channelId !== e.panel_channel_id)
     throw Error("Use the private TEST control panel.");
@@ -449,8 +456,11 @@ async function handleTestComponent(i, e, parts) {
         display_name: i.member?.displayName || i.user.globalName || i.user.username },
       g.id, Number(args[1]), args[3],
     );
-    return reply(i, "🧪 BURIED " + receipt.quantity + " TEST tickets in " + g.name +
+    const response = await reply(i, "🧪 BURIED " + receipt.quantity + " TEST tickets in " + g.name +
       ". Allocation #" + receipt.id + ". No live tickets were used.");
+    void worker.tick().catch(err =>
+      console.warn("[FourGraves:TEST] Roster update deferred:", String(err.message).slice(0,250)));
+    return response;
   }
   if (action === "decide") {
     const [ , generation, choice] = args;
