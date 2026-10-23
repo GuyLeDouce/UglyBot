@@ -3,6 +3,7 @@ const { SlashCommandBuilder, ChannelType } = require("discord.js");
 const { FourGravesStore } = require("./fourGravesStore");
 const { FourGravesDiscord, button, row, cid, getGuildMemberRoster } = require("./fourGravesDiscord");
 const { prizeWinnerCsv } = require("./fourGravesDraw");
+const { rosterPage } = require("./fourGravesRoster");
 const {
   GRAVES,
   quantity,
@@ -465,6 +466,12 @@ async function handle(i) {
       e = data.event;
     if (String(e.id) !== eventId)
       throw Error("This panel belongs to another event.");
+    if (action === "roster") {
+      if (i.channelId !== e.panel_channel_id)
+        throw Error("Open this roster from the Four Graves selection channel.");
+      await reply(i, rosterPage(e, data.snapshot, Number(args[0]), Number(args[1])));
+      return true;
+    }
     const [gi] = args,
       g = GRAVES[Number(gi)],
       user = {
@@ -532,6 +539,10 @@ async function handle(i) {
         i,
         `YOUR TICKETS HAVE BEEN BURIED.\nAllocation #${receipt.id}: ${receipt.quantity} tickets with ${e.config.names[Number(gi)]}.\nRemaining tickets: ${u.total - u.allocated}.`,
       );
+      // The updated team board is managed by the worker; the private ticket
+      // receipt returns immediately while the roster refreshes independently.
+      void worker.tick().catch(err =>
+        console.warn("[FourGraves] Roster update deferred:", String(err.message).slice(0,250)));
     } else if (action === "decide") {
       const [, generation, choice] = args;
       const state = data.graves.find((x) => x.grave_id === g.id);
