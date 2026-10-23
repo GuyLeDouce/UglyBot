@@ -5,7 +5,8 @@ const {
   ChannelType,
   Collection,
 } = require("discord.js");
-const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL } = require("./fourGravesCore");
+const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL, PANEL_INDICES } = require("./fourGravesCore");
+const { rosterPanel } = require("./fourGravesRoster");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
@@ -17,19 +18,6 @@ const button = (custom_id, label, disabled = false, style = 2) => ({
 const row = (...components) => ({ type: 1, components });
 const cid = (e, action, ...args) => ["fg1", e.id, action, ...args].join(":");
 const mentions = { parse: [] };
-// Presentation order only: keep GRAVES indices stable for tickets, roles and exports.
-const PANEL_ORDER = Object.freeze([
-  "cletus_von_wrinkles",
-  "barry_buckets",
-  "barbara_bowkins",
-  "scuba_steve_3000",
-]);
-const PANEL_INDICES = Object.freeze(PANEL_ORDER.map(id => {
-  const index = GRAVES.findIndex(grave => grave.id === id);
-  if (index < 0) throw Error("Four Graves panel references an unknown grave: " + id);
-  return index;
-}));
-
 // Surface the real failure without logging credentials or flooding Railway every 15s.
 function diagnosticError(err) {
   const code = err?.code ?? err?.rawError?.code ?? err?.status ?? "";
@@ -125,7 +113,14 @@ function publicPanel(e) {
             "Use the test controls to practice burying fake tickets. These four graves " +
             "are separate from the real October Trick or Treat event. " +
             "Test allocations can be removed with /fourgravestest reset.\n\nSTAY UGLY."
-          : "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
+          : "**THE DEAD DON'T PICK THEIR COMPANY. YOU DO.**\n\n" +
+            "Every 🍬 TREAT and 👻 TRICK you've earned is another ticket. " +
+            "Choose a grave. Bury a few, bury them all, or scatter them among the four.\n\n" +
+            "**Every ticket leaves a name in the dirt.** Once buried, it stays buried. " +
+            "The graveyard keeps the list, but it isn't telling you what's waiting underneath.\n\n" +
+            "When the graves close, you'll meet the others buried alongside you. " +
+            "One of you will eventually choose TRICK or TREAT for the entire team.\n\n" +
+            "**Four graves. One choice per team. Whatever wakes up next... well, you chose where to stand.**\n\nSTAY UGLY.",
         // Refresh older persisted panels even when their config.image was null.
         // An explicitly configured custom image still takes precedence.
         image: { url: e.config.image || PANEL_IMAGE_URL },
@@ -582,6 +577,28 @@ class FourGravesDiscord {
             ),
         );
         await this.store.operation(e.id, "public-panel");
+        // Publish one persistent roster immediately BELOW the public selection
+        // message once the first ticket has actually been buried. It edits in
+        // place as further tickets are buried, and freezes when the graves close.
+        try {
+          const data = await this.store.read(e.guild_id);
+          const roster = rosterPanel(data.event, data.snapshot);
+          if (roster) {
+            await this.message(
+              e, channel, e.roster_message_id, "public-roster", roster,
+              m => this.store.pool.query(
+                "UPDATE four_graves_events SET roster_message_id=$2 WHERE id=$1",
+                [e.id, m.id],
+              ),
+            );
+          }
+          await this.store.operation(e.id, "public-roster");
+        } catch (err) {
+          // Failure to update a public roster must never prevent ticket
+          // allocations, private grave decisions, or winner announcements.
+          await this.store.operation(e.id, "public-roster", diagnosticError(err));
+          this.logFailure("public-roster", e.id, err);
+        }
       } catch (err) {
         // A deleted or inaccessible public panel must not block already-open
         // private grave channels, countdowns or persisted winner announcements.
