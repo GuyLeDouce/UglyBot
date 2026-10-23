@@ -7,6 +7,8 @@ const { pickNextTicket } = require("./fourGravesDraw");
 const {
   GRAVES,
   DEFAULT_CONFIG,
+  PANEL_IMAGE_URL,
+  PANEL_IMAGE_VERSION,
   quantity,
   buildSnapshot,
   hash,
@@ -54,6 +56,35 @@ class FourGravesStore {
           old: [{ name: "Doruzu (ApeChain)", quantity: 2 }],
           new: DEFAULT_CONFIG.mysteryByGrave.cletus_von_wrinkles,
           reason: "Approved Cletus bonus-prize replacement",
+        }),
+      ],
+    );
+    // Rebrand existing panel artwork exactly once, even when an event is
+    // already CLOSED. Only visual JSON fields change; ticket snapshots,
+    // winner records and prize lists remain untouched.
+    // Later explicit /fourgraves configure image overrides survive restarts.
+    await this.pool.query(
+      `WITH changed AS (
+         UPDATE four_graves_events
+         SET config=jsonb_set(
+           jsonb_set(config, '{image}', to_jsonb($3::text), true),
+           '{panelArtworkVersion}', to_jsonb($4::text), true
+         )
+         WHERE event_key=$1 AND source_event_key=$2
+           AND (config->>'panelArtworkVersion') IS DISTINCT FROM $4
+         RETURNING id
+       )
+       INSERT INTO four_graves_audit(event_id,actor_id,action,detail)
+       SELECT id,'SYSTEM','grave-panel-artwork-update',$5::jsonb FROM changed`,
+      [
+        this.eventKey,
+        this.sourceEventKey,
+        PANEL_IMAGE_URL,
+        PANEL_IMAGE_VERSION,
+        JSON.stringify({
+          artwork: PANEL_IMAGE_URL,
+          version: PANEL_IMAGE_VERSION,
+          reason: "Approved Four Graves panel artwork refresh",
         }),
       ],
     );

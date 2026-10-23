@@ -14,6 +14,46 @@ The existing daily Treat and verified Trick mechanisms continue unchanged. One e
 
 **There are no separate Squigwreck, Wheel, Duck Race, or Ugly City games.** Old fixed-game database metadata remains only to preserve compatibility with existing schema and tests.
 
+## Grave selection panel artwork and button order
+
+The main Four Graves selection panel displays **https://i.imgur.com/CQPVlFX.png** above four buttons, left to right:
+
+1. Cletus Von Wrinkles
+2. Barry Buckets
+3. Barbara Bowkins
+4. Scuba Steve 3000
+
+The spelling **Wrinkles** matches the original character and grave ID. Button placement is visual only; stable grave IDs, existing ticket allocations, private team channels, contest exports and winners are unchanged.
+
+New events use the image by default. A one-time, audited startup update also refreshes stored LIVE and TEST panels, including already-closed panels, without changing frozen tickets, prizes, decisions or results. Future explicit administrator image overrides remain respected. The recovery worker edits existing bot panels to display this image and button order; it does not post duplicate selection panels.
+
+## The living grave rosters — four stones, four lists
+
+The public selection panel still displays the Halloween artwork, four grave buttons and spoiler-free Squigs story. **After the very first confirmed burial**, the bot posts **four independent roster panels** beneath the selection message, top to bottom:
+
+1. Cletus' Grave
+2. Barry's Grave
+3. Barbara's Grave
+4. Steve's Grave
+
+Each panel displays **one line per participant**, followed by **their current count of tickets buried in that grave**, for example:
+
+- Player 1 — 12 tickets
+- Player 2 — 3 tickets
+- Player 3 — 1 ticket
+
+These counts are dynamic; the displayed numbers are examples, not fixed prizes, initial balances or hardcoded values. The bot groups entries by Discord user ID using the existing deterministic contestant labels, so participants with the same display name are still distinguished. Participants can have tickets in more than one grave.
+
+**Crucially, this changes only the presentation.** Every actual buried ticket remains its own individual entry in the underlying immutable allocation/snapshot pool and is counted separately during random winner selection. A participant with twelve buried tickets has twelve ticket-level chances whenever they are eligible for a draw pass; the pre-existing winner rotation rules are unchanged.
+
+The top of each roster keeps an eerie explanation of what is happening without listing prizes or spoiling the final TRICK/TREAT choice. Each panel shows its **total buried tickets and total distinct Squigs**. A grave with no burials shows a deliberately eerie empty-state placeholder.
+
+All 58 participants can fit on a single grave panel at ordinary username lengths, even if the full 455 tickets were buried in that grave. For extreme username lengths or much larger groups, each panel shows as many names as fit under Discord's embed limit and offers **View full roster**; its ephemeral, 20-participant pages show the complete lists without spam.
+
+Each grave's roster has its own persisted message ID and unique recovery marker. The worker creates them in visual order after the selection panel, then edits each one in place as confirmed burials arrive. An immediate refresh is requested after a burial, with routine polling as a fallback. Once the graves close, these four rosters are frozen from the event's original ticket snapshot even if fresh October claims happen later.
+
+The rosters share nothing across live and test events, suppress Discord mentions, and are independent of the existing private grave roles/channels, countdowns, prize pools, automatic draws and stored winners. This feature does not create, destroy, combine or reassign any tickets.
+
 ## Finalized prize pools
 
 Every grave has 1 DollzOnApe, 3 Squigs Reloaded, 1 Ugly Monster and 5 separate prizes of 5,000 $CHARM. In addition:

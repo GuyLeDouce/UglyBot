@@ -69,3 +69,11 @@ If you need an emergency off-switch, set FOUR_GRAVES_TEST_ENABLED=false and rede
 ## Updated finale mechanics
 
 The separate production test worker now rehearses the real grave-specific prize pools (13, 11, 13 and 13 prizes respectively), one choice per team, a two-minute initial draw delay and fifteen seconds between sequential winners. Test mode never sends @everyone, transfers prizes or reads actual October claims. Do not run production /fourgraves commands for rehearsal.
+
+## Four grave roster rehearsal
+
+The private TEST event uses the same spooky, spoiler-free selection panel text as the live finale. After the first synthetic ticket burial, UglyBot posts **four independent TEST grave rosters** below the private selection panel, in Cletus / Barry / Barbara / Steve order.
+
+Each panel displays **one row per fictional participant and their pooled ticket count**, such as `Test Participant 01 — 5 tickets`. All five actual fake ticket entries remain available individually for simulated prize draws. New TEST burials update the relevant panel in place and never create duplicate boards; the other panels stay in place. Private View buttons list 20 participants per page if needed.
+
+The full TEST rosters and their stored message IDs are separate from live event data. TEST mode does not tag anyone, access real October claims or expose unrevealed prize pools.

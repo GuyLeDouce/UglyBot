@@ -423,6 +423,65 @@ async function main() {
         else process.env.FOUR_GRAVES_ENABLED = old;
       }
     });
+    await test("legacy live and test grave panels get one-time artwork updates", async () => {
+      const { PANEL_IMAGE_URL, PANEL_IMAGE_VERSION } = require("../modules/fourGravesCore");
+      const artStore = new FourGravesStore(pool, {
+        eventKey: "squigs-four-graves-panel-artwork-fixture",
+        sourceEventKey: s.sourceEventKey,
+      });
+      const oldIds = [];
+      for (const guildId of ["art-open", "art-closed"]) {
+        const e = await artStore.setup(guildId, "admin");
+        oldIds.push(String(e.id));
+        if (guildId === "art-closed") {
+          await artStore.transition(guildId, "admin", "open");
+          await artStore.transition(guildId, "admin", "close");
+        } else await artStore.transition(guildId, "admin", "open");
+        // Emulate an old production record, potentially with custom old art.
+        await pool.query(
+          "UPDATE four_graves_events SET config=jsonb_set(config - 'panelArtworkVersion', '{image}', to_jsonb($2::text), true) WHERE id=$1",
+          [e.id, "https://example.com/old-grave-art.png"],
+        );
+      }
+      const other = await artStore.setup("art-custom", "admin");
+      await artStore.configure("art-custom", "admin", {
+        image: "https://example.com/admin-overridden.png",
+      });
+      const before = (await artStore.read("art-closed")).event;
+      await artStore.migrate();
+      for (const guildId of ["art-open", "art-closed"]) {
+        const changed = (await artStore.read(guildId)).event;
+        assert.equal(changed.config.image, PANEL_IMAGE_URL);
+        assert.equal(changed.config.panelArtworkVersion, PANEL_IMAGE_VERSION);
+        assert.equal(changed.config.mysteryByGrave.cletus_von_wrinkles[0].name, "RugDollz 3D");
+        if (guildId === "art-closed") {
+          assert.equal(changed.state, "CLOSED_COUNTDOWN");
+          assert.equal(changed.snapshot_hash, before.snapshot_hash);
+          assert.equal(changed.snapshot_id, before.snapshot_id);
+        }
+      }
+      assert.equal((await artStore.read("art-custom")).event.config.image,
+        "https://example.com/admin-overridden.png");
+      const auditCount = async () => (
+        await pool.query(
+          "SELECT event_id,action FROM four_graves_audit WHERE action='grave-panel-artwork-update'"
+        )
+      ).rows;
+      const audited = await auditCount();
+      assert.deepEqual(audited.map(a => String(a.event_id)).sort(),oldIds.sort());
+      await artStore.migrate();
+      assert.equal((await auditCount()).length,2);
+      // Explicit admin image overrides after the one-time migration survive
+      // future restarts; the migration never becomes a recurring overwrite.
+      await artStore.configure("art-open", "admin", {
+        image: "https://example.com/new-custom-art.png",
+      });
+      await artStore.migrate();
+      assert.equal((await artStore.read("art-open")).event.config.image,
+        "https://example.com/new-custom-art.png");
+      assert.equal((await auditCount()).length,2);
+      assert.notEqual(String(other.id),"");
+    });
     await test("Cletus RugDollz upgrade updates only unclosed matching pools", async () => {
       const legacy = new FourGravesStore(pool, {
         eventKey: "squigs-four-graves-prize-change-fixture",
@@ -468,6 +527,107 @@ async function main() {
         (await legacy.read("prize-open")).event.config.mysteryByGrave.cletus_von_wrinkles,
         newPrize,
       );
+    });
+    await test("four player-count rosters follow first burial, update, and freeze without duplicates", async () => {
+      const { fixture } = require("./fourGravesDiscordFixture");
+      const { FourGravesDiscord } = require("../modules/fourGravesDiscord");
+      const { PANEL_INDICES } = require("../modules/fourGravesCore");
+      const simulatedGuild = "roster-test-guild";
+      const env = fixture(simulatedGuild);
+      const panel = await env.guild.channels.create({name:"select-your-grave"});
+      await s.setup(simulatedGuild,"admin");
+      await pool.query(
+        "UPDATE four_graves_events SET panel_channel_id=$2 WHERE event_key=$1 AND guild_id=$3",
+        [s.eventKey,panel.id,simulatedGuild],
+      );
+      const runner = new FourGravesDiscord(s,env.deps);
+      const currentRoster = async () => (await s.read(simulatedGuild)).event;
+      const rosterId = async graveId =>
+        (await s.read(simulatedGuild)).graves.find(x=>x.grave_id===graveId).roster_message_id;
+
+      await runner.reconcile(await currentRoster());
+      assert.equal((await panel.messages.fetch({})).size,1);
+      assert.ok((await s.read(simulatedGuild)).graves.every(g=>!g.roster_message_id));
+
+      for (const [userId, day] of [
+        ["10","roster-day-1"],["10","roster-day-2"],["20","roster-day-1"]
+      ]) await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,$3,$4,1,1)",
+        [s.sourceEventKey,simulatedGuild,userId,day],
+      );
+      await s.transition(simulatedGuild,"admin","open");
+      await s.allocate(simulatedGuild,
+        {id:"10",username:"player_1",display_name:"Player 1"},
+        GRAVES[2].id,2,"roster-test-ticket-1");
+      await runner.reconcile(await currentRoster());
+      const ev = await currentRoster();
+      const graveIds = PANEL_INDICES.map(index=>GRAVES[index].id);
+      const rows = (await s.read(simulatedGuild)).graves;
+      assert.ok(rows.every(g=>g.roster_message_id));
+      const rosterIds = Object.fromEntries(rows.map(g=>[g.grave_id,g.roster_message_id]));
+      const messages = [...(await panel.messages.fetch({})).values()];
+      assert.equal(messages.length,5,"Selection + four distinct grave roster messages");
+      assert.deepEqual(messages.map(m=>m.embeds[0].footer?.text),[
+        "four-graves:"+ev.id+":public",
+        ...graveIds.map(id=>"four-graves:"+ev.id+":roster:"+id),
+      ]);
+      const cletus = await panel.messages.fetch(rosterIds.cletus_von_wrinkles);
+      assert.match(cletus.embeds[0].description,/Player 1 — 2 tickets/);
+      assert.doesNotMatch(cletus.embeds[0].description,/Player 1\(1\)/);
+      assert.match(cletus.embeds[0].fields[0].value,/2 tickets · 1 Squig/);
+      assert.doesNotMatch(cletus.embeds[0].description,/RugDollz|DollzOnApe/);
+      const barryEmpty = await panel.messages.fetch(rosterIds.barry_buckets);
+      assert.match(barryEmpty.embeds[0].description,/Nobody has buried/);
+
+      await s.allocate(simulatedGuild,
+        {id:"20",username:"player_2",display_name:"Player 2"},
+        GRAVES[0].id,1,"roster-test-ticket-2");
+      await runner.reconcile(await currentRoster());
+      assert.equal((await panel.messages.fetch({})).size,5);
+      assert.deepEqual(
+        Object.fromEntries((await s.read(simulatedGuild)).graves.map(g=>[g.grave_id,g.roster_message_id])),
+        rosterIds,
+      );
+      const barry = await panel.messages.fetch(rosterIds.barry_buckets);
+      assert.match(barry.embeds[0].description,/Player 2 — 1 ticket/);
+      assert.match(barry.embeds[0].fields[0].value,/1 ticket · 1 Squig/);
+
+      // A third ticket by the same player updates their ONE roster line,
+      // never a second numbered line, while the draw still has 3 entries.
+      await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,'10','roster-day-3',1,1)",
+        [s.sourceEventKey,simulatedGuild],
+      );
+      await s.allocate(simulatedGuild,
+        {id:"10",username:"player_1",display_name:"Player 1"},
+        GRAVES[2].id,1,"roster-test-ticket-3");
+      await runner.reconcile(await currentRoster());
+      const updated = await panel.messages.fetch(rosterIds.cletus_von_wrinkles);
+      assert.match(updated.embeds[0].description,/Player 1 — 3 tickets/);
+      assert.doesNotMatch(updated.embeds[0].description,/Player 1\(/);
+      assert.equal((await s.read(simulatedGuild)).snapshot.entries.filter(
+        ticket=>ticket.grave_id===GRAVES[2].id).length,3);
+      assert.equal((await panel.messages.fetch({})).size,5);
+      const frozenDescriptions = Object.fromEntries(await Promise.all(
+        graveIds.map(async id=>[id,(await panel.messages.fetch(rosterIds[id])).embeds[0].description])
+      ));
+      await s.transition(simulatedGuild,"admin","close");
+      await runner.reconcile(await currentRoster());
+      await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+        "VALUES($1,$2,'20','roster-day-2',1,1)",
+        [s.sourceEventKey,simulatedGuild],
+      );
+      await runner.reconcile(await currentRoster());
+      for (const id of graveIds)
+        assert.equal((await panel.messages.fetch(rosterIds[id])).embeds[0].description,
+          frozenDescriptions[id]);
+      assert.equal((await panel.messages.fetch({})).size,5);
+      const ops = (await s.read(simulatedGuild)).operations;
+      assert.ok(graveIds.every(id=>ops.some(o=>
+        o.operation_key==="public-roster:"+id && !o.last_error)));
     });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,

@@ -5,7 +5,8 @@ const {
   ChannelType,
   Collection,
 } = require("discord.js");
-const { GRAVES, prizePoolForGrave } = require("./fourGravesCore");
+const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL, PANEL_INDICES } = require("./fourGravesCore");
+const { rosterPanel } = require("./fourGravesRoster");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
@@ -17,7 +18,6 @@ const button = (custom_id, label, disabled = false, style = 2) => ({
 const row = (...components) => ({ type: 1, components });
 const cid = (e, action, ...args) => ["fg1", e.id, action, ...args].join(":");
 const mentions = { parse: [] };
-
 // Surface the real failure without logging credentials or flooding Railway every 15s.
 function diagnosticError(err) {
   const code = err?.code ?? err?.rawError?.code ?? err?.status ?? "";
@@ -113,14 +113,23 @@ function publicPanel(e) {
             "Use the test controls to practice burying fake tickets. These four graves " +
             "are separate from the real October Trick or Treat event. " +
             "Test allocations can be removed with /fourgravestest reset.\n\nSTAY UGLY."
-          : "The dead are waiting.\n\nEvery TREAT and TRICK you've earned is worth one ticket. Choose where to bury them. You may divide them between any of the four graves.\n\n**Once buried, tickets can never be moved or recovered. They remain valid contest entries.**\n\nAdministrators decide when graves open and close. Your choices determine your teams. The games and prizes remain a mystery.\n\nSTAY UGLY.",
-        ...(e.config.image ? { image: { url: e.config.image } } : {}),
+          : "**THE DEAD DON'T PICK THEIR COMPANY. YOU DO.**\n\n" +
+            "Every 🍬 TREAT and 👻 TRICK you've earned is another ticket. " +
+            "Choose a grave. Bury a few, bury them all, or scatter them among the four.\n\n" +
+            "**Every ticket leaves a name in the dirt.** Once buried, it stays buried. " +
+            "The graveyard keeps the list, but it isn't telling you what's waiting underneath.\n\n" +
+            "When the graves close, you'll meet the others buried alongside you. " +
+            "One of you will eventually choose TRICK or TREAT for the entire team.\n\n" +
+            "**Four graves. One choice per team. Whatever wakes up next... well, you chose where to stand.**\n\nSTAY UGLY.",
+        // Refresh older persisted panels even when their config.image was null.
+        // An explicitly configured custom image still takes precedence.
+        image: { url: e.config.image || PANEL_IMAGE_URL },
         footer: { text: `four-graves:${e.id}:public` },
       },
     ],
     components: [
       row(
-        ...GRAVES.map((g, i) =>
+        ...PANEL_INDICES.map(i =>
           button(cid(e, "grave", i), e.config.names[i], e.state !== "OPEN"),
         ),
       ),
@@ -134,10 +143,14 @@ function decisionPanel(e, g) {
   const eligible = e.snapshot?.entries.some((x) => x.grave_id === g.grave_id);
   const active = e.state === "BUTTONS_ACTIVE" && !decision && eligible;
   let description = eligible
-    ? `Your tickets are buried. Your team has been chosen.\n\nTRICK or TREAT. One person decides for everyone here. Discuss it. Argue about it. Or be the asshole who presses first.\n\nButtons eligible <t:${Math.floor(new Date(e.deadline).getTime() / 1000)}:R>.`
-    : "This grave has no eligible contestants. The administrator will handle its unused prize pool manually.";
+    ? "**THE DIRT HAS SETTLED.**\n\n" +
+      "Every Squig in here buried tickets under the same stone. You're a team now, whether you like it or not.\n\n" +
+      "Once the buttons wake up, the **first** hand on 👻 TRICK or 🍬 TREAT chooses for the ENTIRE grave. No vote. No do-overs.\n\n" +
+      "The rest of you get to wonder what they just signed you up for.\n\n" +
+      "Buttons eligible <t:" + Math.floor(new Date(e.deadline).getTime() / 1000) + ":R>."
+    : "Nobody buried a ticket here. Even the ghosts look disappointed. No team, no decision, no draw.";
   if (decision)
-    description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}**.\n\nThere is no turning back...`;
+    description = `${e.config.testMode ? "TEST OPERATOR" : `<@${decision.user_id}>`} HAS SEALED YOUR FATE.\nThey chose **${decision.choice}** for the entire grave.\n\nNo changing minds now. Something is stirring under the stone...`;
   if (g.reveal_stage >= 2) description += "\n\nTHE GRAVE IS OPENING...";
   if (g.reveal_stage >= 3)
     description += "\n\n**" + e.config.names[i].toUpperCase() +
@@ -370,6 +383,10 @@ class FourGravesDiscord {
         embed?.title === payload.embeds[0].title &&
         embed?.description === payload.embeds[0].description &&
         embed?.image?.url === payload.embeds[0].image?.url &&
+        JSON.stringify((embed?.fields || []).map(f =>
+          ({ name: f.name, value: f.value, inline: !!f.inline }))) ===
+        JSON.stringify((payload.embeds[0].fields || []).map(f =>
+          ({ name: f.name, value: f.value, inline: !!f.inline }))) &&
         JSON.stringify(message.components.map((x) => x.toJSON())) ===
           JSON.stringify(payload.components);
       if (!same) await message.edit({ ...payload, allowedMentions: mentions });
@@ -568,6 +585,45 @@ class FourGravesDiscord {
             ),
         );
         await this.store.operation(e.id, "public-panel");
+        // After the first confirmed burial, create FOUR independent roster
+        // panels below the selection message, in its exact visual order.
+        // Each panel groups entries per Discord participant and counts their
+        // tickets, while the immutable snapshot still retains every ticket.
+        // Edit only the changed message on future ticks (never repost it).
+        try {
+          const data = await this.store.read(e.guild_id);
+          if (data.snapshot.entries.length) {
+            for (const index of PANEL_INDICES) {
+              const graveId = GRAVES[index].id;
+              const row = data.graves.find(g => g.grave_id === graveId);
+              const key = "public-roster:" + graveId;
+              if (!row) {
+                await this.store.operation(e.id, key, "Missing grave row");
+                continue;
+              }
+              try {
+                const payload = rosterPanel(data.event, data.snapshot, graveId);
+                await this.message(
+                  e, channel, row.roster_message_id, key, payload,
+                  m => this.store.pool.query(
+                    "UPDATE four_graves_graves SET roster_message_id=$3 " +
+                    "WHERE event_id=$1 AND grave_id=$2",
+                    [e.id, graveId, m.id],
+                  ),
+                );
+                await this.store.operation(e.id, key);
+              } catch (err) {
+                await this.store.operation(e.id, key, diagnosticError(err));
+                this.logFailure(key, e.id, err);
+              }
+            }
+          }
+        } catch (err) {
+          // Public roster rendering must never block team channel decisions,
+          // stored winning tickets, or the scheduled prize announcements.
+          await this.store.operation(e.id, "public-rosters", diagnosticError(err));
+          this.logFailure("public-rosters", e.id, err);
+        }
       } catch (err) {
         // A deleted or inaccessible public panel must not block already-open
         // private grave channels, countdowns or persisted winner announcements.

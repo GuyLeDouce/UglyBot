@@ -67,3 +67,8 @@ CREATE TABLE IF NOT EXISTS four_graves_awards (
  PRIMARY KEY(event_id,grave_id,prize_index),
  FOREIGN KEY(event_id,grave_id) REFERENCES four_graves_graves(event_id,grave_id)
 );
+
+-- Four separate, persistent roster messages beneath the selection panel.
+-- Per-grave UI metadata only: tickets, allocations, winners and pools unchanged.
+ALTER TABLE four_graves_graves
+ ADD COLUMN IF NOT EXISTS roster_message_id TEXT;

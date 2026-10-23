@@ -1,5 +1,8 @@
 "use strict";
 const crypto = require("crypto");
+// Default artwork for the Four Graves public ticket-allocation panel.
+const PANEL_IMAGE_URL = "https://i.imgur.com/CQPVlFX.png";
+const PANEL_IMAGE_VERSION = "four-graves-panel-art-2026-10-23";
 const GRAVES = Object.freeze([
   {
     id: "barry_buckets",
@@ -30,10 +33,24 @@ const GRAVES = Object.freeze([
       "Every ticket is a separate duck. The administrator records the external race. First place receives first prize-wheel position, followed by finishing order. Reset the full original pool for another manual pass if prizes remain.",
   },
 ]);
+// Public panel and roster share one visual ordering. Stable GRAVES indices
+// remain unchanged for allocations, private roles, audit and game exports.
+const PANEL_ORDER = Object.freeze([
+  "cletus_von_wrinkles",
+  "barry_buckets",
+  "barbara_bowkins",
+  "scuba_steve_3000",
+]);
+const PANEL_INDICES = Object.freeze(PANEL_ORDER.map(id => {
+  const index = GRAVES.findIndex(g => g.id === id);
+  if (index < 0) throw Error("Unknown Four Graves panel ID: " + id);
+  return index;
+}));
 const DEFAULT_CONFIG = {
   names: GRAVES.map((g) => g.name),
   rules: GRAVES.map((g) => g.rules),
-  image: null,
+  image: PANEL_IMAGE_URL,
+  panelArtworkVersion: PANEL_IMAGE_VERSION,
   category: null,
   prizes: [
     { name: "DollzOnApe", quantity: 1 },
@@ -375,6 +392,10 @@ module.exports = {
   csvRecords,
   GRAVES,
   DEFAULT_CONFIG,
+  PANEL_IMAGE_URL,
+  PANEL_IMAGE_VERSION,
+  PANEL_ORDER,
+  PANEL_INDICES,
   prizePoolForGrave,
   prizeSlots,
   quantity,
