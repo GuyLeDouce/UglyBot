@@ -143,7 +143,8 @@ function rewardSummaryPages(data) {
   if (text.trim()) pages.push(text.trimEnd());
   return pages.map((description, i) => ({
     embeds: [{
-      title: "🎃 UGLY HALLOWEEN REWARDS" +
+      title: (data.event.config?.testMode ? "🧪 TEST ONLY — " : "🎃 ") +
+        "UGLY HALLOWEEN REWARDS" +
         (pages.length > 1 ? " — PART " + (i + 1) + " / " + pages.length : ""),
       description,
       footer: { text: "four-graves:" + data.event.id + ":rewards:page:" + i },
@@ -174,7 +175,8 @@ function rewardDownloadMessage(data) {
   const bytes = Buffer.from(rewardsCsv(data), "utf8");
   return {
     embeds: [{
-      title: "📥 UGLY HALLOWEEN REWARDS — FULL WINNER LIST",
+      title: (data.event.config?.testMode ? "🧪 TEST ONLY — " : "📥 ") +
+        "UGLY HALLOWEEN REWARDS — FULL WINNER LIST",
       description:
         "Every grave has spoken. Download the full list of winners and " +
         "their combined prizes below.\n\n" +
