@@ -90,11 +90,15 @@ The recap waits for the overall state **REVEALED**, and independently verifies t
 
 **Discord overflow:** Each public recap is one embed under the safe message length limit. If every winner and prize will not fit in one embed, UglyBot posts automatically numbered continuation panels (PART 2 / N, PART 3 / N, etc.). No participants or rewards are dropped, even if one winner has an unusually long list. Every part has its own persistent ID and marker.
 
-**Download at the end:** Immediately **after the last summary panel**, UglyBot posts a downloadable **Ugly_Halloween_Rewards.csv** attachment in the same original channel, with one row per player: Player, Prizes Won, Rewards, Graves. This lists all individual winners' combined rewards without requiring an administrator to export manually. Admins still have the original detailed per-ticket audit in /fourgraves export. Only the existing manual prize-delivery process transfers the actual rewards.
+**ADMIN-ONLY winner download:** The public Choose Your Grave channel receives **ONLY the winner/prize summary panels**. It never contains a CSV attachment, download button, wallet address, or download-control panel. After the finale is fully complete, an authorized administrator runs `/fourgraves rewards` or opens `/fourgraves admin → HALLOWEEN REWARDS`. The bot responds with an **ephemeral** private admin-only panel containing the **DOWNLOAD WINNERS + WALLETS** button. Both opening this panel and clicking its button re-check the bot's existing server-administrator authorization; a regular member cannot use a guessed button ID. The actual downloadable CSV is returned **ephemerally to that administrator only**.
 
-**Recovery safety:** A new additive summary-page tracking table plus two event-level publication fields record exactly which messages have been published. If UglyBot restarts between panels or before uploading the CSV, it recovers those specific messages by ID or unique footer marker and continues rather than restarting the announcement or rerolling prizes. The publication timestamp is written only after Discord confirms the final CSV attachment exists. Errors in the final public recap are isolated from private channels and the original winner draws.
+The admin CSV `Ugly_Halloween_Rewards.csv` contains one row per unique winning Discord account: **Discord User ID, Player, Verified Wallet(s), Prizes Won, Rewards, Graves**. Wallets come from the same current, verified holder `wallet_links` used by UglyBot's ordinary wallet-verification workflow, not an OpenSea buyer address or a detached historical wallet. A user with several verified linked wallets gets **all** of them separated by semicolons. Unknown, malformed, unverified or missing wallets are never invented; the CSV clearly marks `NOT VERIFIED — CHECK BEFORE DELIVERY` for manual review. Wallet records are fetched only at the moment an administrator clicks download, and no wallet address is logged in the audit.
 
-**Private TEST mode** uses the same process with completely separate simulated tickets and a visibly TEST ONLY final recap, no production claims, and no mentions. Public recap names and downloads cannot ping everyone or individual members.
+**Older public CSV cleanup:** If a previous deployed version of the Four Graves bot already posted a public `Ugly_Halloween_Rewards.csv`, the worker checks the original selection channel for its verified bot message and unique footer, deletes **only that old public download message**, and clears the saved reference. Missing/mismatched messages cause a diagnostic, not deletion of another user's message. This does not retroactively revoke previously downloaded copies. Administrators who see an existing public CSV should delete it promptly rather than waiting for deployment.
+
+**Recovery safety:** The additive summary-page tracking table and original event-level publication timestamp track the public reward panels. If UglyBot restarts between recap panels, it recovers their IDs or footer markers and continues without reposting or rerolling winners. Publication completes after all public summary panels (no public CSV is ever required). The private download requires a fresh administrator interaction and retrieves up-to-date verified wallet associations. All public errors remain isolated from private grave draws.
+
+**Private TEST mode** posts only fake-ticket reward summaries in its isolated test channel, with a prominent TEST ONLY label and no public fake CSV. It never queries real user wallets or permits a test user to view a live rewards CSV.
 
 ## Fair random winner selection
 
@@ -108,10 +112,11 @@ The recap waits for the overall state **REVEALED**, and independently verifies t
 
 ## Administrator commands
 
-- /fourgraves admin — admin event controls (setup, post, open, close, status, export, repair, and countdown restart).
+- /fourgraves admin — ephemeral administrator event controls (setup, post, open, close, status, export, repair, countdown restart, and final private reward download once finished).
 - /fourgraves configure — choose public panel channel, optional private grave category and artwork, customize names, confirm final prize pools.
 - /fourgraves status — members see participation and decision progress (secret prizes remain hidden before choice); admins see award progress and errors.
 - /fourgraves export — private ZIP with contestant CSVs, master allocations, ticket audit and a four_graves_prize_winners.csv once drawings have begun.
+- /fourgraves rewards — **admin-only ephemeral download panel** for the completed winner list, including each winning user’s current verified linked wallet(s).
 
 The existing countdown is **15 minutes after CLOSE** before TRICK/TREAT buttons activate. The 2-minute drawing delay happens **after** the first choice in each grave. To reveal on October 31, close 15 minutes before your intended team-decision time. RESTART COUNTDOWN is only possible before any recorded decision.
 

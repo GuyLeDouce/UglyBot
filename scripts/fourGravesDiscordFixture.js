@@ -123,6 +123,11 @@ function fixture(guildId) {
                 m.allowedMentions = p.allowedMentions;
                 m.components = p.components.map((c) => ({ toJSON: () => c }));
               },
+              delete: async () => {
+                if (fail.message) throw Error("Injected message delete failure");
+                messages.delete(m.id);
+                return m;
+              },
             };
             messages.set(m.id, m);
             return m;

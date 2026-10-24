@@ -2,8 +2,9 @@
 const assert = require("node:assert/strict");
 const { GRAVES, DEFAULT_CONFIG, prizeSlots } = require("../modules/fourGravesCore");
 const {
-  readyForPublicRewards, aggregateRewards, rewardSummaryPages, rewardsCsv,
-  rewardDownloadMessage, CSV_FILENAME, DESCRIPTION_LIMIT,
+  readyForPublicRewards, aggregateRewards, rewardSummaryPages,
+  adminRewardsPanel, verifiedWallets, resolveWinnerWallets, adminRewardsCsv,
+  CSV_FILENAME, DESCRIPTION_LIMIT,
 } = require("../modules/fourGravesRewards");
 
 function mockCompleted(unique = false, populatedGraves = GRAVES.map(g=>g.id)) {
@@ -52,85 +53,134 @@ function mockCompleted(unique = false, populatedGraves = GRAVES.map(g=>g.id)) {
   };
 }
 
-const data = mockCompleted();
-assert.equal(data.awards.length,50);
-assert.equal(readyForPublicRewards(data),true);
-const users = aggregateRewards(data);
-assert.deepEqual(users.map(u=>u.label),["Player 1","Player 2"]);
-assert.equal(users.reduce((n,u)=>n+u.prizesWon,0),50);
-assert.equal(users.reduce((n,u)=>n+
-  u.prizes.filter(p=>p.endsWith(" $CHARM")).reduce((s,v)=>
-    s+Number(v.split(" ")[0].replaceAll(",","")),0),0),100000);
-assert.ok(users.some(u=>u.prizes.some(v=>v.includes("Squigs Reloaded"))));
-assert.ok(users.some(u=>u.prizes.some(v=>v.includes("RugDollz 3D"))));
-assert.ok(users.some(u=>u.graves.length===4));
+async function main() {
+  const data = mockCompleted();
+  assert.equal(data.awards.length,50);
+  assert.equal(readyForPublicRewards(data),true);
+  const users = aggregateRewards(data);
+  assert.deepEqual(users.map(u=>u.label),["Player 1","Player 2"]);
+  assert.equal(users.reduce((n,u)=>n+u.prizesWon,0),50);
+  assert.equal(users.reduce((n,u)=>n+
+    u.prizes.filter(p=>p.endsWith(" $CHARM")).reduce((s,v)=>
+      s+Number(v.split(" ")[0].replaceAll(",","")),0),0),100000);
+  assert.ok(users.some(u=>u.prizes.some(v=>v.includes("Squigs Reloaded"))));
+  assert.ok(users.some(u=>u.prizes.some(v=>v.includes("RugDollz 3D"))));
+  assert.ok(users.some(u=>u.graves.length===4));
 
-const pages = rewardSummaryPages(data);
-assert.equal(pages.length,1);
-assert.match(pages[0].embeds[0].title,/UGLY HALLOWEEN REWARDS/);
-assert.match(pages[0].embeds[0].description,/Player 1 — /);
-assert.match(pages[0].embeds[0].description,/Player 2 — /);
-assert.deepEqual(pages[0].allowedMentions,{parse:[]});
-assert.equal(pages[0].embeds[0].footer.text,"four-graves:555:rewards:page:0");
+  const pages = rewardSummaryPages(data);
+  assert.equal(pages.length,1);
+  assert.match(pages[0].embeds[0].title,/UGLY HALLOWEEN REWARDS/);
+  assert.match(pages[0].embeds[0].description,/Player 1 — /);
+  assert.match(pages[0].embeds[0].description,/Player 2 — /);
+  assert.deepEqual(pages[0].allowedMentions,{parse:[]});
+  assert.equal(pages[0].embeds[0].footer.text,"four-graves:555:rewards:page:0");
+  // Nothing public can contain a wallet address, download UI or attached file.
+  assert.equal(pages[0].files,undefined);
+  assert.deepEqual(pages[0].components,[]);
+  assert.doesNotMatch(JSON.stringify(pages),/admin-rewards-download|wallet|Verified Wallet/i);
+  assert.doesNotMatch(JSON.stringify(pages),/0x[a-f0-9]{40}/i);
 
-const download = rewardDownloadMessage(data);
-assert.equal(download.files.length,1);
-assert.equal(download.files[0].name,CSV_FILENAME);
-assert.ok(Buffer.isBuffer(download.files[0].attachment));
-assert.equal(download.embeds[0].footer.text,"four-graves:555:rewards:download");
-assert.deepEqual(download.allowedMentions,{parse:[]});
-assert.equal(download.files[0].attachment.toString("utf8"),rewardsCsv(data));
-const csv = rewardsCsv(data);
-assert.match(csv,/Player 1/);
-assert.match(csv,/RugDollz 3D/);
-assert.match(csv,/\$CHARM/);
-assert.equal(csv.split("\r\n").length,4); // header, two winners, trailing blank
+  const panel = adminRewardsPanel(data);
+  assert.match(panel.embeds[0].title,/ADMIN ONLY/);
+  assert.equal(panel.components[0].components[0].custom_id,
+    "fg1:555:admin-rewards-download");
+  assert.deepEqual(panel.allowedMentions,{parse:[]});
+  assert.equal(panel.files,undefined);
+  assert.throws(()=>adminRewardsPanel({...data,awards:data.awards.slice(1)}),
+    /not complete/);
 
-// Do not send summary if an entire grave or any single award is unfinished.
-assert.equal(readyForPublicRewards({...data,
-  event:{...data.event,state:"BUTTONS_ACTIVE"}}),false);
-assert.equal(readyForPublicRewards({...data,
-  graves:data.graves.map((g,i)=>i===0?{...g,draw_completed_at:null}:g)}),false);
-assert.equal(readyForPublicRewards({...data,
-  awards:data.awards.slice(1)}),false);
-assert.equal(readyForPublicRewards({...data,
-  awards:data.awards.map((a,i)=>i? a:{...a,message_id:null})}),false);
-assert.equal(readyForPublicRewards({...data,
-  awards:data.awards.map((a,i)=>i? a:{...a,prize_name:"Different Prize"})}),false);
-assert.equal(readyForPublicRewards({...data,
-  awards:data.awards.map((a,i)=>i? a:{...a,ticket_entry_id:"not-buried"})}),false);
-assert.throws(()=>rewardSummaryPages({...data,awards:data.awards.slice(1)}),
-  /not all finalized/);
+  // Reject incomplete, mismatched and unannounced grave winners.
+  assert.equal(readyForPublicRewards({...data,
+    event:{...data.event,state:"BUTTONS_ACTIVE"}}),false);
+  assert.equal(readyForPublicRewards({...data,
+    graves:data.graves.map((g,i)=>i===0?{...g,draw_completed_at:null}:g)}),false);
+  assert.equal(readyForPublicRewards({...data,
+    awards:data.awards.slice(1)}),false);
+  assert.equal(readyForPublicRewards({...data,
+    awards:data.awards.map((a,i)=>i?a:{...a,message_id:null})}),false);
+  assert.equal(readyForPublicRewards({...data,
+    awards:data.awards.map((a,i)=>i?a:{...a,prize_name:"Different Prize"})}),false);
+  assert.equal(readyForPublicRewards({...data,
+    awards:data.awards.map((a,i)=>i?a:{...a,ticket_entry_id:"not-buried"})}),false);
+  assert.throws(()=>rewardSummaryPages({...data,awards:data.awards.slice(1)}),
+    /not all finalized/);
 
-const oneGrave=mockCompleted(false,["barry_buckets"]);
-assert.equal(oneGrave.awards.length,13);
-assert.equal(readyForPublicRewards(oneGrave),true); // Empty graves don't block
-const noGrave=mockCompleted(false,[]);
-assert.equal(readyForPublicRewards(noGrave),false);
+  const oneGrave=mockCompleted(false,["barry_buckets"]);
+  assert.equal(oneGrave.awards.length,13);
+  assert.equal(readyForPublicRewards(oneGrave),true);
+  assert.equal(readyForPublicRewards(mockCompleted(false,[])),false);
 
-// If the recap cannot fit in one Discord embed, use multiple panels.
-const many=mockCompleted(true);
-assert.equal(many.awards.length,50);
-assert.equal(aggregateRewards(many).length,50);
-const multi=rewardSummaryPages(many);
-assert.ok(multi.length>1,"Long winning lists must wrap to additional panels.");
-for (let i=0;i<multi.length;i++) {
-  assert.ok(multi[i].embeds[0].description.length<=DESCRIPTION_LIMIT);
-  assert.match(multi[i].embeds[0].title,
-    new RegExp("PART "+(i+1)+" / "+multi.length));
-  assert.equal(multi[i].embeds[0].footer.text,"four-graves:555:rewards:page:"+i);
-  assert.deepEqual(multi[i].allowedMentions,{parse:[]});
+  const many=mockCompleted(true);
+  assert.equal(aggregateRewards(many).length,50);
+  const multi=rewardSummaryPages(many);
+  assert.ok(multi.length>1,"Long winning lists must wrap to additional panels.");
+  for(let i=0;i<multi.length;i++) {
+    assert.ok(multi[i].embeds[0].description.length<=DESCRIPTION_LIMIT);
+    assert.match(multi[i].embeds[0].title,
+      new RegExp("PART "+(i+1)+" / "+multi.length));
+    assert.equal(multi[i].embeds[0].footer.text,"four-graves:555:rewards:page:"+i);
+    assert.deepEqual(multi[i].allowedMentions,{parse:[]});
+    assert.equal(multi[i].files,undefined);
+  }
+  assert.ok(multi.map(m=>m.embeds[0].description).join("\n").includes("Player 1049"));
+
+  const unsafe = mockCompleted();
+  unsafe.snapshot.users.find(u=>u.discord_id==="100").display_name="@everyone <@123>";
+  const unsafeSummary=rewardSummaryPages(unsafe);
+  assert.doesNotMatch(unsafeSummary[0].embeds[0].description,/@everyone|<@123>/);
+
+  const walletA="0x"+"a".repeat(40);
+  const walletB="0x"+"b".repeat(40);
+  const unverified="0x"+"c".repeat(40);
+  assert.deepEqual(verifiedWallets([
+    {wallet_address:walletA,verified:true},
+    {wallet_address:walletA.toUpperCase().replace(/^0X/,"0x"),verified:true},
+    {wallet_address:walletB,verified:true},
+    {wallet_address:unverified,verified:false},
+    {wallet_address:"this-is-not-a-wallet",verified:true},
+    {wallet_address:"",verified:true},
+  ]),[walletA,walletB]);
+  assert.throws(()=>verifiedWallets(null),/invalid records/);
+  const calls = [];
+  const mockWalletLinks=async (guildId,userId)=>{
+    calls.push([guildId,userId]);
+    if(userId==="100") return [
+      {wallet_address:walletB,verified:true},
+      {wallet_address:walletA,verified:true},
+      {wallet_address:walletB,verified:true},
+      {wallet_address:unverified,verified:false},
+    ];
+    return [{wallet_address:unverified,verified:false}];
+  };
+  const wallets=await resolveWinnerWallets("guild",users,mockWalletLinks);
+  assert.deepEqual(wallets.get("100"),[walletA,walletB]);
+  assert.deepEqual(wallets.get("101"),[]);
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(pair=>pair[0]==="guild"));
+
+  const winnersCsv=await adminRewardsCsv(data,"guild",mockWalletLinks);
+  assert.match(winnersCsv,/Verified Wallet\(s\)/);
+  assert.match(winnersCsv,/Discord User ID/);
+  assert.match(winnersCsv,/Player 1/);
+  assert.match(winnersCsv,/RugDollz 3D/);
+  assert.match(winnersCsv,/\$CHARM/);
+  assert.ok(winnersCsv.includes(walletA+"; "+walletB));
+  assert.doesNotMatch(winnersCsv,new RegExp(unverified));
+  assert.match(winnersCsv,/NOT VERIFIED — CHECK BEFORE DELIVERY/);
+  assert.equal(winnersCsv.split("\r\n").length,4);
+  assert.throws(()=>adminRewardsPanel({...data,awards:data.awards.slice(1)}),
+    /not complete/);
+  await assert.rejects(()=>adminRewardsCsv(data,"another-guild",mockWalletLinks),
+    /guild mismatch/);
+  await assert.rejects(()=>adminRewardsCsv(data,"guild",null),/not configured/);
+  await assert.rejects(()=>adminRewardsCsv(data,"guild",async()=>{throw Error("wallet DB down")}),
+    /wallet DB down/);
+
+  unsafe.snapshot.users.find(u=>u.discord_id==="100").display_name="=IMPORTDATA(1)";
+  const safeCsv=await adminRewardsCsv(unsafe,"guild",mockWalletLinks);
+  assert.match(safeCsv,/"'=IMPORTDATA/);
+
+  assert.equal(CSV_FILENAME,"Ugly_Halloween_Rewards.csv");
+  console.log("PASS 50 prizes, public recap only, ephemeral admin-only panel, verified multi-wallet CSV, incomplete gates, overflow, and safe names");
 }
-assert.ok(multi.map(m=>m.embeds[0].description).join("\n").includes("Player 1049"));
-assert.equal(rewardsCsv(many).split("\r\n").length,52);
-
-// Winner names can't ping real members or distort the Discord Markdown layout.
-const unsafe=mockCompleted();
-unsafe.snapshot.users.find(u=>u.discord_id==="100").display_name="@everyone <@123>";
-const unsafeSummary=rewardSummaryPages(unsafe);
-assert.doesNotMatch(unsafeSummary[0].embeds[0].description,/@everyone|<@123>/);
-assert.deepEqual(unsafeSummary[0].allowedMentions,{parse:[]});
-// CSV escapes formulas, while a file can preserve the human display name.
-unsafe.snapshot.users.find(u=>u.discord_id==="100").display_name="=IMPORTDATA(1)";
-assert.match(rewardsCsv(unsafe),/"'=IMPORTDATA/);
-console.log("PASS final rewards aggregation, 50 prizes, 100000 CHARM, completeness gate, overflow pages, CSV and no mentions");
+main().catch(err=>{console.error(err);process.exitCode=1;});

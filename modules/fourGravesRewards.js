@@ -176,24 +176,91 @@ function rewardsCsv(data) {
   );
 }
 
-function rewardDownloadMessage(data) {
+// PUBLIC CHANNELS RECEIVE ONLY THE RECAP EMBEDS, NEVER THE CSV FILE
+// OR A DOWNLOAD BUTTON. The following panel exists only as an ephemeral
+// response to an authorized Four Graves admin.
+function adminRewardsPanel(data) {
   if (!readyForPublicRewards(data))
-    throw Error("Cannot publish incomplete grave rewards.");
-  const bytes = Buffer.from(rewardsCsv(data), "utf8");
+    throw Error("The grave results are not complete. No winner download is available yet.");
   return {
     embeds: [{
-      title: (data.event.config?.testMode ? "🧪 TEST ONLY — " : "📥 ") +
-        "UGLY HALLOWEEN REWARDS — FULL WINNER LIST",
+      title: "🔒 UGLY HALLOWEEN REWARDS — ADMIN ONLY",
       description:
-        "Every grave has spoken. Download the full list of winners and " +
-        "their combined prizes below.\n\n" +
-        "**One row per winning Squig.** Prize transfers are handled manually.",
-      footer: { text: "four-graves:" + data.event.id + ":rewards:download" },
+        "The Halloween prize draw is complete. Download the **private** " +
+        "winner CSV with each Squig's combined rewards, Discord ID and " +
+        "**current verified wallet address(es)**.\n\n" +
+        "Multiple verified wallets are included. Missing or unverified " +
+        "wallets are marked for manual review before you deliver NFTs.",
+      footer: { text: "four-graves:" + data.event.id + ":rewards:admin-private" },
     }],
-    files: [{ attachment: bytes, name: CSV_FILENAME }],
-    components: [],
+    components: [{
+      type: 1,
+      components: [{
+        type: 2, style: 1, disabled: false,
+        label: "DOWNLOAD WINNERS + WALLETS",
+        custom_id: "fg1:" + data.event.id + ":admin-rewards-download",
+      }],
+    }],
     allowedMentions: NO_MENTIONS,
   };
+}
+
+function verifiedWallets(links) {
+  if (!Array.isArray(links)) throw Error("Verified wallet lookup returned invalid records.");
+  const seen = new Set();
+  const addresses = [];
+  for (const link of links) {
+    // Only currently linked, VERIFIED wallets can appear on the payout list.
+    // Do not use trade buyer addresses, unverifiable strings or historical
+    // wallets that the holder unlinked during Trick or Treat.
+    if (link?.verified !== true) continue;
+    const addr = String(link.wallet_address || "").trim();
+    if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) continue;
+    const canonical = addr.toLowerCase();
+    if (!seen.has(canonical)) {
+      seen.add(canonical);
+      addresses.push(addr);
+    }
+  }
+  return addresses.sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+async function resolveWinnerWallets(guildId, users, getWalletLinks) {
+  if (typeof getWalletLinks !== "function")
+    throw Error("Verified wallet lookup was not configured. Export cannot continue.");
+  const result = new Map();
+  let next = 0;
+  // Keep query concurrency low: wallet_links lives in the holders database.
+  await Promise.all(Array.from({length:Math.min(4,users.length)}, async () => {
+    while (next < users.length) {
+      const index = next++;
+      const userId = users[index].discordId;
+      const links = await getWalletLinks(guildId,userId);
+      result.set(userId,verifiedWallets(links));
+    }
+  }));
+  return result;
+}
+
+async function adminRewardsCsv(data, guildId, getWalletLinks) {
+  if (!readyForPublicRewards(data))
+    throw Error("Cannot export Halloween rewards before every populated grave is finalized.");
+  if (String(guildId) !== String(data.event.guild_id))
+    throw Error("Event guild mismatch: refusing wallet export.");
+  const winners = aggregateRewards(data);
+  const wallets = await resolveWinnerWallets(guildId,winners,getWalletLinks);
+  return csv(
+    ["Discord User ID","Player","Verified Wallet(s)","Prizes Won","Rewards","Graves"],
+    winners.map(user=>[
+      user.discordId,
+      user.csvLabel,
+      (wallets.get(user.discordId) || []).join("; ") ||
+        "NOT VERIFIED — CHECK BEFORE DELIVERY",
+      user.prizesWon,
+      user.csvPrizes.join("; "),
+      user.graves.join("; "),
+    ]),
+  );
 }
 
 module.exports = {
@@ -201,7 +268,10 @@ module.exports = {
   aggregateRewards,
   rewardSummaryPages,
   rewardsCsv,
-  rewardDownloadMessage,
+  adminRewardsPanel,
+  verifiedWallets,
+  resolveWinnerWallets,
+  adminRewardsCsv,
   CSV_FILENAME,
   DESCRIPTION_LIMIT,
 };

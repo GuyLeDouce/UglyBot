@@ -699,7 +699,8 @@ async function main() {
       const finished = await current();
       assert.equal(finished.state,"REVEALED");
       assert.ok(finished.rewards_published_at);
-      assert.ok(finished.rewards_download_message_id);
+      assert.equal(finished.rewards_download_message_id,null,
+        "A public CSV download must never be generated.");
 
       const publicMessages=[...(await channel.messages.fetch({})).values()];
       const pages=publicMessages.filter(m=>m.embeds.some(x=>
@@ -709,19 +710,11 @@ async function main() {
       assert.match(pages[0].embeds[0].description,/Player 1 —/);
       assert.match(pages[0].embeds[0].description,/Player 2 —/);
       assert.deepEqual(pages[0].allowedMentions,{parse:[]});
-      const csvMessage = await channel.messages.fetch(finished.rewards_download_message_id);
-      assert.ok(csvMessage.attachments.some(a=>a.name===CSV_FILENAME));
-      assert.equal(csvMessage.embeds[0].footer.text,
-        "four-graves:"+ev.id+":rewards:download");
-      const attachment=[...csvMessage.attachments.values()].find(a=>a.name===CSV_FILENAME);
-      const csvText=attachment.attachment.toString("utf8");
-      assert.match(csvText,/Player 1/);
-      assert.match(csvText,/Player 2/);
-      assert.match(csvText,/\$CHARM/);
-      assert.deepEqual(csvMessage.allowedMentions,{parse:[]});
-      assert.equal(publicMessages.length,7,"Selection + four rosters + recap + CSV");
-      assert.equal(publicMessages.at(-1).id,csvMessage.id,
-        "Download must follow the last recap panel");
+      assert.equal(publicMessages.length,6,"Selection + four rosters + PUBLIC recap only");
+      assert.ok(publicMessages.every(m=>!(m.attachments?.size)),
+        "No file can ever be attached to any public recap message");
+      assert.ok(publicMessages.every(m=>!JSON.stringify(m.components).includes("DOWNLOAD")));
+      assert.ok(publicMessages.every(m=>!m.embeds.some(e=>/:rewards:download/.test(e.footer?.text||""))));
       const rows=(await pool.query(
         "SELECT page_index,message_id FROM four_graves_reward_summary_pages WHERE event_id=$1",
         [ev.id],
@@ -734,7 +727,7 @@ async function main() {
       // Rebuilding the worker or losing only the final published timestamp
       // adopts its saved message IDs and MUST NOT send duplicate public posts.
       await runner.reconcile(await current());
-      assert.equal((await channel.messages.fetch({})).size,7);
+      assert.equal((await channel.messages.fetch({})).size,6);
       await pool.query(
         "UPDATE four_graves_events SET rewards_published_at=NULL WHERE id=$1",
         [ev.id],
@@ -742,13 +735,136 @@ async function main() {
       const restarted = new FourGravesDiscord(new FourGravesStore(pool),mocked.deps);
       await restarted.reconcile(await current());
       assert.ok((await current()).rewards_published_at);
-      assert.equal((await channel.messages.fetch({})).size,7);
-      assert.equal((await current()).rewards_download_message_id,csvMessage.id);
+      assert.equal((await channel.messages.fetch({})).size,6);
+      assert.equal((await current()).rewards_download_message_id,null);
       const audits = (await pool.query(
         "SELECT * FROM four_graves_audit WHERE event_id=$1 AND action='public-rewards-summary-published'",
         [ev.id],
       )).rows;
       assert.equal(audits.length,2,"One publication record for each explicit state transition");
+      // Admin private panel is generated only for authorized interactions.
+      const api = require("../modules/fourGraves");
+      const originalFlag = process.env.FOUR_GRAVES_ENABLED;
+      process.env.FOUR_GRAVES_ENABLED="true";
+      let walletLookupCount=0;
+      api.initFourGraves({
+        pool,...mocked.deps,
+        isAdmin: interaction => interaction.user?.id === "admin",
+        getWalletLinks: async (givenGuild, userId) => {
+          walletLookupCount++;
+          assert.equal(givenGuild,guildId);
+          return userId==="10"
+            ? [
+              {wallet_address:"0x"+"1".repeat(40),verified:true},
+              {wallet_address:"0x"+"2".repeat(40),verified:true},
+              {wallet_address:"0x"+"3".repeat(40),verified:false},
+            ] : [{wallet_address:"0x"+"4".repeat(40),verified:true}];
+        },
+      });
+      function fakeInteraction(id,sub,customId=null) {
+        const interaction={
+          guildId: guildId,
+          user:{id},
+          commandName:"fourgraves",
+          customId,
+          isChatInputCommand:()=>!customId,
+          options:{getSubcommand:()=>sub},
+          memberPermissions:{has:()=>false},
+          deferReply:async({flags})=>{
+            assert.equal(flags,64);
+            interaction.deferred=true;
+          },
+          editReply:async payload=>{
+            interaction.response=payload;
+            return payload;
+          },
+          attachmentSizeLimit:8*1024*1024,
+        };
+        return interaction;
+      }
+      try {
+        const unauthorized = fakeInteraction("20","rewards");
+        assert.equal(await api.handle(unauthorized),true);
+        assert.match(unauthorized.response.content,/Administrator access/);
+        assert.equal(unauthorized.response.files,undefined);
+        assert.equal(unauthorized.response.components?.length||0,0);
+        const adminPanel=fakeInteraction("admin","rewards");
+        assert.equal(await api.handle(adminPanel),true);
+        assert.match(adminPanel.response.embeds[0].title,/ADMIN ONLY/);
+        const control=adminPanel.response.components[0].components[0];
+        assert.equal(control.custom_id,"fg1:"+ev.id+":admin-rewards-download");
+        assert.equal(walletLookupCount,0,
+          "Wallets must not be fetched when merely displaying the admin panel.");
+
+        const forged=fakeInteraction("20",null,control.custom_id);
+        assert.equal(await api.handle(forged),true);
+        assert.match(forged.response.content,/Administrator access/);
+        assert.equal(forged.response.files,undefined);
+        assert.equal(walletLookupCount,0,"Unauthorized clicks must not query wallet links.");
+
+        const authorized=fakeInteraction("admin",null,control.custom_id);
+        assert.equal(await api.handle(authorized),true);
+        assert.equal(authorized.response.files.length,1);
+        assert.equal(authorized.response.files[0].name,"Ugly_Halloween_Rewards.csv");
+        const csvBytes=authorized.response.files[0].attachment;
+        const privateCSV=csvBytes.toString("utf8");
+        assert.match(privateCSV,/Verified Wallet\(s\)/);
+        assert.match(privateCSV,/Discord User ID/);
+        assert.match(privateCSV,/0x1111111111111111111111111111111111111111/);
+        assert.match(privateCSV,/0x2222222222222222222222222222222222222222/);
+        assert.match(privateCSV,/0x4444444444444444444444444444444444444444/);
+        assert.doesNotMatch(privateCSV,/0x3333333333333333333333333333333333333333/);
+        assert.match(privateCSV,/Player 1/);
+        assert.match(privateCSV,/Player 2/);
+        assert.equal(walletLookupCount,2);
+        assert.equal((await channel.messages.fetch({})).size,6,
+          "Private CSV download must not create a public Discord message");
+        assert.ok([...(await channel.messages.fetch({})).values()].every(m=>
+          !JSON.stringify(m).includes("0x111111")));
+        const privateAudit=(await pool.query(
+          "SELECT detail FROM four_graves_audit WHERE event_id=$1 AND action='private-final-rewards-download'",
+          [ev.id],
+        )).rows;
+        assert.equal(privateAudit.length,1);
+        assert.doesNotMatch(JSON.stringify(privateAudit),/0x111111/);
+      } finally {
+        if (originalFlag===undefined) delete process.env.FOUR_GRAVES_ENABLED;
+        else process.env.FOUR_GRAVES_ENABLED=originalFlag;
+      }
+
+      // If the previous release already exposed a PUBLIC download panel,
+      // remove the known bot-owned, uniquely marked CSV message safely.
+      const legacy = await channel.send({
+        embeds:[{
+          title:"OLD PUBLIC CSV",
+          description:"Legacy public download is no longer allowed.",
+          footer:{text:"four-graves:"+ev.id+":rewards:download"},
+        }],
+        files:[{attachment:Buffer.from("PRIVATE","utf8"),name:"Ugly_Halloween_Rewards.csv"}],
+        components:[],
+        allowedMentions:{parse:[]},
+      });
+      await pool.query(
+        "UPDATE four_graves_events SET rewards_download_message_id=$2 WHERE id=$1",
+        [ev.id,legacy.id],
+      );
+      await pool.query(
+        "INSERT INTO four_graves_operations(event_id,operation_key,attempts) " +
+          "VALUES($1,'rewards:download',1) ON CONFLICT DO NOTHING",
+        [ev.id],
+      );
+      assert.equal((await channel.messages.fetch({})).size,7);
+      await restarted.reconcile(await current());
+      assert.equal((await channel.messages.fetch({})).size,6);
+      assert.equal((await current()).rewards_download_message_id,null);
+      const cleanup=(await pool.query(
+        "SELECT completed_at FROM four_graves_operations " +
+          "WHERE event_id=$1 AND operation_key='legacy-public-download-cleanup'",
+        [ev.id],
+      )).rows[0];
+      assert.ok(cleanup?.completed_at);
+      await restarted.reconcile(await current());
+      assert.equal((await channel.messages.fetch({})).size,6);
     });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,
