@@ -8,6 +8,10 @@ const {
 const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL, PANEL_INDICES } = require("./fourGravesCore");
 const { rosterPanel } = require("./fourGravesRoster");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
+const {
+  readyForPublicRewards, rewardSummaryPages, rewardDownloadMessage,
+  CSV_FILENAME,
+} = require("./fourGravesRewards");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
   custom_id,
@@ -641,6 +645,85 @@ class FourGravesDiscord {
           "AND (g.decision IS NULL OR g.draw_completed_at IS NULL))",
         [e.id],
       );
+    // The public Halloween recap is published only when every populated
+    // grave has announced every winner. Empty graves do not block it.
+    // A summary failure is isolated from private channels and their draw logic.
+    if (e.closed_at && e.panel_channel_id && !e.rewards_published_at &&
+        graves.some(g => g.draw_completed_at)) {
+      try {
+        const completed = await this.store.read(e.guild_id);
+        if (readyForPublicRewards(completed))
+          await this.publishRewardSummary(guild, completed);
+        await this.store.operation(e.id, "rewards-summary");
+      } catch (err) {
+        await this.store.operation(e.id, "rewards-summary", diagnosticError(err));
+        this.logFailure("rewards-summary", e.id, err);
+      }
+    }
+  }
+  async publishRewardSummary(guild, data) {
+    const e = data.event;
+    if (e.rewards_published_at || !readyForPublicRewards(data)) return;
+    if (!e.panel_channel_id)
+      throw Error("Original Choose Your Grave channel was not configured.");
+
+    const channel = guild.channels.cache.get(e.panel_channel_id) ||
+      await guild.channels.fetch(e.panel_channel_id);
+    if (!channel || channel.guildId !== e.guild_id ||
+        channel.type !== ChannelType.GuildText)
+      throw Error("Original Choose Your Grave channel is missing or inaccessible.");
+
+    // Publish in order, and persist each message separately. Each page has
+    // its own unique footer marker, so a crash between send and save is
+    // recoverable without duplicating the public winner announcements.
+    const pages = rewardSummaryPages(data);
+    for (const [index, payload] of pages.entries()) {
+      await this.store.pool.query(
+        "INSERT INTO four_graves_reward_summary_pages(event_id,page_index) " +
+          "VALUES($1,$2) ON CONFLICT DO NOTHING",
+        [e.id, index],
+      );
+      const saved = (await this.store.pool.query(
+        "SELECT message_id FROM four_graves_reward_summary_pages " +
+          "WHERE event_id=$1 AND page_index=$2",
+        [e.id, index],
+      )).rows[0];
+      await this.message(
+        e, channel, saved.message_id, "rewards:page:" + index, payload,
+        message => this.store.pool.query(
+          "UPDATE four_graves_reward_summary_pages SET message_id=$3 " +
+            "WHERE event_id=$1 AND page_index=$2",
+          [e.id, index, message.id],
+        ),
+      );
+    }
+
+    // Post the CSV only AFTER all summary pages. The published marker is not
+    // committed unless Discord confirms a message with the actual attachment.
+    const download = await this.message(
+      e, channel, e.rewards_download_message_id, "rewards:download",
+      rewardDownloadMessage(data),
+      message => this.store.pool.query(
+        "UPDATE four_graves_events SET rewards_download_message_id=$2 " +
+          "WHERE id=$1",
+        [e.id, message.id],
+      ),
+    );
+    const attached = download.attachments &&
+      [...download.attachments.values()].some(a => a.name === CSV_FILENAME);
+    if (!attached)
+      throw Error("Final rewards message has no downloadable winner CSV.");
+
+    const updated = await this.store.pool.query(
+      "UPDATE four_graves_events SET rewards_published_at=clock_timestamp() " +
+        "WHERE id=$1 AND event_key=$2 AND state='REVEALED' AND " +
+        "rewards_published_at IS NULL RETURNING id",
+      [e.id, this.store.eventKey],
+    );
+    if (updated.rowCount) await this.store.audit(
+      this.store.pool, e.id, "AUTO_DRAW", "public-rewards-summary-published",
+      { pages: pages.length, downloadMessageId: download.id },
+    );
   }
   async tick() {
     if (this.busy || !this.deps.enabled()) return;

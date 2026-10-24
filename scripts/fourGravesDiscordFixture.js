@@ -105,14 +105,22 @@ function fixture(guildId) {
           },
           send: async (payload) => {
             if (fail.message) throw Error("Injected message send failure");
+            const attachments = new Collection(
+              (payload.files || []).map((f, index) => [
+                String(index), { name: f.name, attachment: f.attachment },
+              ]),
+            );
             const m = {
               id: String(++id),
               author: { id: "bot" },
               embeds: payload.embeds,
+              attachments,
+              allowedMentions: payload.allowedMentions,
               components: payload.components.map((c) => ({ toJSON: () => c })),
               edit: async (p) => {
                 if (fail.message) throw Error("Injected message edit failure");
                 m.embeds = p.embeds;
+                m.allowedMentions = p.allowedMentions;
                 m.components = p.components.map((c) => ({ toJSON: () => c }));
               },
             };

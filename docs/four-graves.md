@@ -71,6 +71,31 @@ Every grave has 1 DollzOnApe, 3 Squigs Reloaded, 1 Ugly Monster and 5 separate p
 
 The default configuration contains these exact per-grave mystery prize lists and is finalized. Existing unclosed events with an old shared mystery list are upgraded on admin setup. Already-closed legacy events are NOT silently changed; they require administrator review.
 
+## Final public announcement: UGLY HALLOWEEN REWARDS
+
+Once all **populated** graves have completed all their individual prize drawings and each winner has been successfully announced in their corresponding private grave channel, UglyBot automatically posts a final recap in the **ORIGINAL Choose Your Grave selection channel**, under the existing selection and four roster panels.
+
+The public recap is titled **🎃 UGLY HALLOWEEN REWARDS** and combines winnings **per unique Discord participant across all four graves**, rather than listing the same Squig repeatedly:
+
+```text
+🎃 UGLY HALLOWEEN REWARDS
+Player 1 — Squigs Reloaded, 10,000 $CHARM
+Player 2 — 2 × RugDollz 3D
+Player 3 — DollzOnApe, Ugly Monster, 5,000 $CHARM
+```
+
+These are examples only. Real names, numbers, prizes and $CHARM sums come exclusively from the verified and persisted draws. The bot **never invents winners** and never changes prize allocation odds or records. Duplicate NFTs are combined using a quantity (e.g. 2 × Squigs Reloaded). Multiple 5,000 $CHARM awards are summed into one credit amount for easier reading.
+
+The recap waits for the overall state **REVEALED**, and independently verifies that every nonempty grave has a decision, a completed draw, and exactly the expected number of stored, announced prizes. Empty graves have no eligible entrants and cannot block the announcement, while unawarded prizes in empty graves do not count as won. A single unfinished grave prevents any premature public recap.
+
+**Discord overflow:** Each public recap is one embed under the safe message length limit. If every winner and prize will not fit in one embed, UglyBot posts automatically numbered continuation panels (PART 2 / N, PART 3 / N, etc.). No participants or rewards are dropped, even if one winner has an unusually long list. Every part has its own persistent ID and marker.
+
+**Download at the end:** Immediately **after the last summary panel**, UglyBot posts a downloadable **Ugly_Halloween_Rewards.csv** attachment in the same original channel, with one row per player: Player, Prizes Won, Rewards, Graves. This lists all individual winners' combined rewards without requiring an administrator to export manually. Admins still have the original detailed per-ticket audit in /fourgraves export. Only the existing manual prize-delivery process transfers the actual rewards.
+
+**Recovery safety:** A new additive summary-page tracking table plus two event-level publication fields record exactly which messages have been published. If UglyBot restarts between panels or before uploading the CSV, it recovers those specific messages by ID or unique footer marker and continues rather than restarting the announcement or rerolling prizes. The publication timestamp is written only after Discord confirms the final CSV attachment exists. Errors in the final public recap are isolated from private channels and the original winner draws.
+
+**Private TEST mode** uses the same process with completely separate simulated tickets and a visibly TEST ONLY final recap, no production claims, and no mentions. Public recap names and downloads cannot ping everyone or individual members.
+
 ## Fair random winner selection
 
 - Each individual buried ticket is a chance; users with more tickets have proportionally greater chances to win when they are eligible.

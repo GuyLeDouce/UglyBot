@@ -629,6 +629,127 @@ async function main() {
       assert.ok(graveIds.every(id=>ops.some(o=>
         o.operation_key==="public-roster:"+id && !o.last_error)));
     });
+    await test("final public recap waits for all prizes and publishes CSV without duplicates", async () => {
+      const { fixture } = require("./fourGravesDiscordFixture");
+      const { FourGravesDiscord } = require("../modules/fourGravesDiscord");
+      const { prizeSlots } = require("../modules/fourGravesCore");
+      const { CSV_FILENAME } = require("../modules/fourGravesRewards");
+      const guildId = "summary-integration-guild";
+      const mocked = fixture(guildId);
+      const channel = await mocked.guild.channels.create({ name: "choose-your-grave" });
+      const ev = await s.setup(guildId,"admin");
+      await pool.query(
+        "UPDATE four_graves_events SET panel_channel_id=$2 WHERE id=$1",
+        [ev.id,channel.id],
+      );
+      for(const id of ["10","20"]) await pool.query(
+        "INSERT INTO trick_or_treat_treats(event_key,guild_id,discord_id,event_day,wallet_count,squig_count) " +
+          "VALUES($1,$2,$3,'halloween',1,1)",
+        [s.sourceEventKey,guildId,id],
+      );
+      await s.transition(guildId,"admin","open");
+      for(const id of ["10","20"]) await s.allocate(guildId,{
+        id,username:"player_"+id,display_name:id==="10"?"Player 1":"Player 2",
+      }, GRAVES[0].id,1,"rewards-summary-ticket-"+id);
+      const runner = new FourGravesDiscord(s,mocked.deps);
+      const current = async () => (await s.read(guildId)).event;
+      await runner.reconcile(await current());
+      assert.equal((await channel.messages.fetch({})).size,5);
+      await s.transition(guildId,"admin","close");
+      const data = await s.read(guildId);
+      const gId = GRAVES[0].id;
+      const participants = data.snapshot.entries.filter(t=>t.grave_id===gId);
+      const slots = prizeSlots(data.event.config,gId);
+      assert.equal(slots.length,13);
+      await pool.query(
+        "UPDATE four_graves_events SET state='BUTTONS_ACTIVE',deadline=clock_timestamp()-interval '1 second' WHERE id=$1",
+        [ev.id],
+      );
+      await pool.query(
+        "UPDATE four_graves_graves SET decision=$3::jsonb,reveal_stage=3,next_draw_at=NULL " +
+          "WHERE event_id=$1 AND grave_id=$2",
+        [ev.id,gId,JSON.stringify({user_id:"10",choice:"TRICK",generation:1})],
+      );
+      async function saveAward(index) {
+        const ticket=participants[(index-1)%participants.length];
+        const prize=slots[index-1];
+        await pool.query(
+          "INSERT INTO four_graves_awards(" +
+          "event_id,grave_id,prize_index,prize_name,prize_unit," +
+          "winner_discord_id,winner_display_name,ticket_entry_id,pass_number," +
+          "message_id,announced_at) " +
+          "VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,$9,clock_timestamp())",
+          [ev.id,gId,index,prize.name,prize.unit,ticket.discord_id,
+            ticket.discord_id==="10"?"Player 1":"Player 2",
+            ticket.id,"mock-grave-prize-message-"+index],
+        );
+      }
+      for(let n=1;n<slots.length;n++) await saveAward(n);
+      await runner.reconcile(await current());
+      assert.equal((await channel.messages.fetch({})).size,5,
+        "No recap while the last award has not been drawn and announced");
+      assert.equal((await current()).rewards_published_at,null);
+
+      await saveAward(slots.length);
+      await pool.query(
+        "UPDATE four_graves_graves SET draw_completed_at=clock_timestamp() " +
+          "WHERE event_id=$1 AND grave_id=$2", [ev.id,gId],
+      );
+      await runner.reconcile(await current());
+      const finished = await current();
+      assert.equal(finished.state,"REVEALED");
+      assert.ok(finished.rewards_published_at);
+      assert.ok(finished.rewards_download_message_id);
+
+      const publicMessages=[...(await channel.messages.fetch({})).values()];
+      const pages=publicMessages.filter(m=>m.embeds.some(x=>
+        /:rewards:page:/.test(x.footer?.text || "")));
+      assert.equal(pages.length,1);
+      assert.match(pages[0].embeds[0].title,/UGLY HALLOWEEN REWARDS/);
+      assert.match(pages[0].embeds[0].description,/Player 1 —/);
+      assert.match(pages[0].embeds[0].description,/Player 2 —/);
+      assert.deepEqual(pages[0].allowedMentions,{parse:[]});
+      const csvMessage = await channel.messages.fetch(finished.rewards_download_message_id);
+      assert.ok(csvMessage.attachments.some(a=>a.name===CSV_FILENAME));
+      assert.equal(csvMessage.embeds[0].footer.text,
+        "four-graves:"+ev.id+":rewards:download");
+      const attachment=[...csvMessage.attachments.values()].find(a=>a.name===CSV_FILENAME);
+      const csvText=attachment.attachment.toString("utf8");
+      assert.match(csvText,/Player 1/);
+      assert.match(csvText,/Player 2/);
+      assert.match(csvText,/\$CHARM/);
+      assert.deepEqual(csvMessage.allowedMentions,{parse:[]});
+      assert.equal(publicMessages.length,7,"Selection + four rosters + recap + CSV");
+      assert.equal(publicMessages.at(-1).id,csvMessage.id,
+        "Download must follow the last recap panel");
+      const rows=(await pool.query(
+        "SELECT page_index,message_id FROM four_graves_reward_summary_pages WHERE event_id=$1",
+        [ev.id],
+      )).rows;
+      assert.deepEqual(rows.map(x=>x.page_index),[0]);
+      assert.equal(rows[0].message_id,pages[0].id);
+      assert.equal((await s.read(guildId)).awards.length,13,
+        "No original prize records may be mutated by summary publication");
+
+      // Rebuilding the worker or losing only the final published timestamp
+      // adopts its saved message IDs and MUST NOT send duplicate public posts.
+      await runner.reconcile(await current());
+      assert.equal((await channel.messages.fetch({})).size,7);
+      await pool.query(
+        "UPDATE four_graves_events SET rewards_published_at=NULL WHERE id=$1",
+        [ev.id],
+      );
+      const restarted = new FourGravesDiscord(new FourGravesStore(pool),mocked.deps);
+      await restarted.reconcile(await current());
+      assert.ok((await current()).rewards_published_at);
+      assert.equal((await channel.messages.fetch({})).size,7);
+      assert.equal((await current()).rewards_download_message_id,csvMessage.id);
+      const audits = (await pool.query(
+        "SELECT * FROM four_graves_audit WHERE event_id=$1 AND action='public-rewards-summary-published'",
+        [ev.id],
+      )).rows;
+      assert.equal(audits.length,2,"One publication record for each explicit state transition");
+    });
     console.log(
       `${count} database tests passed (${embedded ? "embedded PostgreSQL; pooled concurrency requires server suite" : "PostgreSQL server with concurrent pooled connections"}).`,
     );

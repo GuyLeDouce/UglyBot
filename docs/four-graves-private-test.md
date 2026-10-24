@@ -77,3 +77,7 @@ The private TEST event uses the same spooky, spoiler-free selection panel text a
 Each panel displays **one row per fictional participant and their pooled ticket count**, such as `Test Participant 01 — 5 tickets`. All five actual fake ticket entries remain available individually for simulated prize draws. New TEST burials update the relevant panel in place and never create duplicate boards; the other panels stay in place. Private View buttons list 20 participants per page if needed.
 
 The full TEST rosters and their stored message IDs are separate from live event data. TEST mode does not tag anyone, access real October claims or expose unrevealed prize pools.
+
+## Final TEST Halloween Rewards announcement
+
+After all populated synthetic grave rooms have chosen TRICK/TREAT and every one of their simulated prize announcements has completed, the same automated final **🧪 TEST ONLY — UGLY HALLOWEEN REWARDS** recap appears in the private original TEST control channel. It aggregates a synthetic player's prizes across graves in one line and posts numbered additional panels if needed. A `Ugly_Halloween_Rewards.csv` attachment follows the final panel and can be downloaded. This uses only the fake event's awards; TEST messages contain no @everyone ping and no prize transfer or actual October claim changes. The TEST reset removes only marked test data; its already-sent Discord messages remain subject to the guarded TEST channel cleanup.

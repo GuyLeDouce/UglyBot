@@ -72,3 +72,17 @@ CREATE TABLE IF NOT EXISTS four_graves_awards (
 -- Per-grave UI metadata only: tickets, allocations, winners and pools unchanged.
 ALTER TABLE four_graves_graves
  ADD COLUMN IF NOT EXISTS roster_message_id TEXT;
+
+-- A single final public recap is posted only after every populated grave
+-- announces every prize. Each message has a stable page index and footer
+-- marker; recovery adopts existing pages and never posts duplicate winners.
+ALTER TABLE four_graves_events
+ ADD COLUMN IF NOT EXISTS rewards_download_message_id TEXT,
+ ADD COLUMN IF NOT EXISTS rewards_published_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS four_graves_reward_summary_pages (
+ event_id BIGINT NOT NULL REFERENCES four_graves_events(id),
+ page_index INTEGER NOT NULL CHECK (page_index >= 0),
+ message_id TEXT,
+ PRIMARY KEY(event_id, page_index)
+);
