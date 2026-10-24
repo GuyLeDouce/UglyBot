@@ -8,10 +8,7 @@ const {
 const { GRAVES, prizePoolForGrave, PANEL_IMAGE_URL, PANEL_INDICES } = require("./fourGravesCore");
 const { rosterPanel } = require("./fourGravesRoster");
 const { choiceAnnouncement, winnerAnnouncement } = require("./fourGravesDraw");
-const {
-  readyForPublicRewards, rewardSummaryPages, rewardDownloadMessage,
-  CSV_FILENAME,
-} = require("./fourGravesRewards");
+const { readyForPublicRewards, rewardSummaryPages, CSV_FILENAME } = require("./fourGravesRewards");
 const button = (custom_id, label, disabled = false, style = 2) => ({
   type: 2,
   custom_id,
@@ -645,11 +642,23 @@ class FourGravesDiscord {
           "AND (g.decision IS NULL OR g.draw_completed_at IS NULL))",
         [e.id],
       );
-    // The public Halloween recap is published only when every populated
-    // grave has announced every winner. Empty graves do not block it.
-    // A summary failure is isolated from private channels and their draw logic.
-    if (e.closed_at && e.panel_channel_id && !e.rewards_published_at &&
-        graves.some(g => g.draw_completed_at)) {
+    // Upgrade any previously published PUBLIC CSV from PR #27 to the new
+    // ADMIN-ONLY delivery. A public Discord post can never be made private
+    // by hiding its button, so delete only the verified legacy bot message.
+    let publicFileRemoved = true;
+    if (e.closed_at && e.panel_channel_id) {
+      try {
+        await this.removeLegacyPublicRewardsDownload(guild, e);
+      } catch (err) {
+        publicFileRemoved = false;
+        await this.store.operation(e.id, "legacy-public-download-cleanup", diagnosticError(err));
+        this.logFailure("legacy-public-download-cleanup", e.id, err);
+      }
+    }
+    // The PUBLIC recap contains winners/prizes only — no wallet addresses,
+    // CSV attachment, download button or separate download panel.
+    if (publicFileRemoved && e.closed_at && e.panel_channel_id &&
+        !e.rewards_published_at && graves.some(g => g.draw_completed_at)) {
       try {
         const completed = await this.store.read(e.guild_id);
         if (readyForPublicRewards(completed))
@@ -660,6 +669,69 @@ class FourGravesDiscord {
         this.logFailure("rewards-summary", e.id, err);
       }
     }
+  }
+  async removeLegacyPublicRewardsDownload(guild, e) {
+    if (!e.panel_channel_id) return;
+    // Previously deployed PR #27 posted the CSV publicly. Confirm whether
+    // it was attempted for this exact event, including when a crash happened
+    // between sending a public file and saving its message ID.
+    const oldAttempt = (await this.store.pool.query(
+      "SELECT operation_key FROM four_graves_operations " +
+      "WHERE event_id=$1 AND operation_key='rewards:download'",
+      [e.id],
+    )).rows[0];
+    if (!oldAttempt && !e.rewards_download_message_id) return;
+    const alreadyClean = (await this.store.pool.query(
+      "SELECT completed_at FROM four_graves_operations " +
+      "WHERE event_id=$1 AND operation_key='legacy-public-download-cleanup'",
+      [e.id],
+    )).rows[0];
+    if (alreadyClean?.completed_at && !e.rewards_download_message_id) return;
+
+    const channel = guild.channels.cache.get(e.panel_channel_id) ||
+      await guild.channels.fetch(e.panel_channel_id);
+    if (!channel || channel.guildId !== e.guild_id ||
+        channel.type !== ChannelType.GuildText)
+      throw Error("Cannot clear old public CSV: original selection channel unavailable.");
+    const marker = "four-graves:" + e.id + ":rewards:download";
+    let old = null;
+    if (e.rewards_download_message_id) {
+      try {
+        old = await channel.messages.fetch(e.rewards_download_message_id);
+      } catch (err) {
+        if (Number(err.code) !== 10008) throw err;
+      }
+      // Refuse to delete a message if the saved ID now points somewhere else.
+      if (old && (old.author?.id !== this.deps.client.user.id ||
+          !old.embeds?.some(x => x.footer?.text === marker)))
+        throw Error("Public CSV message identity mismatch; administrator review required.");
+    }
+    // Search only when the saved message ID is absent or was already deleted.
+    if (!old) {
+      let before;
+      for (let page=0;page<10;page++) {
+        const batch = await channel.messages.fetch({
+          limit: 100, ...(before ? {before} : {}),
+        });
+        old = [...batch.values()].find(m =>
+          m.embeds?.some(x => x.footer?.text === marker));
+        if (old || batch.size < 100) break;
+        before = batch.last()?.id;
+        if (!before) break;
+      }
+    }
+    if (old) {
+      if (old.author?.id !== this.deps.client.user.id ||
+          !old.embeds?.some(x => x.footer?.text === marker))
+        throw Error("Unexpected public CSV message; refusing deletion.");
+      await old.delete();
+    }
+    await this.store.pool.query(
+      "UPDATE four_graves_events SET rewards_download_message_id=NULL " +
+      "WHERE id=$1 AND event_key=$2",
+      [e.id,this.store.eventKey],
+    );
+    await this.store.operation(e.id, "legacy-public-download-cleanup");
   }
   async publishRewardSummary(guild, data) {
     const e = data.event;
@@ -698,22 +770,8 @@ class FourGravesDiscord {
       );
     }
 
-    // Post the CSV only AFTER all summary pages. The published marker is not
-    // committed unless Discord confirms a message with the actual attachment.
-    const download = await this.message(
-      e, channel, e.rewards_download_message_id, "rewards:download",
-      rewardDownloadMessage(data),
-      message => this.store.pool.query(
-        "UPDATE four_graves_events SET rewards_download_message_id=$2 " +
-          "WHERE id=$1",
-        [e.id, message.id],
-      ),
-    );
-    const attached = download.attachments &&
-      [...download.attachments.values()].some(a => a.name === CSV_FILENAME);
-    if (!attached)
-      throw Error("Final rewards message has no downloadable winner CSV.");
-
+    // PUBLIC posting ends with the final summary page. Verified-wallet CSV
+    // downloads are created ONLY on explicit admin interactions, ephemerally.
     const updated = await this.store.pool.query(
       "UPDATE four_graves_events SET rewards_published_at=clock_timestamp() " +
         "WHERE id=$1 AND event_key=$2 AND state='REVEALED' AND " +
@@ -722,7 +780,7 @@ class FourGravesDiscord {
     );
     if (updated.rowCount) await this.store.audit(
       this.store.pool, e.id, "AUTO_DRAW", "public-rewards-summary-published",
-      { pages: pages.length, downloadMessageId: download.id },
+      { pages: pages.length, adminOnlyDownload: true },
     );
   }
   async tick() {
