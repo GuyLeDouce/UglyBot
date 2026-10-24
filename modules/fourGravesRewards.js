@@ -92,12 +92,19 @@ function aggregateRewards({ event, snapshot, awards }) {
       (duplicate ? " [User " + row.discordId + "]" : "");
     const prizes = [...row.items.entries()].map(([name, quantity]) =>
       (quantity > 1 ? quantity + " × " : "") + escapeDiscord(name));
-    if (row.charm) prizes.push(row.charm.toLocaleString("en-US") + " $CHARM");
+    const csvPrizes = [...row.items.entries()].map(([name, quantity]) =>
+      (quantity > 1 ? quantity + " × " : "") + name);
+    if (row.charm) {
+      prizes.push(row.charm.toLocaleString("en-US") + " $CHARM");
+      csvPrizes.push(row.charm.toLocaleString("en-US") + " $CHARM");
+    }
     return {
       discordId: row.discordId,
       label,
+      csvLabel: row.name + (duplicate ? " [User " + row.discordId + "]" : ""),
       prizesWon: row.prizesWon,
       prizes,
+      csvPrizes,
       graves: [...row.graveNames],
     };
   });
@@ -161,9 +168,9 @@ function rewardsCsv(data) {
   return csv(
     ["Player", "Prizes Won", "Rewards", "Graves"],
     rows.map(p => [
-      p.label.replaceAll("@\u200b", "@"),
+      p.csvLabel,
       p.prizesWon,
-      p.prizes.join("; ").replaceAll("@\u200b", "@"),
+      p.csvPrizes.join("; "),
       p.graves.join("; "),
     ]),
   );
