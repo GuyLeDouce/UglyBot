@@ -5,6 +5,9 @@ const { FourGravesDiscord, button, row, cid, getGuildMemberRoster } = require(".
 const { prizeWinnerCsv } = require("./fourGravesDraw");
 const { rosterPage } = require("./fourGravesRoster");
 const {
+  readyForPublicRewards, adminRewardsPanel, adminRewardsCsv, CSV_FILENAME,
+} = require("./fourGravesRewards");
+const {
   GRAVES,
   quantity,
   exportFiles,
@@ -81,6 +84,10 @@ function buildSlashCommand() {
         ),
     )
     .addSubcommand((s) =>
+      s.setName("rewards")
+       .setDescription("Admin: private Halloween winner list and verified wallet download"),
+    )
+    .addSubcommand((s) =>
       s
         .setName("export")
         .setDescription("Admin: private contestant exports")
@@ -127,6 +134,7 @@ function controls(e) {
     ["repair", "RECONCILE ROLES"],
     ["refresh", "REFRESH PANELS"],
     ["retry-resources", "RETRY UNCERTAIN CREATES"],
+    ...(e.state === "REVEALED" ? [["rewards", "HALLOWEEN REWARDS"]] : []),
   ];
   return {
     content:
@@ -135,7 +143,10 @@ function controls(e) {
       row(
         ...actions.slice(0, 5).map(([a, l]) => button(cid(e, "admin", a), l)),
       ),
-      row(...actions.slice(5).map(([a, l]) => button(cid(e, "admin", a), l))),
+      row(...actions.slice(5,10).map(([a, l]) => button(cid(e, "admin", a), l))),
+      ...(actions.length > 10 ? [
+        row(...actions.slice(10).map(([a,l]) => button(cid(e,"admin",a),l)))
+      ] : []),
     ],
   };
 }
@@ -223,6 +234,51 @@ function validatePatch(input) {
   }
   return patch;
 }
+// Discord ephemeral messages are the only way to make the download PANEL
+// AND the actual button invisible to non-admins in a public channel.
+// Every interaction is authenticated again at click time.
+async function showAdminRewards(i) {
+  admin(i);
+  const data = await store.read(i.guildId);
+  if (!readyForPublicRewards(data))
+    return reply(i, "🔒 The Halloween winner list is not ready. Every populated grave must finish and announce all of its prizes first.");
+  return reply(i,adminRewardsPanel(data));
+}
+async function downloadAdminRewards(i) {
+  admin(i);
+  const data = await store.read(i.guildId);
+  if (!readyForPublicRewards(data))
+    throw Error("The complete Halloween winner list is not yet finalized.");
+  const csvText = await adminRewardsCsv(data,i.guildId,deps.getWalletLinks);
+  const bytes = Buffer.from(csvText,"utf8");
+  const limit = i.attachmentSizeLimit || 8 * 1024 * 1024;
+  if (bytes.length <= limit) {
+    await reply(i,{
+      content:"🔒 **ADMIN ONLY — Ugly Halloween Rewards**\n" +
+        "Private export: all recorded winners, combined prizes and currently linked verified wallet(s). " +
+        "Check unverified or missing addresses before delivering rewards.",
+      files:[{attachment:bytes,name:CSV_FILENAME}],
+      components:[],
+      allowedMentions:{parse:[]},
+    });
+  } else {
+    const parts = privateArchives({[CSV_FILENAME]:csvText},limit);
+    await reply(i,{
+      content:"🔒 **ADMIN ONLY — Ugly Halloween Rewards**\n" +
+        "The wallet winner list exceeds the Discord attachment limit; download these private ZIP part(s).",
+      files:[parts[0]],
+      components:[],
+      allowedMentions:{parse:[]},
+    });
+    for(const part of parts.slice(1))
+      await i.followUp({files:[part],flags:64,allowedMentions:{parse:[]}});
+  }
+  // Audit the admin actor and export intent ONLY, never wallet addresses.
+  await store.audit(store.pool,data.event.id,i.user.id,"private-final-rewards-download",{
+    winners: data.awards.length, verifiedWalletLookup: true,
+  });
+}
+
 async function exportsReply(i, grave = "all", format = "all") {
   admin(i);
   const { event, snapshot, awards } = await store.read(i.guildId);
@@ -354,6 +410,7 @@ async function adminAction(i, e, action, confirmed = false) {
     return;
   }
   if (action === "export") return exportsReply(i);
+  if (action === "rewards") return showAdminRewards(i);
   if (action === "status")
     return reply(i, status(await store.read(i.guildId), true));
   if (action === "setup") await store.setup(i.guildId, i.user.id);
@@ -390,6 +447,8 @@ async function handle(i) {
         await reply(i, controls(e));
       } else if (sub === "status")
         await reply(i, status(await store.read(i.guildId), deps.isAdmin(i)));
+      else if (sub === "rewards")
+        await showAdminRewards(i);
       else if (sub === "export")
         await exportsReply(
           i,
@@ -466,6 +525,11 @@ async function handle(i) {
       e = data.event;
     if (String(e.id) !== eventId)
       throw Error("This panel belongs to another event.");
+    if (action === "admin-rewards-download") {
+      admin(i);
+      await downloadAdminRewards(i);
+      return true;
+    }
     if (action === "roster") {
       if (i.channelId !== e.panel_channel_id)
         throw Error("Open this roster from the Four Graves selection channel.");
