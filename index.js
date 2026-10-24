@@ -7701,7 +7701,7 @@ bountyVault.initBountyVault({
   squigsChain: SQUIGS_CHAIN,
 });
 
-fourGraves.initFourGraves({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds, postAdminSystemLog });
+fourGraves.initFourGraves({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds, getWalletLinks, postAdminSystemLog });
 fourGravesTest.init({ client, pool: prizesPool, isAdmin, adminIds: getDefaultAdminIds });
 
 trickOrTreat.initTrickOrTreat({
