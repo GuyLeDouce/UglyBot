@@ -1,7 +1,7 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
-const { randomUUID } = require("crypto");
+const { randomUUID, randomInt } = require("crypto");
 const { prizeSlots } = require("./fourGravesCore");
 const { pickNextTicket } = require("./fourGravesDraw");
 const {
@@ -291,7 +291,31 @@ class FourGravesStore {
         if (!this.testMode) await c.query(
           "LOCK TABLE trick_or_treat_treats,trick_or_treat_tricks IN SHARE MODE",
         );
+        // Atomic, restart-safe distribution of all remaining earned tickets.
+        // The event row is locked by this transaction.
+        const before = await this.snapshot(c, e, identities);
+        for (const u of before.users) {
+          const remaining = u.total - u.allocated;
+          if (!remaining) continue;
+          const counts = Array(GRAVES.length).fill(0);
+          for (let n = 0; n < remaining; n++) counts[randomInt(GRAVES.length)]++;
+          for (let gi = 0; gi < counts.length; gi++) {
+            if (!counts[gi]) continue;
+            const grave = GRAVES[gi];
+            await c.query(
+              "INSERT INTO four_graves_allocations(event_id,grave_id,discord_id,username,display_name,quantity,idempotency_key,source_counts) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+              [e.id, grave.id, u.discord_id, u.username, u.display_name, counts[gi],
+               "auto-close:" + e.id + ":" + u.discord_id + ":" + grave.id,
+               JSON.stringify({ automated: true, remainingBeforeClose: remaining })],
+            );
+          }
+          await this.audit(c, e.id, "AUTO_CLOSE", "auto-distribute", {
+            discord_id: u.discord_id, quantity: remaining, grave_counts: counts,
+          });
+        }
         const s = await this.snapshot(c, e, identities);
+        if (s.users.some(u => u.total !== u.allocated))
+          throw Error("Ticket reconciliation failed; close rolled back.");
         await c.query(
           "UPDATE four_graves_events SET state='CLOSED_COUNTDOWN',closed_at=clock_timestamp(),deadline=clock_timestamp()+interval '15 minutes',generation=generation+1,snapshot=$2,snapshot_hash=$3,snapshot_id=$4 WHERE id=$1",
           [e.id, JSON.stringify(s), hash(s), randomUUID()],

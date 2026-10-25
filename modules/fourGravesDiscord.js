@@ -804,6 +804,23 @@ class FourGravesDiscord {
             )
           ).rows[0].locked;
           if (!locked) continue;
+          // Ontario clock time, accounting for the November 1 DST change.
+          if (!this.store.testMode) {
+            const now = Date.now();
+            const opens = Date.parse("2026-10-30T09:00:00-04:00");
+            const closes = Date.parse("2026-11-01T19:00:00-05:00");
+            const scheduled = (await c.query(
+              "SELECT * FROM four_graves_events WHERE id=$1", [event.id],
+            )).rows[0];
+            if (scheduled?.state === "SETUP" && now >= opens && now < closes) {
+              if (!scheduled.panel_channel_id)
+                throw Error("Scheduled opening needs a configured panel channel.");
+              await this.store.transition(scheduled.guild_id, "AUTO_SCHEDULE", "open");
+            }
+            if (scheduled?.state === "OPEN" && now >= closes) {
+              await this.store.transition(scheduled.guild_id, "AUTO_SCHEDULE", "close");
+            }
+          }
           // Row lock makes generation/deadline changes atomic with countdown completion.
           await c.query(
             "UPDATE four_graves_events SET state='BUTTONS_ACTIVE' WHERE id=$1 AND state='CLOSED_COUNTDOWN' AND deadline<=clock_timestamp()",
