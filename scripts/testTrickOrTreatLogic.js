@@ -110,8 +110,23 @@ try {
   let admin = true;
   let participants = [{ discord_id: '123', treats: 3, tricks: 50 }];
   let aggregateCalls = 0;
+  let walletCalls = 0;
+  let walletFailure = false;
   tot.initTrickOrTreat({
     isAdmin: () => admin,
+    getWalletLinks: async (guildId, discordId) => {
+      walletCalls++;
+      assert.strictEqual(guildId, 'guild-test');
+      if (walletFailure) throw new Error('wallet DB unavailable');
+      return discordId === '123' ? [
+        { wallet_address: walletB, verified: true },
+        { wallet_address: walletA, verified: true },
+        { wallet_address: walletA.toUpperCase().replace('0X', '0x'), verified: true },
+        { wallet_address: '0x' + 'c'.repeat(40), verified: false },
+        { wallet_address: '0x' + 'd'.repeat(40) },
+        { wallet_address: '=bad', verified: true },
+      ] : [];
+    },
     pool: { query: async (sql, params) => {
       if (sql.includes('WITH users AS')) {
         aggregateCalls++;
@@ -151,7 +166,7 @@ try {
   assert.deepStrictEqual(click.calls[0], ['defer', { flags: 64 }]);
   const file = click.calls[1][1].files[0];
   assert.strictEqual(file.name, 'trick-or-treat-entries.csv');
-  assert.strictEqual(file.attachment.toString(), "discord_name,treats,tricks,total_entries\n\"Guy, the Ugly\",4,50,54\n'=badformula,0,2,2");
+  assert.strictEqual(file.attachment.toString(), `discord_name,treats,tricks,total_entries,wallet_addresses\n"Guy, the Ugly",4,50,54,${walletA}; ${walletB}\n'=badformula,0,2,2,`);
   assert.strictEqual(aggregateCalls, 2, 'download refreshes counts after status');
   const directExport = interaction('export');
   await tot.handleCommand(directExport);
@@ -160,26 +175,33 @@ try {
   const denied = interaction();
   denied.customId = customId;
   const beforeDenied = aggregateCalls;
+  const walletsBeforeDenied = walletCalls;
   assert.strictEqual(await tot.handleButton(denied), true);
   assert.deepStrictEqual(denied.calls, [['reply', { content: 'Admin only.', flags: 64 }]]);
   assert.strictEqual(aggregateCalls, beforeDenied, 'unauthorized clicks never query participant data');
+  assert.strictEqual(walletCalls, walletsBeforeDenied, 'unauthorized clicks never query wallets');
   admin = true;
   const unavailable = interaction();
   unavailable.customId = customId;
   unavailable.guild = null;
   unavailable.client = { users: { fetch: async () => { throw new Error('Discord unavailable'); } } };
   await tot.handleButton(unavailable);
-  assert(unavailable.calls[1][1].files[0].attachment.toString().includes('Unknown user (123),4,50,54'));
+  assert(unavailable.calls[1][1].files[0].attachment.toString().includes('Unknown user (123),4,50,54,' + walletA + '; ' + walletB));
   const sameNames = interaction();
   sameNames.customId = customId;
   sameNames.guild = { members: { fetch: async () => ({ displayName: 'Émile 🦆' }) } };
   await tot.handleButton(sameNames);
-  assert.strictEqual(sameNames.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries\nÉmile 🦆,4,50,54\nÉmile 🦆,0,2,2');
+  assert.strictEqual(sameNames.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries,wallet_addresses\nÉmile 🦆,4,50,54,' + walletA + '; ' + walletB + '\nÉmile 🦆,0,2,2,');
+  walletFailure = true;
+  const failed = interaction('export');
+  await assert.rejects(() => tot.handleCommand(failed), /wallet DB unavailable/);
+  assert.strictEqual(failed.calls.length, 1, 'lookup failure must not send a misleading CSV');
+  walletFailure = false;
   participants = [];
   const empty = interaction();
   empty.customId = customId;
   await tot.handleButton(empty);
-  assert.strictEqual(empty.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries');
+  assert.strictEqual(empty.calls[1][1].files[0].attachment.toString(), 'discord_name,treats,tricks,total_entries,wallet_addresses');
 
   console.log('Trick or Treat logic and status download tests passed.');
 } finally {

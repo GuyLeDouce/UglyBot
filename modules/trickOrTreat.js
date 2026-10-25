@@ -917,18 +917,29 @@ function csvName(name) {
   return /^\s*[=+@-]/.test(text) ? "'" + text : text;
 }
 
+async function participantWallets(guildId, discordId) {
+  const links = await deps.getWalletLinks(guildId, discordId);
+  if (!Array.isArray(links)) throw new Error('Wallet lookup returned invalid records.');
+  // Export current verified links only, never detached event-history wallets.
+  return [...new Set(links.filter(link => link?.verified === true)
+    .map(link => normalizeAddress(link.wallet_address)).filter(Boolean))].sort().join('; ');
+}
+
 async function exportEntries(interaction) {
   await interaction.deferReply({ flags: EPHEMERAL });
   await ensureTables();
   const rows = await aggregateEntries(interaction.guildId);
-  const lines = ['discord_name,treats,tricks,total_entries'];
+  const lines = ['discord_name,treats,tricks,total_entries,wallet_addresses'];
   // Bound REST concurrency; never require a full guild-member fetch or privileged intent.
   for (let i = 0; i < rows.length; i += 5) {
     const batch = rows.slice(i, i + 5);
-    const names = await Promise.all(batch.map(r => participantName(interaction, r.discordId)));
+    const participants = await Promise.all(batch.map(async r => ({
+      name: await participantName(interaction, r.discordId),
+      wallets: await participantWallets(interaction.guildId, r.discordId),
+    })));
     for (let j = 0; j < batch.length; j++) {
       const r = batch[j];
-      lines.push([csvName(names[j]), r.treats, r.tricks, r.entries].map(csvEscape).join(','));
+      lines.push([csvName(participants[j].name), r.treats, r.tricks, r.entries, participants[j].wallets].map(csvEscape).join(','));
     }
   }
   const file = new AttachmentBuilder(Buffer.from(lines.join('\n'), 'utf8'), { name: 'trick-or-treat-entries.csv' });
