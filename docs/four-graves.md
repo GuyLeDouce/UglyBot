@@ -167,3 +167,10 @@ If Railway logs show **Request with opcode 8 was rate limited**, the cause is re
 **Rollout:** Merge the rate-limit hotfix PR manually, redeploy the existing UglyBot, and verify the old opcode-8 errors stop. Keep FOUR_GRAVES_ENABLED unchanged. If the private rehearsal is not in use, set FOUR_GRAVES_TEST_ENABLED=false temporarily to reduce unnecessary work. Discord requires Server Members Intent to list guild members.
 
 **Verification:** GitHub's Four Graves check now runs test:four-graves-member-roster, which validates cache sharing, HTTP pagination, guild join/leave updates, blocked-request cooldown, and no gateway member fetch on OPEN/SETUP. Production Discord HTTP and permissions behavior still requires post-deployment confirmation.
+
+
+## Ontario 2026 automated schedule
+
+For LIVE Four Graves only: configured SETUP graves open October 30 at 9 AM Ontario time (EDT, UTC-4); OPEN graves close November 1 at 7 PM Ontario time (EST, UTC-5). The polling worker catches up after restarts. The public panel channel must be configured before opening, and FOUR_GRAVES_ENABLED must be true. Manual announcements are not automated.
+
+At close, the existing event-row transaction locks the event, randomly distributes all remaining earned tickets across the four graves, audits each user's automatic distribution, verifies every earned ticket is allocated, and atomically freezes the snapshot before the existing 15-minute countdown. Existing player choices are preserved. Failure rolls back the entire close. Claims independently end October 31 at 11:59:59 PM Ontario time by the existing default TRICK_OR_TREAT_END_AT=2026-10-31T23:59:59-04:00; deployed overrides must be checked separately.
