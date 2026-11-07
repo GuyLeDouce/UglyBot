@@ -1037,6 +1037,10 @@ function buildSlashCommands() {
       .setDescription('Post the public holder rewards menu in this channel')
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('mydrip')
+      .setDescription('Privately show your saved DRIP ID')
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('dripid')
       .setDescription('Privately show your DRIP member ID for easy copy/paste')
       .toJSON(),
@@ -7799,6 +7803,19 @@ client.on('interactionCreate', async (interaction) => {
           components: [rewardsButtons()],
         });
         await interaction.reply({ content: 'Rewards menu launched.', flags: 64 });
+        return;
+      }
+
+      if (interaction.commandName === 'mydrip') {
+        await interaction.deferReply({ flags: 64 });
+        const links = await getWalletLinks(interaction.guild.id, interaction.user.id);
+        const dripMemberId = collectUniqueDripMemberIds(links.map((link) => link?.drip_member_id))[0];
+        await interaction.editReply({
+          content: dripMemberId
+            ? `Your DRIP ID: \`${dripMemberId}\``
+            : 'No DRIP ID is saved for you yet. Go to <#1524077509384212583> and claim your free $CHARM, then hit **Refresh Verification** in <#1476967108062740622> and try `/mydrip` again.',
+          allowedMentions: { parse: [] },
+        });
         return;
       }
 
