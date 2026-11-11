@@ -88,6 +88,7 @@ const duels = new Map();
 const activeUserToDuel = new Map();
 const pendingSquigSelections = new Map();
 const pendingSquigViews = new Map();
+const pendingDuelDefaults = new Map();
 const pendingMySquigProfiles = new Map();
 let squigUglyPointsByToken = null;
 
@@ -159,6 +160,39 @@ function loadSquigUglyPoints() {
 function initSquigDuels(injectedDeps) {
   deps = injectedDeps;
   loadSquigUglyPoints();
+  const refresh = () => refreshDuelLobbyPanels().catch(err => {
+    console.warn('[SquigDuels] lobby refresh failed:', String(err?.message || err));
+  });
+  if (deps.client?.isReady?.()) refresh();
+  else deps.client?.once?.('clientReady', refresh);
+}
+
+async function refreshDuelLobbyPanels() {
+  // Existing duel records identify the lobby channels; edit only this bot's menus.
+  const { rows } = await deps.historyPool.query(
+    'SELECT DISTINCT guild_id, channel_id FROM squig_duels ORDER BY guild_id, channel_id LIMIT 50'
+  );
+  let updated = 0;
+  for (const row of rows) {
+    const channel = await deps.client.channels.fetch(row.channel_id).catch(() => null);
+    if (!channel?.messages || String(channel.guildId) !== String(row.guild_id)) continue;
+    const recent = await channel.messages.fetch({ limit: 100 }).catch(() => new Map());
+    const pinned = await channel.messages.fetchPinned().catch(() => new Map());
+    const messages = new Map([...recent, ...pinned]);
+    for (const message of messages.values()) {
+      if (message.author?.id !== deps.client.user.id) continue;
+      const buttons = message.components.flatMap(row => row.components || []);
+      if (!buttons.some(button => button.customId === 'sd:start')) continue;
+      if (buttons.some(button => button.customId === 'sd:set_squig')) continue;
+      try {
+        await message.edit({ embeds: [buildMenuEmbed()], components: [buildMenuRow()] });
+        updated++;
+      } catch (err) {
+        console.warn('[SquigDuels] lobby panel edit failed:', String(err?.message || err));
+      }
+    }
+  }
+  console.log(`[SquigDuels] Set Squig lobby refresh: ${updated} panel(s) updated.`);
 }
 
 function assertReady() {
@@ -210,6 +244,15 @@ async function ensureSquigDuelSchema(pool) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (guild_id, user_id, token_id)
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS squig_duel_defaults (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      token_id TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
     );
   `);
   await pool.query(`
@@ -463,7 +506,10 @@ function squigSelectionLimitLine(duel, side, hiddenCount = 0) {
 }
 
 function squigSelectionContent(duel, side, hiddenCount = 0, extra = '') {
-  const lines = ['Choose your Squig Fighter!'];
+  const temporary = side === 'opponent' && duel.temporaryOpponentSquig;
+  const lines = [temporary
+    ? 'Choose a Squig for this challenge only. Your saved Duel Squig will not change.'
+    : 'Choose your Squig Fighter! Confirming also saves it for future duels. Change it later with Set Squig in the lobby.'];
   const limitLine = squigSelectionLimitLine(duel, side, hiddenCount);
   if (limitLine) lines.push(limitLine);
   if (extra) lines.push(extra);
@@ -522,7 +568,7 @@ function randomId() {
 }
 
 function activeStatuses() {
-  return new Set(['setup', 'awaiting_accept', 'awaiting_ready', 'active']);
+  return new Set(['setup', 'awaiting_accept', 'awaiting_fighter', 'awaiting_ready', 'active']);
 }
 
 function registerActiveUser(userId, duelId) {
@@ -1056,7 +1102,8 @@ function buildMenuEmbed() {
     .setTitle('Squig Duels')
     .setColor(0xd4a43b)
     .setDescription(
-      'Start a duel, pick your Squig, and battle for $CHARM.\n' +
+      'Use Set Squig to choose your fighter, then Start Duel to battle for $CHARM.\n' +
+      'Your fighter is saved for future duels until you change it with Set Squig.\n' +
       'Open Challenge - anyone can join the battle.\n' +
       'Choose Opponent - challenge any holder directly.\n' +
       'You must have enough $CHARM to wager.\n\n' +
@@ -1070,8 +1117,112 @@ function buildMenuEmbed() {
     .setFooter({ text: 'Attack, Defend, Heal, or Panic.' });
 }
 
+const SET_SQUIG_HELP = 'Use **Set Squig** in the lobby to choose your Duel Squig. It will be used in future games until you change it through **Set Squig** again. Once saved, try **Start Duel** again.';
+
+async function getDuelDefault(guildId, userId) {
+  if (!deps?.historyPool?.query) throw new Error('Duel Squig storage is unavailable.');
+  const { rows } = await deps.historyPool.query(
+    'SELECT token_id FROM squig_duel_defaults WHERE guild_id = $1 AND user_id = $2',
+    [String(guildId), String(userId)]
+  );
+  return rows[0]?.token_id ? String(rows[0].token_id) : null;
+}
+
+async function saveDuelDefault(guildId, userId, tokenId) {
+  if (!deps?.historyPool?.query) throw new Error('Duel Squig storage is unavailable.');
+  await deps.historyPool.query(
+    `INSERT INTO squig_duel_defaults (guild_id, user_id, token_id) VALUES ($1, $2, $3)
+     ON CONFLICT (guild_id, user_id) DO UPDATE SET token_id = EXCLUDED.token_id, updated_at = NOW()`,
+    [String(guildId), String(userId), String(tokenId)]
+  );
+}
+
+function defaultPickerPayload(state) {
+  const rows = buildSquigSelectRows(state.id, 'challenger', state.squigs, state.page, state.selectedTokenId);
+  for (const row of rows) {
+    for (const component of row.components) {
+      component.setCustomId(component.data.custom_id
+        .replace('sd:select:', 'sd:set_select:')
+        .replace('sd:select_page:', 'sd:set_page:')
+        .replace('sd:fighter_ready:', 'sd:set_save:')
+        .replace('sd:cancel_fight:', 'sd:set_cancel:'));
+      if (component.data.custom_id.startsWith('sd:set_save:')) component.setLabel('Save Squig');
+      if (component.data.custom_id.startsWith('sd:set_cancel:')) component.setLabel('Cancel');
+    }
+  }
+  return {
+    content: 'Choose your Duel Squig, then press **Save Squig**. This fighter will be used in future duels until you change it here.',
+    ...buildSquigSelectionMessage(state.squigs, state.page, state.selectedTokenId, { replaceAttachments: true }),
+    components: rows,
+  };
+}
+
+async function handleDuelDefault(interaction) {
+  const id = String(interaction.customId || '');
+  const match = id.match(/^sd:set_(select|page|save|cancel):([a-f0-9]{12}):challenger(?::(\d+))?$/i);
+  if (id !== 'sd:set_squig' && !match) return false;
+  assertReady();
+  const key = `${interaction.guild.id}:${interaction.user.id}`;
+  if (id === 'sd:set_squig') {
+    await interaction.deferReply({ flags: 64 });
+    if (!(await hasHolderRole(interaction.guild, interaction.user.id))) {
+      await interaction.editReply({ content: 'Only holders can set a Duel Squig.' });
+      return true;
+    }
+    const result = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
+    if (!result.ok) {
+      await interaction.editReply({ content: result.reason });
+      return true;
+    }
+    const saved = await getDuelDefault(interaction.guild.id, interaction.user.id);
+    const index = Math.max(0, result.squigs.findIndex(s => String(s.tokenId) === saved));
+    const state = { id: randomId(), squigs: result.squigs, selectedTokenId: result.squigs[index].tokenId,
+      page: Math.floor(index / MAX_SELECT_OPTIONS), createdAt: Date.now() };
+    for (const [oldKey, old] of pendingDuelDefaults) {
+      if (Date.now() - old.createdAt > SETUP_TIMEOUT_MS) pendingDuelDefaults.delete(oldKey);
+    }
+    pendingDuelDefaults.set(key, state);
+    await interaction.editReply(defaultPickerPayload(state));
+    return true;
+  }
+  const state = pendingDuelDefaults.get(key);
+  if (!state || state.id !== match[2] || Date.now() - state.createdAt > SETUP_TIMEOUT_MS) {
+    await interaction.reply({ content: 'This selection expired or belongs to another player. Press Set Squig again.', flags: 64 });
+    return true;
+  }
+  await interaction.deferUpdate();
+  if (match[1] === 'cancel') {
+    pendingDuelDefaults.delete(key);
+    await interaction.editReply({ content: 'Selection cancelled. Your saved Duel Squig has not changed.', embeds: [], attachments: [], components: [] });
+    return true;
+  }
+  if (match[1] === 'save') {
+    const result = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
+    const chosen = result.squigs?.find(s => String(s.tokenId) === String(state.selectedTokenId));
+    if (!result.ok || !chosen) {
+      await interaction.followUp({ content: 'That Squig is no longer available in your connected wallet. Press Set Squig again.', flags: 64 });
+      return true;
+    }
+    await saveDuelDefault(interaction.guild.id, interaction.user.id, chosen.tokenId);
+    pendingDuelDefaults.delete(key);
+    await interaction.editReply({ content: `${squigDisplayName(chosen)} is now your Duel Squig for future games. Change it anytime with **Set Squig**. Now press **Start Duel**. Any duel already in progress keeps its fighter.`, embeds: [], attachments: [], components: [] });
+    return true;
+  }
+  if (match[1] === 'page') {
+    state.page = clampSquigPage(state.squigs, Number(match[3]));
+    state.selectedTokenId = squigPageItems(state.squigs, state.page)[0].tokenId;
+  } else {
+    const chosen = state.squigs.find(s => String(s.tokenId) === String(interaction.values?.[0]));
+    if (!chosen) return true;
+    state.selectedTokenId = chosen.tokenId;
+  }
+  await interaction.editReply(defaultPickerPayload(state));
+  return true;
+}
+
 function buildMenuRow() {
   return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('sd:set_squig').setLabel('Set Squig').setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId('sd:start')
       .setLabel('⚔️ Start Duel')
@@ -1311,16 +1462,35 @@ async function handleStartButton(interaction) {
     return true;
   }
   await interaction.deferReply({ flags: 64 });
+  // Upgrade older posted lobby panels when they are next used.
+  await interaction.message?.edit({ embeds: [buildMenuEmbed()], components: [buildMenuRow()] }).catch(() => null);
+  const savedToken = await getDuelDefault(interaction.guild.id, interaction.user.id);
+  if (!savedToken) {
+    await interaction.editReply({ content: SET_SQUIG_HELP, components: [buildMenuRow()] });
+    return true;
+  }
+  const ownership = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
+  if (!ownership.ok || !ownership.squigs.some(s => String(s.tokenId) === savedToken)) {
+    await interaction.editReply({ content: `Your saved Duel Squig is not available in your connected wallet. ${SET_SQUIG_HELP}`, components: [buildMenuRow()] });
+    return true;
+  }
+  // Another Start click may have completed while ownership was being checked.
+  if (activeUserToDuel.has(interaction.user.id)) {
+    await interaction.editReply({ content: 'You are already in an active Squig Duel.' });
+    return true;
+  }
   const duelId = randomId();
+  registerActiveUser(interaction.user.id, duelId);
   const thread = await interaction.channel.threads.create({
     name: `Squig Duel-${interaction.user.username}`.slice(0, 90),
     autoArchiveDuration: 1440,
     type: ChannelType.PublicThread,
     reason: `Squig Duel created by ${interaction.user.tag}`,
-  });
+  }).catch(err => { activeUserToDuel.delete(interaction.user.id); throw err; });
   await ensureHolderThreadViewAccess(interaction.guild, thread);
 
   const duel = createBaseDuel({ interaction, duelId, thread });
+  duel.savedChallengerTokenId = savedToken;
   await captureDuelThreadCreatedMessage(interaction.channel, thread, duel);
   duels.set(duelId, duel);
   registerActiveUser(interaction.user.id, duelId);
@@ -2279,14 +2449,25 @@ async function handleSquigSelectionPageButton(interaction) {
 async function sendSquigSelectionPrompt(guild, duel, side) {
   const thread = await guild.channels.fetch(duel.threadId).catch(() => null);
   if (!thread?.isTextBased()) return;
-  await promptSquigSelection(
-    {
-      guild,
-      editReply: (payload) => thread.send(payload),
-    },
-    duel,
-    side
-  );
+  const userId = side === 'challenger' ? duel.challengerId : duel.opponentId;
+  const tokenId = side === 'challenger' ? duel.savedChallengerTokenId : await getDuelDefault(guild.id, userId);
+  const result = tokenId ? await fetchOwnedSquigs(guild.id, userId) : null;
+  const chosen = result?.squigs?.find(s => String(s.tokenId) === tokenId);
+  if (chosen && validateSquigChoiceForDuel(duel, side, chosen).ok) {
+    const message = await thread.send(`Using saved Duel Squig: ${squigDisplayName(chosen)}.`);
+    await lockInSquigFighter({ guild, user: { id: userId },
+      editReply: payload => message.edit(payload),
+      followUp: ({ flags, ...payload }) => thread.send(payload),
+    }, duel, side, { squigs: result.squigs, selectedTokenId: tokenId, page: 0, autoSaved: true }, chosen, `${duel.id}:${side}:${userId}`);
+    return;
+  }
+  if (side === 'challenger') {
+    await cancelDuel(guild, duel, `Your saved Duel Squig is no longer available. ${SET_SQUIG_HELP}`);
+    return;
+  }
+  duel.temporaryOpponentSquig = Boolean(tokenId);
+  if (tokenId) await thread.send('Your saved Duel Squig is unavailable or exceeds this duel’s UP limit. Choose an eligible Squig for this challenge only. Your saved Duel Squig will stay unchanged.');
+  await promptSquigSelection({ guild, editReply: payload => thread.send(payload) }, duel, side);
 }
 
 async function handleOpponentSelect(interaction) {
@@ -2475,7 +2656,7 @@ async function handleSetupModal(interaction) {
   await persistDuel(duel);
   const thread = await interaction.guild.channels.fetch(duel.threadId).catch(() => null);
   if (opponentId) await thread?.members?.add(opponentId).catch(() => null);
-  await interaction.reply({ content: 'Setup saved. Choose your Squig in this thread.', flags: 64 });
+  await interaction.reply({ content: 'Setup saved. Using your saved Duel Squig.', flags: 64 });
   await sendSquigSelectionPrompt(interaction.guild, duel, 'challenger');
   return true;
 }
@@ -2509,7 +2690,7 @@ function buildChallengeEmbed(duel) {
       `<@${duel.challengerId}> has chosen **${challengerSquigName}**.\n` +
       (duel.openChallenge
         ? `Any eligible holder can accept this duel and match the wager.`
-        : `<@${duel.opponentId}>, accept the duel to choose your Squig and match the wager.`)
+        : `<@${duel.opponentId}>, accept the duel to use your saved Squig (or choose one) and match the wager.`)
     )
     .addFields(
       {
@@ -2714,15 +2895,28 @@ async function handleFighterReadyButton(interaction) {
 }
 
 async function lockInSquigFighter(interaction, duel, side, pending, chosen, pendingKey) {
+  const lock = `${side}LockInProgress`;
+  if (duel[lock] || duel[`${side}Paid`]) return;
+  duel[lock] = true;
+  try {
+    await completeSquigLockIn(interaction, duel, side, pending, chosen, pendingKey);
+  } finally {
+    duel[lock] = false;
+  }
+}
+
+async function completeSquigLockIn(interaction, duel, side, pending, chosen, pendingKey) {
   const tokenId = String(chosen.tokenId || '').trim();
 
   const ownership = await fetchOwnedSquigs(interaction.guild.id, interaction.user.id);
   const ownedChosen = ownership.squigs?.find((s) => String(s.tokenId) === tokenId);
   if (!ownership.ok || !ownedChosen) {
     await interaction.followUp({ content: 'That Squig is no longer found in your connected wallet.', flags: 64 }).catch(() => null);
+    if (pending.autoSaved) await cancelDuel(interaction.guild, duel, `Saved Squig ownership changed. ${SET_SQUIG_HELP}`);
     return;
   }
   chosen = ownedChosen;
+  if (!activeStatuses().has(duel.status)) return;
 
   const validation = validateSquigChoiceForDuel(duel, side, chosen);
   if (!validation.ok) {
@@ -2743,6 +2937,7 @@ async function lockInSquigFighter(interaction, duel, side, pending, chosen, pend
     duel.botDailyUseReserved = true;
   }
 
+  if (!pending.autoSaved && !(side === 'opponent' && duel.temporaryOpponentSquig)) await saveDuelDefault(interaction.guild.id, interaction.user.id, chosen.tokenId);
   pendingSquigSelections.delete(pendingKey);
 
   if (side === 'challenger') {
@@ -3083,6 +3278,22 @@ async function handleReadyButton(interaction) {
 }
 
 async function handleAcceptDecline(interaction) {
+  const match = String(interaction.customId || '').match(/^sd:(accept|decline):([a-f0-9]{12})$/i);
+  if (!match) return false;
+  const duel = getDuel(match[2]);
+  if (duel?.acceptInProgress) {
+    await interaction.reply({ content: 'This challenge is already being processed.', flags: 64 });
+    return true;
+  }
+  if (duel) duel.acceptInProgress = true;
+  try {
+    return await processAcceptDecline(interaction);
+  } finally {
+    if (duel) duel.acceptInProgress = false;
+  }
+}
+
+async function processAcceptDecline(interaction) {
   const match = interaction.customId.match(/^sd:(accept|decline):([a-f0-9]{12})$/i);
   if (!match) return false;
   assertReady();
@@ -3141,8 +3352,9 @@ async function handleAcceptDecline(interaction) {
 
   if (duel.acceptTimeout) clearTimeout(duel.acceptTimeout);
   duel.acceptTimeout = null;
-  await interaction.update({ content: 'Duel accepted. Choose your Squig Fighter!', components: [] });
-  await interaction.followUp({ content: 'Choose your Squig Fighter in the thread.', flags: 64 }).catch(() => null);
+  duel.status = 'awaiting_fighter';
+  await persistDuel(duel);
+  await interaction.update({ content: 'Duel accepted. Checking your saved Duel Squig…', components: [] });
   await sendSquigSelectionPrompt(interaction.guild, duel, 'opponent');
   return true;
 }
@@ -4015,6 +4227,7 @@ async function completeDuel(guild, duel, winnerId, result = null) {
 
 async function handleButton(interaction) {
   if (!String(interaction.customId || '').startsWith('sd:')) return false;
+  if (await handleDuelDefault(interaction)) return true;
   if (await handleViewSquigsButton(interaction)) return true;
   if (await handleViewSquigPageButton(interaction)) return true;
   if (await handleSetMySquigButton(interaction)) return true;
@@ -4038,6 +4251,7 @@ async function handleButton(interaction) {
 
 async function handleSelectMenu(interaction) {
   const customId = String(interaction.customId || '');
+  if (customId.startsWith('sd:set_select:')) return handleDuelDefault(interaction);
   if (customId.startsWith('sd:opponent:')) return handleOpponentSelect(interaction);
   if (customId.startsWith('sd:my_squig_select:')) return handleMySquigSelect(interaction);
   if (customId.startsWith('sd:view_select:')) return handleViewSquigSelect(interaction);
