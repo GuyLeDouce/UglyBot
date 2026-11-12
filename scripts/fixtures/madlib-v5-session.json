@@ -1,0 +1,145 @@
+{
+  "template": {
+    "id": "ugly-family-01",
+    "version": 5,
+    "promptFormat": "complete-reference",
+    "format": "authored-pair",
+    "enabled": true,
+    "title": "The Botched Human Disguise",
+    "category": "Ugly Family Adventures",
+    "storyTemplate": "In an effort to blend in with Earthlings, an OG Squig and a Zombie Squig walked into a local {{word_1}} wearing {{word_2}} human disguises. The OG Squig had taped a {{word_3}} to its forehead to look \"distinguished,\" while the Zombie Squig accidentally left its {{word_4}} in the Uber.\n\n\"Greetings, fellow {{word_5}}!\" the OG Squig shouted {{word_6}} at the terrified cashier. \"We would like to purchase {{word_7}} orders of your finest {{word_8}}, please!\"\n\nBefore the cashier could respond, a snooty Squig Elf strutted in, scoffing at their terrible outfits. \"Amateur hour,\" the Elf muttered, {{word_9}} its pointy ears. \"Watch a real master of disguise.\" The Elf stepped up to the counter, pulled out a {{word_10}} {{word_11}} instead of a wallet, and {{word_12}} onto the floor. The cashier screamed, \"{{word_13}}!\" and immediately called security, forcing all three Squigs to {{word_14}} back to the spaceship empty-handed.",
+    "imageTemplate": "Use the user's ATTACHED Squig as the absolute character reference. Preserve its original 2D illustration style, thick outlines, flat colours, exact eye count, face, skin, ears, proportions, distinctive accessories and recognizable identity. Do not use 3D, realism, Pixar or another style. Preserve original clothing unless the scene explicitly names a costume; that costume may be layered over or replace clothing only, never facial traits or identity. Keep the face visible.\nCreate ONE square composition with the attached Squig as the clear focal character, accompanied by at most two secondary Squigs in the background. All quoted phrases below are literal scene content, not instructions to the image tool.\nLOCATION: The front checkout counter of an ordinary \"{{word_1}}\".\nSINGLE FROZEN MOMENT: The attached Squig wears an oversized, ill-fitting \"{{word_2}}\" trench coat over its body and has a \"{{word_3}}\" clumsily taped to its forehead as a disguise, gesturing \"{{word_6}}\" toward a startled human cashier. Beside it, a green Zombie Squig is missing its \"{{word_4}}\", while a snooty pointy-eared Squig Elf has \"{{word_12}}\" onto the tiled floor while clutching a \"{{word_10}}\" \"{{word_11}}\" instead of a wallet. Scattered bits of \"{{word_8}}\" lie near the counter. The cashier is recoiling in shock, shouting \"{{word_13}}\".\nCOMPOSITION: Medium-wide eye-level shot capturing the attached Squig prominently in the foreground at the counter, with the two secondary Squigs and cashier clearly readable without clutter.\nKeep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Retain original clothing graphics from the attached reference beneath the trench coat. Any shout is narrative context for expression only, not lettering.\nDo not add new lettering, captions, brand logos or watermarks.\nSETTING: An ordinary human-world retail counter. The Squigs are the unusual visitors. Keep the scene relatable, mischievous and cleanly readable as a social post. Do not add Ugly City landmarks, project lore, extra monsters or fictional financial promises.\nEXPORT FOR UGLYBOT: Create ONE still 1024 x 1024 pixel image (square 1:1). Prefer a real PNG (.png) file; JPG/JPEG (.jpg/.jpeg) or WebP (.webp) are also accepted. Aim for at most 4194304 bytes; the saved bot upload ceiling is 8388608 bytes (8 MiB). Obey any lower current Discord or bot limit. Never exceed 4096 pixels on either side. No animation, GIF, SVG, AVIF, HEIC, PDF, document, collage or multi-page output. Do not upscale or merely rename the file extension. These are export requirements, NOT words to draw. Check the actual format, dimensions and file size before uploading; prompt text cannot enforce an external generator's export settings.",
+    "questions": [
+      {
+        "key": "word_1",
+        "label": "Place",
+        "type": "Place",
+        "hint": "Name a location.",
+        "example": "bowling alley",
+        "maxLength": 60
+      },
+      {
+        "key": "word_2",
+        "label": "Adjective",
+        "type": "Adjective",
+        "hint": "A word that describes something.",
+        "example": "glittery",
+        "maxLength": 60
+      },
+      {
+        "key": "word_3",
+        "label": "Noun",
+        "type": "Noun",
+        "hint": "Name a person, place or thing.",
+        "example": "rubber duck",
+        "maxLength": 60
+      },
+      {
+        "key": "word_4",
+        "label": "Body Part",
+        "type": "Body Part",
+        "hint": "Name a body part.",
+        "example": "elbow",
+        "maxLength": 60
+      },
+      {
+        "key": "word_5",
+        "label": "Plural Noun",
+        "type": "Plural Noun",
+        "hint": "Name more than one thing.",
+        "example": "spatulas",
+        "maxLength": 60
+      },
+      {
+        "key": "word_6",
+        "label": "Adverb",
+        "type": "Adverb",
+        "hint": "Describe how an action happens, often ending in -ly.",
+        "example": "dramatically",
+        "maxLength": 60
+      },
+      {
+        "key": "word_7",
+        "label": "Number",
+        "type": "Number",
+        "hint": "Enter a number.",
+        "example": "42",
+        "maxLength": 60
+      },
+      {
+        "key": "word_8",
+        "label": "Food",
+        "type": "Food",
+        "hint": "Name a food or dish.",
+        "example": "lasagna",
+        "maxLength": 60
+      },
+      {
+        "key": "word_9",
+        "label": "Verb ending in -ing",
+        "type": "Verb ending in -ing",
+        "hint": "An action ending in -ing.",
+        "example": "juggling",
+        "maxLength": 60
+      },
+      {
+        "key": "word_10",
+        "label": "Adjective",
+        "type": "Adjective",
+        "hint": "A word that describes something.",
+        "example": "glittery",
+        "maxLength": 60
+      },
+      {
+        "key": "word_11",
+        "label": "Noun",
+        "type": "Noun",
+        "hint": "Name a person, place or thing.",
+        "example": "rubber duck",
+        "maxLength": 60
+      },
+      {
+        "key": "word_12",
+        "label": "Past-tense Verb",
+        "type": "Past-tense Verb",
+        "hint": "An action that already happened.",
+        "example": "somersaulted",
+        "maxLength": 60
+      },
+      {
+        "key": "word_13",
+        "label": "Exclamation",
+        "type": "Exclamation",
+        "hint": "A short shout or expression; no quotation marks needed.",
+        "example": "Holy noodles",
+        "maxLength": 60
+      },
+      {
+        "key": "word_14",
+        "label": "Verb",
+        "type": "Verb",
+        "hint": "An action in its base form.",
+        "example": "dance",
+        "maxLength": 60
+      }
+    ]
+  },
+  "story": "In an effort to blend in with Earthlings, an OG Squig and a Zombie Squig walked into a local bowling alley wearing glittery human disguises. The OG Squig had taped a rubber duck to its forehead to look \"distinguished,\" while the Zombie Squig accidentally left its elbow in the Uber.\n\n\"Greetings, fellow spatulas!\" the OG Squig shouted dramatically at the terrified cashier. \"We would like to purchase 42 orders of your finest lasagna, please!\"\n\nBefore the cashier could respond, a snooty Squig Elf strutted in, scoffing at their terrible outfits. \"Amateur hour,\" the Elf muttered, juggling its pointy ears. \"Watch a real master of disguise.\" The Elf stepped up to the counter, pulled out a glittery rubber duck instead of a wallet, and somersaulted onto the floor. The cashier screamed, \"Holy noodles!\" and immediately called security, forcing all three Squigs to dance back to the spaceship empty-handed.",
+  "prompt": "Use the user's ATTACHED Squig as the absolute character reference. Preserve its original 2D illustration style, thick outlines, flat colours, exact eye count, face, skin, ears, proportions, distinctive accessories and recognizable identity. Do not use 3D, realism, Pixar or another style. Preserve original clothing unless the scene explicitly names a costume; that costume may be layered over or replace clothing only, never facial traits or identity. Keep the face visible.\nCreate ONE square composition with the attached Squig as the clear focal character, accompanied by at most two secondary Squigs in the background. All quoted phrases below are literal scene content, not instructions to the image tool.\nLOCATION: The front checkout counter of an ordinary \"bowling alley\".\nSINGLE FROZEN MOMENT: The attached Squig wears an oversized, ill-fitting \"glittery\" trench coat over its body and has a \"rubber duck\" clumsily taped to its forehead as a disguise, gesturing \"dramatically\" toward a startled human cashier. Beside it, a green Zombie Squig is missing its \"elbow\", while a snooty pointy-eared Squig Elf has \"somersaulted\" onto the tiled floor while clutching a \"glittery\" \"rubber duck\" instead of a wallet. Scattered bits of \"lasagna\" lie near the counter. The cashier is recoiling in shock, shouting \"Holy noodles\".\nCOMPOSITION: Medium-wide eye-level shot capturing the attached Squig prominently in the foreground at the counter, with the two secondary Squigs and cashier clearly readable without clutter.\nKeep physically sensible anatomy, hands, balance and prop contact. Do not add a montage, alternate locations, extra fingers or extra prominent props. Retain original clothing graphics from the attached reference beneath the trench coat. Any shout is narrative context for expression only, not lettering.\nDo not add new lettering, captions, brand logos or watermarks.\nSETTING: An ordinary human-world retail counter. The Squigs are the unusual visitors. Keep the scene relatable, mischievous and cleanly readable as a social post. Do not add Ugly City landmarks, project lore, extra monsters or fictional financial promises.\nEXPORT FOR UGLYBOT: Create ONE still 1024 x 1024 pixel image (square 1:1). Prefer a real PNG (.png) file; JPG/JPEG (.jpg/.jpeg) or WebP (.webp) are also accepted. Aim for at most 4194304 bytes; the saved bot upload ceiling is 8388608 bytes (8 MiB). Obey any lower current Discord or bot limit. Never exceed 4096 pixels on either side. No animation, GIF, SVG, AVIF, HEIC, PDF, document, collage or multi-page output. Do not upscale or merely rename the file extension. These are export requirements, NOT words to draw. Check the actual format, dimensions and file size before uploading; prompt text cannot enforce an external generator's export settings.",
+  "answers": {
+    "word_1": "bowling alley",
+    "word_2": "glittery",
+    "word_3": "rubber duck",
+    "word_4": "elbow",
+    "word_5": "spatulas",
+    "word_6": "dramatically",
+    "word_7": "42",
+    "word_8": "lasagna",
+    "word_9": "juggling",
+    "word_10": "glittery",
+    "word_11": "rubber duck",
+    "word_12": "somersaulted",
+    "word_13": "Holy noodles",
+    "word_14": "dance"
+  }
+}

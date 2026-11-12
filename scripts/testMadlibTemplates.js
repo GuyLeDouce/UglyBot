@@ -12,7 +12,7 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
     assert.equal(active.reduce((n,t)=>n+t.questions.length,0),302);
     assert.deepEqual(active.map(t=>t.questions.length),[14,14,14,...Array(20).fill(13)]);
     for(const [i,t] of active.entries()){
-      assert.equal(t.version,5);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
+      assert.equal(t.version,6);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
       assert.deepEqual(t.questions.map(q=>q.label),source[i].wordPrompts);
       assert.deepEqual(t.questions.map(q=>q.key),source[i].wordPrompts.map((_,j)=>`word_${j+1}`));
       assert(!t.id.startsWith('hw-'));
@@ -53,11 +53,21 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
   });
   await run.test('all complete reference prompts keep identity rules and prohibit lettering without duplicate wrappers',()=>{
     for(const t of active){const p=core.render(t,sample(t)).prompt;
-      assert(p.startsWith(core.STYLE+'\n'));assert(p.includes('attached Squig as the clear focal character'));
+      assert(p.startsWith('PLAYER SETUP: '+t.imageSetup));assert(p.includes('Keep a mouthless reference mouthless.'));
       assert(p.includes('Do not add new lettering, captions, brand logos or watermarks.'));
       for(const heading of ['LOCATION:','SINGLE FROZEN MOMENT:','COMPOSITION:','SETTING:','EXPORT FOR UGLYBOT:'])assert.equal(p.split(heading).length,2);
       assert(!p.includes('Invader Zim'));assert(!p.includes('JSON delimiters'));assert(!p.includes('""'));
-      assert.equal(p.split(core.STYLE).length,2);
+      assert.equal(p.split('ART DIRECTION:').length,2);
+    }
+  });
+  await run.test('cast counts and reference roles agree across every player instruction and prompt',()=>{
+    assert.deepEqual(active.map(t=>t.imageCast.length),[3,2,3,2,2,3,2,3,2,2,3,3,3,2,2,4,1,2,4,3,2,3,5]);
+    for(const t of active){
+      const p=core.render(t,sample(t)).prompt;
+      assert(p.includes(`Draw exactly ${t.imageCast.length} Squig`));
+      for(const [i,c] of t.imageCast.entries())assert(t.imageSetup.includes(`Reference ${i+1}: ${c.type} (${c.role})`));
+      const bad=structuredClone(active);bad.find(x=>x.id===t.id).imageCast=[];
+      assert.throws(()=>core.validateTemplates(bad),errorCode('TEMPLATES'));
     }
   });
   await run.test('export settings stay snapshot-specific without changing stories',()=>{
@@ -67,12 +77,12 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
     const frozen=core.selectTemplate([t],[],()=>0);t.output.maxImageBytes=8388608;assert.equal(frozen.output.maxImageBytes,2097152);
     for(const n of [0,-1,NaN,Infinity,8388609,'8388608',1.5])assert.throws(()=>core.imageOutputGuidance(n),errorCode('RENDER'));
   });
-  await run.test('saved v1, v2, v3 and v4 stories survive replacement without rerolling or mutation',()=>{
-    for(const version of [1,2,3,4]){
+  await run.test('saved v1 through v5 stories survive replacement without rerolling or mutation',()=>{
+    for(const version of [1,2,3,4,5]){
       const saved=require(`./fixtures/madlib-v${version}-session.json`),before=JSON.stringify(saved);
       const out=core.render(saved.template,saved.answers);assert.equal(out.story,saved.story);assert.deepEqual(out.answers,saved.answers);
       if(version>=2)assert.equal(out.prompt,saved.prompt);
-      if(version<4)assert(!active.some(t=>t.id===saved.template.id));else assert.equal(active.find(t=>t.id===saved.template.id).version,5);assert.equal(JSON.stringify(saved),before);
+      if(version<4)assert(!active.some(t=>t.id===saved.template.id));else assert.equal(active.find(t=>t.id===saved.template.id).version,6);assert.equal(JSON.stringify(saved),before);
     }
   });
   await run.test('answers containing placeholders remain literal and never substitute a second time',()=>{

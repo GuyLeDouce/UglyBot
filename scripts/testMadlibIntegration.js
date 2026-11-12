@@ -127,7 +127,7 @@ React below if you think it's **UGLY**! 💜`);
   });
   await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
     const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
-    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===5&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===6&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
     const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
     const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
     assert(panel.includes('Ugly Family adventures'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
@@ -156,7 +156,7 @@ React below if you think it's **UGLY**! 💜`);
         const i=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:q.example});
         await app.handleInteraction(i);
         if(step<template.questions.length-1){assert.equal(store.read().state,'active');assert.equal(lastEdit(i).embeds[0].toJSON().title,`Question ${step+2} of ${template.questions.length}`);}
-        else{assert.equal(lastEdit(i).embeds[0].toJSON().title,'Image Prompt');assert(i.calls.some(([name,p])=>name==='followUp'&&p.ephemeral));}
+        else{assert(lastEdit(i).content.includes(template.imageSetup));assert(lastEdit(i).content.length<2000);assert.equal(lastEdit(i).embeds[0].toJSON().title,'Image Prompt');assert(i.calls.some(([name,p])=>name==='followUp'&&p.ephemeral));}
       }
       const s=store.read(),expected=core.render(template,s.answers);assert.equal(s.state,'completed');assert.equal(s.story,expected.story);assert.equal(s.prompt,expected.prompt);app.stop();
     }

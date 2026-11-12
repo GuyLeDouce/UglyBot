@@ -44,7 +44,7 @@ async function acknowledge(i){
 async function edit(i,data){const payload=privatePayload({content:null,embeds:[],components:[],attachments:[],...data});return i.deferred||i.replied?i.editReply(payload):i.reply({...payload,ephemeral:true});}
 async function follow(i,data){return i.followUp(privatePayload({...data,ephemeral:true}));}
 function resultControls(s){return [row(button('Get Copyable Prompt','copy',s.id,0,s.user_id),button('Download Prompt .txt','export-prompt',s.id,0,s.user_id),button('Download Story .txt','export-story',s.id,0,s.user_id)),row(button('Classic Story','story',s.id,0,s.user_id),button('SHOW / History','history','0',0,s.user_id))];}
-function instruction(){return 'Copy the complete prompt into your image tool, attach your Squig reference there, generate the image, then return to SHOW. Prefer a still 1024 x 1024 PNG; JPEG/WebP are also accepted. Follow the export limits in your prompt and check the actual file size. UglyBot does not generate images in V1.';}
+function instruction(s){return (s?.template?.version===6?safeDiscord(s.template.imageSetup)+'\n\n':'')+'Copy the complete prompt into your image tool, attach the Squig reference(s) listed in the prompt, generate the image, then return to SHOW. Prefer a still 1024 x 1024 PNG; JPEG/WebP are also accepted. Follow the export limits in your prompt and check the actual file size. UglyBot does not generate images in V1.';}
 function stateMessage(s){
   if(s.state==='awaiting_payment')return 'Payment is being checked. Do not pay again. Resume opens the same saved play after confirmation.';
   if(s.state==='payment_review')return 'Payment under review. The outcome was uncertain; no second charge will be sent. Ask an admin to inspect the operation below.';
@@ -106,7 +106,7 @@ class MadlibFeature{
   async results(i,s,separateStory=true){
     check(s.state==='completed'&&s.story&&s.prompt,'STATE','Finish all questions to view your completed outputs.');
     const embed=new EmbedBuilder().setTitle('Image Prompt').setDescription(s.prompt.length<=3900?s.prompt:'Your complete prompt is attached as UTF-8 text. Use the copy/download controls below; nothing has been truncated.');
-    await edit(i,{content:instruction(),embeds:[embed],files:s.prompt.length>3900?[new AttachmentBuilder(Buffer.from(s.prompt,'utf8'),{name:`madlib-${s.id}-prompt.txt`})]:[],components:resultControls(s)});
+    await edit(i,{content:instruction(s),embeds:[embed],files:s.prompt.length>3900?[new AttachmentBuilder(Buffer.from(s.prompt,'utf8'),{name:`madlib-${s.id}-prompt.txt`})]:[],components:resultControls(s)});
     if(separateStory)await follow(i,{embeds:storyEmbeds(s,`Classic Mad Lib Story — ${s.template.title}`),components:[row(button('Download Story .txt','export-story',s.id,0,s.user_id),button('SHOW / History','history','0',0,s.user_id))]});
   }
   async begin(i,access,quoteId=null){
@@ -132,7 +132,7 @@ class MadlibFeature{
     const selected=await this.store.chooseDraft(i.guildId,i.user.id,sid),s=selected.session;
     if(selected.publication)return this.publicationStatus(i,selected.publication);
     const image=await this.store.upload(s.id);if(image&&image.revision===selected.draft.revision)return this.preview(i,s,selected.draft,image);
-    return edit(i,{content:`**${safeDiscord(s.template.title)}**\nStory ID: \`${s.id}\`\n\nClick **Upload Image** below and choose one PNG, JPEG or WebP. The upload and preview are private; only Publish shares it. **/madlib-upload** remains available as a fallback.\n\n${instruction()}`,components:[row(button('Upload Image','upload',s.id,selected.draft.revision,i.user.id,ButtonStyle.Primary)),row(button('Image Prompt','prompt',s.id,0,i.user.id),button('Classic Story','story',s.id,0,i.user.id),button('SHOW / History','history','0',0,i.user.id))]});
+    return edit(i,{content:`**${safeDiscord(s.template.title)}**\nStory ID: \`${s.id}\`\n\nClick **Upload Image** below and choose one PNG, JPEG or WebP. The upload and preview are private; only Publish shares it. **/madlib-upload** remains available as a fallback.\n\n${instruction(s)}`,components:[row(button('Upload Image','upload',s.id,selected.draft.revision,i.user.id,ButtonStyle.Primary)),row(button('Image Prompt','prompt',s.id,0,i.user.id),button('Classic Story','story',s.id,0,i.user.id),button('SHOW / History','history','0',0,i.user.id))]});
   }
   async preview(i,s,draft,image){
     const p=await this.store.one('SELECT * FROM madlib_publications WHERE session_id=$1',[s.id]);

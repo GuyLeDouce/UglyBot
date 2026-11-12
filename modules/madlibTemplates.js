@@ -17,7 +17,8 @@ function compile(text,words){
   });
 }
 module.exports=stories.map(s=>({
-  id:`ugly-family-${String(s.number).padStart(2,'0')}`,version:5,promptFormat:'complete-reference',format:'authored-pair',enabled:true,
+  id:`ugly-family-${String(s.number).padStart(2,'0')}`,version:6,promptFormat:'cast-reference',format:'authored-pair',enabled:true,
+  imageCast:s.imageCast,imageSetup:s.imageSetup,
   title:s.title,category:'Ugly Family Adventures',
   storyTemplate:compile(s.story,s.wordPrompts),imageTemplate:compile(s.imagePrompt,s.wordPrompts),
   questions:s.wordPrompts.map((type,i)=>{

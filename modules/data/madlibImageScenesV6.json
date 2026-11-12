@@ -1,0 +1,453 @@
+[
+  {
+    "number": 1,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "disguised customer"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "confused companion"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "failed disguise expert"
+      }
+    ],
+    "location": "The checkout of \"[1. PLACE]\"; use a counter and one shelf to establish the location.",
+    "moment": "Reference 1 stands at the counter in a \"[2. ADJECTIVE]\" oversized coat, with \"[3. NOUN]\" taped above the eyes. One hand offers a tray of \"[8. FOOD]\"; the other rests on the counter. Reference 2 stands a step behind, awkwardly inspecting the place where its removable \"[4. BODY PART]\" should be. Reference 3 has just lost balance beside the counter, holding a \"[10. ADJECTIVE]\" \"[11. NOUN]\" as a wallet. One human cashier recoils. The joke is three painfully unconvincing disguises.",
+    "composition": "Eye-level medium-wide view. Reference 1 occupies the left foreground, cashier the right, companions the lower center and rear left. Keep every face unobscured and each silhouette separate.",
+    "light": "Warm shop light from upper right; cream counter, muted teal shelving and a single coral accent. Preserve character colours."
+  },
+  {
+    "number": 2,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "sliding winner"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "short-circuiting opponent"
+      }
+    ],
+    "location": "A compact Squig Survival arena: one mat and a padded boundary, with empty stands reduced to simple shapes.",
+    "moment": "Reference 1 slides low from left to right through \"[2. LIQUID]\", leaving a visible ribbon of \"[9. FOOD]\" slime. A \"[12. NOUN]\" braced in both hands has just nudged Reference 2 backward toward a giant \"[13. NOUN]\" at the boundary. Reference 2 teeters with sparks beside its \"[10. BODY PART]\"; a few \"[5. PLURAL NOUN]\" lie on the mat. Freeze the instant the overconfident robot loses its balance, not the entire battle.",
+    "composition": "Low three-quarter view. Clear diagonal from Reference 1 at lower left to Reference 2 at upper right. Leave a clean strip of mat between their outlines.",
+    "light": "One overhead arena spotlight rendered as flat pale-yellow shapes. Cool blue mat, dark navy background, small orange sparks."
+  },
+  {
+    "number": 3,
+    "cast": [
+      {
+        "type": "Zombie Squig",
+        "role": "accidental winner"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "falling schemer"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "deadpan observer"
+      }
+    ],
+    "location": "The rocky lip of The Maw, shown as a dark pit with a few blunt cartoon teeth. The pit is scenery, not another Squig.",
+    "moment": "Reference 1 stands safely at the lip holding a removable \"[8. BODY PART]\" like a toy, oblivious after bumping Reference 2. Reference 2 tips headfirst beyond the edge, one hand releasing a golden \"[5. NOUN]\". Reference 3 watches from a step back with its existing sensors directed toward the fall. A few burnt \"[2. FOOD]\" crumbs drift above the opening. Show the accidental shove and fall; leave the later trophy reward out of this instant.",
+    "composition": "Reference 1 large at lower left, falling Reference 2 at right, observer smaller at upper left. Show the ground under both standing characters and the lip separating them from the drop.",
+    "light": "Muted violet rocks, pale sky, soft lime light rising from the pit. Use small flat shadow shapes, not volumetric smoke."
+  },
+  {
+    "number": 4,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "horrified patient"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "proud surgeon"
+      }
+    ],
+    "location": "A shabby examination corner inside \"[1. PLACE]\": reclining chair, tray and one lamp.",
+    "moment": "Reference 1 sits upright holding a small mirror in one hand, the other gripping the chair. A removable \"[9. FOOD]\" prop is taped over the nose area and \"[10. PLURAL NOUN]\" props sit above, never across, the original eyes. Reference 2 stands beside the chair presenting a rusty \"[5. NOUN]\"; its detached \"[11. BODY PART]\" rests on the tray next to \"[4. PLURAL NOUN]\". The patient is appalled while the surgeon is absurdly proud. This is a costume-prop gag, not realistic surgery.",
+    "composition": "Medium view from the mirror side. Reference 1 fills two-thirds of the frame; angle the mirror away so it does not create a duplicate face. Reference 2 and tray occupy the right third.",
+    "light": "Cream lamp light, pale mint wall and muted lilac chair. One crisp shadow per object; bright colours remain on the Squigs."
+  },
+  {
+    "number": 5,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "treadmill disaster"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "weightlifter"
+      }
+    ],
+    "location": "A makeshift workout corner inside \"[1. PLACE]\". Keep recognizable cues from the chosen place rather than replacing it with a generic gym; include one treadmill.",
+    "moment": "Reference 1 has just slid off the treadmill belt, body tilted backward, one hand reaching toward the rail. A tipped shaker rests on the belt, spilling blended \"[8. FOOD]\"; \"[5. LIQUID]\" makes one clear skid trail. Reference 2 braces beside the treadmill while supporting a heavy \"[2. NOUN]\" with its \"[3. BODY PART]\" or a removable mechanical attachment representing that word. Their silhouettes nearly meet but do not overlap. A few \"[12. PLURAL NOUN]\" lie near the base. Reference 1 looks surprised; Reference 2 looks caught off guard.",
+    "composition": "Wide side-on view at treadmill height. Falling Reference 1 on the left, braced Reference 2 on the right. Make the belt, skid trail and approaching collision readable in that order.",
+    "light": "Soft overhead light translated into flat shadows. Warm grey floor, dusty blue equipment, one yellow rail accent. No oily photorealistic sheen."
+  },
+  {
+    "number": 6,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "excited bidder"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "auctioneer"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "clumsy interrupter"
+      }
+    ],
+    "location": "A small Malformed Market auction stage with a podium and one foreground seat; no visible crowd.",
+    "moment": "Reference 1 rises from the foreground seat waving a \"[5. ADJECTIVE]\" \"[6. NOUN]\"; its bucket of \"[9. FOOD]\" stays on the floor. Onstage, Reference 3 trips over its removable \"[11. BODY PART]\", sending the chewed \"[2. NOUN]\" off its display pillow. Reference 2 freezes behind the podium with gavel raised. Capture the artifact suspended between stage and bidder, with all three characters looking toward it.",
+    "composition": "Diagonal composition from foreground bidder at lower left to empty display pillow at upper right. Keep the airborne artifact isolated against a plain wall.",
+    "light": "Warm amber stage light, muted burgundy curtain, cream backdrop. Flat spotlight ellipse on the artifact; no glitter or dense debris."
+  },
+  {
+    "number": 7,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "romantic escape artist"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "researcher"
+      }
+    ],
+    "location": "A candlelit table inside \"[1. PLACE]\", with a low open window and one neighboring booth.",
+    "moment": "Reference 1, wearing a \"[2. ADJECTIVE]\" jacket made from \"[3. PLURAL NOUN]\", is halfway through the open window with a flat celebrity cardboard cutout tucked under one arm. Its free hand grips the sill. A plate of \"[7. FOOD]\" and the unpaid bill remain on the table. Reference 2 sits in the neighboring booth calmly recording the escape on a \"[8. NOUN]\". The cutout is visibly flat printed cardboard, not a living person or a third Squig.",
+    "composition": "Medium-wide view. Escape and cardboard silhouette dominate the right; researcher and abandoned plate sit on the left. One visible candle establishes the date.",
+    "light": "Warm candlelit peach interior against a cool blue window. Preserve flat character colours; no bloom or photographic depth blur."
+  },
+  {
+    "number": 8,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "parched recipient"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "unlikely rescuer"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "unhelpful passerby"
+      }
+    ],
+    "location": "A spaceship utility corridor with one leaking tank and a pile of \"[5. PLURAL NOUN]\".",
+    "moment": "Reference 1 slumps on the pile as one balloon bursts against its shoulder, releasing \"[11. LIQUID]\" in a single clean splash. Reference 2 kneels nearby, another balloon supported inside its hollow removable \"[9. BODY PART]\". Reference 3 walks away in the background with bottled water and a \"[6. ADJECTIVE]\" \"[7. NOUN]\" tucked under an arm. The main contrast is immediate relief in front and smug indifference behind; do not redraw Reference 1 as a different species or texture.",
+    "composition": "Reference 1 large in the center, rescuer at left, passerby smaller at rear right. Keep the splash below eye level and away from the other faces.",
+    "light": "Cool grey-blue corridor, one warm ceiling strip, bright aqua splash shapes. Restrained background detail."
+  },
+  {
+    "number": 9,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "blender operator"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "precise rival"
+      }
+    ],
+    "location": "A cooking competition counter inside \"[1. PLACE]\" with two distinct workstations.",
+    "moment": "Reference 1 recoils from an uncovered blender as one arc of \"[11. ADJECTIVE]\" goop rises from it, carrying a few \"[7. PLURAL NOUN]\" and pieces of \"[3. FOOD]\". Both hands are visibly clear of the blades and container. Reference 2 pauses at the other station, holding a laser-powered \"[6. NOUN]\" over its cutting board and looking sideways at the disaster. A small pool of \"[8. LIQUID]\" stays on the counter. Freeze the eruption before the judge arrives.",
+    "composition": "Counter-height medium shot, blender between the two characters. The splash arches into empty space above the counter, not over either face.",
+    "light": "Even warm studio lighting, pale blue tiles and cream counter with a red blender base. Broad flat colour blocks and minimal reflections."
+  },
+  {
+    "number": 10,
+    "cast": [
+      {
+        "type": "Squig Elf",
+        "role": "escaping traveller"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "confused bag owner"
+      }
+    ],
+    "location": "An airport security lane with one conveyor and one metal detector.",
+    "moment": "Reference 1 crawls onto the conveyor in a bulky trench coat, a \"[3. ADJECTIVE]\" wig made from \"[4. PLURAL NOUN]\" secured behind its ears. One hand grips a \"[12. ADJECTIVE]\" \"[13. NOUN]\" and the other supports its weight. Reference 2 stands beside its opened backpack. One human guard points at a tray holding a \"[7. NOUN]\", jars of \"[8. FOOD]\" and a removable \"[9. BODY PART]\". Give the escapee a guilty backward glance and the Zombie a baffled stance.",
+    "composition": "Conveyor forms a clean lower-left to upper-right diagonal. Escapee fills the foreground; bag owner and guard stand apart behind. Props stay on the tray rather than in a multi-object grip.",
+    "light": "Cool airport light, pale grey counters, navy conveyor, one amber alarm indicator. Clear matte surfaces."
+  },
+  {
+    "number": 11,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "inflated escapee"
+      },
+      {
+        "type": "OG Squig",
+        "role": "panicked accomplice"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "officer"
+      }
+    ],
+    "location": "A \"[1. ADJECTIVE]\" basement with one press assembled from a \"[2. NOUN]\" and a bucket of green \"[4. LIQUID]\".",
+    "moment": "Reference 1 bounces toward the high window, its \"[12. BODY PART]\" comically inflated while its face and identifying traits remain exact. Reference 2 crouches behind the press trying to cover blank counterfeit discs with a cloth; \"[7. FOOD]\" sits beside the pile. Reference 3 stands in the doorway pointing one flashlight at them. Use one officer only and unmarked discs. Show a botched escape, not a shootout or a financial advertisement.",
+    "composition": "Inflated escapee upper left, accomplice lower center, officer at rear right. A clean triangle connects the three faces; one window and one door define the space.",
+    "light": "Muted purple basement with a flat cream flashlight wedge and a cool blue window. Keep the beam off the escapee’s face."
+  },
+  {
+    "number": 12,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "pageant winner"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "jealous runner-up"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "fellow contestant"
+      }
+    ],
+    "location": "A small pageant stage with curtains and one visible footlight; no crowd.",
+    "moment": "Reference 1 holds the final pose of a ridiculous dance, wearing \"[5. PLURAL NOUN]\" as costume trim and balancing one \"[6. NOUN]\" on its head. A cup on the stage has spilled \"[9. LIQUID]\"; a few \"[10. PLURAL NOUN]\" lie nearby. Reference 2 has fainted safely onto a low cushion at stage right. Reference 3 applauds at stage left using its removable \"[2. BODY PART]\" as a comic prop. Reference 1’s proud pose is the punchline.",
+    "composition": "Full-body symmetrical stage view. Winner large in the center, other contestants smaller at opposite sides. Leave clear space around the balanced object and visible eyes.",
+    "light": "Warm pale-yellow footlights, muted plum curtains and cream stage. Tiny flat crown highlight only; no confetti cloud."
+  },
+  {
+    "number": 13,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "squeezed friend"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "overenthusiastic hugger"
+      },
+      {
+        "type": "OG Squig",
+        "role": "alarmed tutor"
+      }
+    ],
+    "location": "A living room in \"[2. PLACE]\" with one couch and a television showing simple heart icons.",
+    "moment": "Reference 2 hugs Reference 1 tightly at center frame; both mechanical arms belong visibly to the hugger. Reference 1’s face remains unchanged and visible above the arms as \"[11. LIQUID]\" squirts sideways from its torso. Reference 3 leans back on the couch clutching a bowl of \"[9. FOOD]\", suddenly regretting the lesson. The giant \"[10. NOUN]\" rests on the floor instead of requiring the robot to hold it while hugging. Freeze the hug before anyone hits the ceiling.",
+    "composition": "Medium three-quarter view. Hugging pair occupy the right two-thirds; tutor is clearly separated on the couch at left. Show arm origins and contact points.",
+    "light": "Warm cream table-lamp light with a subdued blue television accent. Soft peach couch and dark teal floor, all shaded in flat shapes."
+  },
+  {
+    "number": 14,
+    "cast": [
+      {
+        "type": "Squig Elf",
+        "role": "terrified shopper"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "vacuum conqueror"
+      }
+    ],
+    "location": "The \"[2. FOOD]\" aisle of a \"[1. ADJECTIVE]\" closed superstore.",
+    "moment": "Reference 1 clings to a sturdy \"[7. NOUN]\" display, eyes fixed on a tiny robotic floor cleaner below. Reference 2 stands on a low pile of \"[13. PLURAL NOUN]\", raising its removable \"[8. BODY PART]\" like a victory trophy. The cleaner sits motionless in \"[10. LIQUID]\" with one small spark. Broken containers stay low on the floor. The giant panic over a tiny cleaner is the whole joke; the cleaner is an appliance, not a Robot Squig.",
+    "composition": "Medium aisle view. Frightened Elf high at left, triumphant Zombie low at right, tiny cleaner between them. Keep the scale contrast obvious.",
+    "light": "One cool overhead aisle light with a warm orange spark. Muted grey-green shelves and a lavender floor, no dense product labels."
+  },
+  {
+    "number": 15,
+    "cast": [
+      {
+        "type": "Amphibian Squig",
+        "role": "sneezed-out rescuer"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "rope handler"
+      }
+    ],
+    "location": "The rocky rim of The Maw; show one dark opening, blunt cartoon teeth and a small puff shaped like \"[6. FOOD]\".",
+    "moment": "Reference 1 is airborne directly above the pit, covered in \"[12. LIQUID]\" and gripping a \"[10. ADJECTIVE]\" feather. A rusty \"[3. NOUN]\" and a few \"[2. PLURAL NOUN]\" rise along the same arc. Reference 2 remains planted at the rim holding the snapped rope braided from \"[8. PLURAL NOUN]\". Freeze the single sneeze. Omit the later token shower so the airborne character remains the focal point.",
+    "composition": "Low angle with airborne Reference 1 in the upper center and the rim plus Reference 2 anchoring the bottom third. Leave open sky around the silhouette.",
+    "light": "Pale blue sky, warm grey rocks and one light-green sneeze puff. Flat underside shadows keep the original character colours intact."
+  },
+  {
+    "number": 16,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "improvised launcher"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "reluctant projectile"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "upper opponent"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "lower opponent"
+      }
+    ],
+    "location": "A Squig Survival mat with one boundary stripe and a puddle of \"[10. LIQUID]\".",
+    "moment": "Reference 1 has released a giant \"[6. NOUN]\" used as a launcher, with \"[7. FOOD]\" spilling from its cup. Reference 2 flies a short distance across the middle, just about to contact Reference 3, who sits on Reference 4’s shoulders. Reference 4 is beginning to slip at the puddle. A few \"[5. PLURAL NOUN]\" rest on the mat. Show the instant before impact: one launching team and one unstable opposing stack, never four unrelated actions.",
+    "composition": "Wide side view. Launcher and Reference 1 at far left, airborne Reference 2 in clear center space, stacked opponents at right. Keep all four faces visible and feet/shoulder contact legible.",
+    "light": "Flat overhead cream light, muted blue mat, navy backdrop and orange boundary stripe. No spectators or decorative sparks."
+  },
+  {
+    "number": 17,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "unexpected pupil"
+      }
+    ],
+    "location": "A third-grade classroom in \"[2. PLACE]\" with one tiny desk and a chalkboard containing only simple shapes.",
+    "moment": "Reference 1 stands proudly on the desk in a \"[1. ADJECTIVE]\" backpack. One hand lifts a small living \"[8. NOUN]\" beside its ear, as though just pulled free; the other rests on the desktop. Crayons and \"[7. FOOD]\" remain on the desk rather than obscuring its face. One human teacher recoils beside a tipped bucket of \"[11. LIQUID]\". A few \"[10. PLURAL NOUN]\" lie on the floor. The absurdly confident pupil is the joke.",
+    "composition": "Slightly low medium view centered on Reference 1 above the small desk. Teacher smaller at the rear right. No other pupils or Squigs.",
+    "light": "Warm window light from left, pale mint wall, ochre desk and a muted green board. Crisp simple classroom shapes."
+  },
+  {
+    "number": 18,
+    "cast": [
+      {
+        "type": "Zombie Squig",
+        "role": "helpful assistant"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "careless engineer"
+      }
+    ],
+    "location": "A compact spaceship engine bay with one open reactor and a small porthole showing the moon.",
+    "moment": "Reference 2 bends toward the reactor, pushing \"[6. FOOD]\" and Reference 1’s removable \"[7. BODY PART]\" into an open socket. Reference 1 stands beside it holding a \"[2. NOUN]\" wrench, proudly offering the wrong help. A tipped canister of \"[9. LIQUID]\" rests on the floor, and a few \"[5. PLURAL NOUN]\" are visibly welded to the casing. A single flat flash begins inside the engine. Keep each character’s hands assigned to one clear job.",
+    "composition": "Medium side view: assistant left, engine center, engineer right. The hands, wrong components and socket form one clean focal cluster below the faces.",
+    "light": "Cool navy metal shapes with one pale-yellow reactor flash. Keep sparks to two or three graphic marks; no smoke filling the room."
+  },
+  {
+    "number": 19,
+    "cast": [
+      {
+        "type": "Squig Elf",
+        "role": "annoyed sunbather"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "buried shark gag"
+      },
+      {
+        "type": "OG Squig",
+        "role": "sandcastle culprit"
+      },
+      {
+        "type": "Amphibian Squig",
+        "role": "overinflated swimmer"
+      }
+    ],
+    "location": "A sunny beach at \"[1. PLACE]\", with a \"[4. ADJECTIVE]\" umbrella and a simple strip of sea.",
+    "moment": "Reference 1 sits under the umbrella, one hand holding \"[6. FOOD]\" sunscreen and the other reaching toward a seagull stealing \"[12. PLURAL NOUN]\". Reference 2 is buried in a mound nearby; its face remains visible above the sand and a removable \"[7. BODY PART]\" prop pokes out like a \"[8. ADJECTIVE]\" fin. Reference 3 kneels beside the mound with a shovel. Reference 4 floats in shallow water in the rear, comically swollen to the rounded silhouette of a \"[3. NOUN]\" but retaining its exact face. No lifeguard in this frame.",
+    "composition": "Layered wide beach view: sunbather large at front left, mound and digger at front right, swimmer small but distinct behind. Separate all four faces and keep the seagull away from them.",
+    "light": "Warm sun from upper left, pale sand and muted turquoise water. Flat oval ground shadows and restrained sky detail."
+  },
+  {
+    "number": 20,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "photobomber"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "dancer"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "failed breakdancer"
+      }
+    ],
+    "location": "A \"[1. ADJECTIVE]\" \"[2. PLACE]\" prepared for a dance recording, with one phone tripod.",
+    "moment": "Reference 1 leans into the recording foreground, tapping its \"[9. BODY PART]\" with a slice of \"[10. FOOD]\" in an absurdly proud pose. Behind, Reference 2 holds a dance pose with \"[6. NOUN]\" balanced as a removable nose-area prop. Reference 3 attempts the worm on the floor, lifting its front while leaving one cracked board and a small pool of \"[8. LIQUID]\". The photobomber blocks part of the dance without hiding the other faces.",
+    "composition": "View from beside the phone, not through a rendered screen. Reference 1 fills the left foreground; dancer upper right and robot lower right. Keep tripod legs separate from limbs.",
+    "light": "One soft cream ring-light shape, dusty blue walls and warm wooden floor. Flat highlights, no neon haze or fake interface graphics."
+  },
+  {
+    "number": 21,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "napkin-eating applicant"
+      },
+      {
+        "type": "Amphibian Squig",
+        "role": "overconfident applicant"
+      }
+    ],
+    "location": "A cramped back office at a \"[2. FOOD]\" drive-thru, with a desk between the applicants and one human manager.",
+    "moment": "Reference 2 has just slapped its \"[5. BODY PART]\" on the desk, tipping the manager’s coffee into one splash of \"[6. LIQUID]\". Reference 1 sits beside it holding a crumpled stack of napkins as the evidence of its disastrous demonstration; keep napkins below the face. The manager leans back with a \"[3. NOUN]\" held close, staring at the mess. The joke is two confident applicants ruining the interview, not a new deep-fryer scene.",
+    "composition": "Eye-level three-quarter view across the desk. Both Squigs occupy the near side with separate silhouettes; manager at far side. Coffee and hand contact remain visible in the middle.",
+    "light": "Warm office light, pale beige wall, muted teal desk and a small red visor accent. No menu text or branded packaging."
+  },
+  {
+    "number": 22,
+    "cast": [
+      {
+        "type": "Squig Elf",
+        "role": "unimpressed spectator"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "snacking spectator"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "failed overlord"
+      }
+    ],
+    "location": "A \"[2. ADJECTIVE]\" \"[3. PLACE]\" with a small table and space beside it.",
+    "moment": "References 1 and 2 sit at the table with separate bowls of \"[8. FOOD]\", watching Reference 3 with bored poses. Reference 3 stands to the right, its \"[9. ADJECTIVE]\" ray device backfiring in a short spray of \"[10. LIQUID]\". A removable panel beside its \"[11. BODY PART]\" flips open with a few confetti pieces. The threatened \"[6. NOUN]\" has dropped at its feet. One obvious malfunction contrasts with two utterly unbothered spectators.",
+    "composition": "Medium-wide balanced view: seated pair at left, failing robot at right. Empty wall behind the spray keeps it readable; no overlapping arms or bowls.",
+    "light": "Calm cream room light, muted lilac wall and blue-grey floor. One small orange backfire accent; keep the rest understated."
+  },
+  {
+    "number": 23,
+    "cast": [
+      {
+        "type": "OG Squig",
+        "role": "campfire storyteller"
+      },
+      {
+        "type": "Zombie Squig",
+        "role": "fearless bear challenger"
+      },
+      {
+        "type": "Squig Elf",
+        "role": "unimpressed camper"
+      },
+      {
+        "type": "Amphibian Squig",
+        "role": "snack keeper"
+      },
+      {
+        "type": "Robot Squig",
+        "role": "wood collector"
+      }
+    ],
+    "location": "A \"[1. ADJECTIVE]\" forest clearing at night with one campfire, one tree and a tipped cooler of \"[8. LIQUID]\".",
+    "moment": "Reference 2 stands between the fire and a grizzly bear, offering a \"[9. ADJECTIVE]\" \"[10. NOUN]\" while the startled bear scrambles up the tree. Reference 1 sits on a log holding a flashlight below its face, interrupted mid-story. Reference 3 sits beside it holding a roasting stick with \"[13. PLURAL NOUN]\". Reference 4 steadies the cooler on the opposite side of the fire. Reference 5 stands behind the log with a small bundle of firewood. The single punchline is the bear fleeing the Zombie; the other four are quiet reactions.",
+    "composition": "Wide square composition with five distinct Squig silhouettes. Zombie and tree-climbing bear dominate the right; the other four form a readable semicircle at left and lower center. Fire remains small, leaving room around every face.",
+    "light": "Warm orange campfire light on lower edges, cool indigo forest and simple muted pine shapes. Use flat two-tone shading, not realistic fur, smoke or lens effects."
+  }
+]
