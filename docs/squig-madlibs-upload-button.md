@@ -35,3 +35,11 @@ Selecting another story, reopening SHOW, cancelling/recreating a draft or replac
 Revert this PR to remove the button workflow and retain `/madlib-upload`. No data deletion or schema rollback is required. Existing saved images/stories remain usable. Alternatively the existing `MADLIB_ENABLED=false` switch disables the feature without deleting history, subject to the normal project deployment process.
 
 References: https://docs.discord.com/developers/components/reference#file-upload ; https://discord.js.org/docs/packages/discord.js/14.24.2/ModalSubmitFields:Class
+
+## Automatic image sizing
+
+Uploads now accept still PNG, JPEG and WebP originals up to 20 MiB, subject to the lower Discord interaction limit. Both the modal and `/madlib-upload` use the same processor. Input dimensions are bounded to 16,384 pixels per side and 50 million pixels total before decoding. HEIC and animated formats still require export as a supported still image.
+
+The isolated decoder scales images proportionally to at most 2,048 pixels on the longest side, then reduces further if needed to fit the configured output budget. PNG output preserves transparency. `MADLIB_MAX_IMAGE_BYTES` remains the stored/output ceiling (maximum 8 MiB); do not raise it. The new input ceiling is separate. No database migration or variable changes are required. Existing previews and stories remain intact if processing fails.
+
+File bytes, decoded pixels, concurrency and execution time remain bounded. Error codes distinguish `IMAGE_SIZE`, `IMAGE_DIMENSIONS`, `IMAGE_TYPE` and worker failures without logging artwork or signed attachment URLs. Discord rejection before submission cannot be handled by the bot; export a smaller copy in that case.

@@ -58,8 +58,32 @@ const attachment=b=>({url:'https://cdn.discordapp.com/ephemeral-attachments/1290
     await assert.rejects(()=>decode(png.subarray(0,33)),errorCode('IMAGE'));
     await assert.rejects(()=>images.normalizeImage(png,images.dimensions(png),1),errorCode('IMAGE_SIZE'));
     assert.throws(()=>images.validateAttachment({...attachment(png),size:limit+1}),errorCode('IMAGE_SIZE'));
-    const b=Buffer.from(png);b.writeUInt32BE(4097,16);assert.throws(()=>images.dimensions(b),errorCode('IMAGE'));
+    const b=Buffer.from(png);b.writeUInt32BE(16385,16);assert.throws(()=>images.dimensions(b),errorCode('IMAGE_DIMENSIONS'));
     assert.equal((await decode(png)).width,64);
+  });
+  await run.test('large phone image is resized proportionally without cropping',async()=>{
+    const c=createCanvas(8000,6000),ctx=c.getContext('2d');
+    ctx.fillStyle='red';ctx.fillRect(0,0,4000,6000);
+    const b=c.toBuffer('image/png'),out=await decode(b);
+    assert.equal(out.width,2048);assert.equal(out.height,1536);
+    const decoded=await loadImage(out.bytes),v=createCanvas(out.width,out.height);
+    v.getContext('2d').drawImage(decoded,0,0);
+    assert.equal(v.getContext('2d').getImageData(10,10,1,1).data[0],255);
+    assert.equal(v.getContext('2d').getImageData(2000,10,1,1).data[3],0);
+    const bad=Buffer.from(b);bad.writeUInt32BE(9000,16);
+    assert.throws(()=>images.dimensions(bad),errorCode('IMAGE_DIMENSIONS'));
+  });
+  await run.test('original above 8 MiB fits output budget automatically; input cap remains enforced',async()=>{
+    const c=createCanvas(2100,2100),ctx=c.getContext('2d'),pixels=ctx.createImageData(2100,2100);
+    let seed=123;for(let j=0;j<pixels.data.length;j++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;pixels.data[j]=seed>>>24;}
+    ctx.putImageData(pixels,0,0);const b=c.toBuffer('image/png');assert(b.length>limit);
+    const out=await images.downloadAttachment(attachment(b),1024*1024,{inputMaxBytes:images.MAX_INPUT_BYTES,
+      fetcher:async()=>({status:200,headers:{get:()=>String(b.length)},body:Readable.from([b])})});
+    assert(out.bytes.length<=1024*1024);assert(out.width<2048);assert.equal(out.width,out.height);
+    await assert.rejects(()=>images.downloadAttachment({...attachment(b),size:images.MAX_INPUT_BYTES+1},limit,
+      {inputMaxBytes:images.MAX_INPUT_BYTES,fetcher:async()=>{throw Error('must not fetch');}}),errorCode('IMAGE_SIZE'));
+    await assert.rejects(()=>images.downloadAttachment({...attachment(png),size:png.length},limit,{inputMaxBytes:1024,
+      fetcher:async()=>({status:200,headers:{get:()=>null},body:Readable.from([Buffer.alloc(1025)])})}),errorCode('IMAGE_SIZE'));
   });
   await run.test('decoder failures expose only fixed stage categories and validated version strings',()=>{
     const logs=[],warn=console.warn;console.warn=line=>logs.push(line);

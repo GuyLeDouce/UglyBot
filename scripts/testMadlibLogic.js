@@ -134,12 +134,12 @@ const templates=require('../modules/madlibTemplates');const run=harness('logic')
     const exif=Buffer.from('ffe1002245786966000049492a0008000000010012010300010000000600000000000000','hex');
     const oriented=Buffer.concat([jpeg.subarray(0,2),exif,jpeg.subarray(2)]),info=images.dimensions(oriented);
     const out=await images.normalizeImage(oriented,info,8388608);assert.equal(out.width*out.height,96*64);assert.equal(images.dimensions(out.bytes).width,out.width);assert.equal(images.dimensions(out.bytes).height,out.height);
-    const square=createCanvas(4096,4096).toBuffer('image/png');const large=await images.normalizeImage(square,images.dimensions(square),8388608);assert.equal(large.width,4096);assert.equal(large.height,4096);
-    const oversized=Buffer.from(png);oversized.writeUInt32BE(4097,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE'));
+    const square=createCanvas(4096,4096).toBuffer('image/png');const large=await images.normalizeImage(square,images.dimensions(square),8388608);assert.equal(large.width,2048);assert.equal(large.height,2048);
+    const oversized=Buffer.from(png);oversized.writeUInt32BE(16385,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE_DIMENSIONS'));
     await assert.rejects(()=>images.normalizeImage(png,images.dimensions(png),1),errorCode('IMAGE_SIZE'));
   });
   await run.test('headers constrain dimensions before isolated native decoding and normalization',async()=>{
-    assert.deepEqual(images.dimensions(png),{media_type:'image/png',width:64,height:64});const oversized=Buffer.from(png);oversized.writeUInt32BE(100000,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE'));
+    assert.deepEqual(images.dimensions(png),{media_type:'image/png',width:64,height:64});const oversized=Buffer.from(png);oversized.writeUInt32BE(100000,16);assert.throws(()=>images.dimensions(oversized),errorCode('IMAGE_DIMENSIONS'));
     const normalized=await images.normalizeImage(png,images.dimensions(png),8388608);assert.equal(normalized.media_type,'image/png');assert.equal(normalized.width,64);assert(Buffer.isBuffer(normalized.bytes));assert(normalized.bytes.length<8388608);
     for(const format of ['image/jpeg','image/webp']){const bytes=canvas.toBuffer(format);assert.equal(images.dimensions(bytes).media_type,format);assert.equal(images.dimensions(bytes).width,64);}
     const fetcher=async()=>({status:200,headers:{get:()=>String(png.length)},body:Readable.from([png])});assert.equal((await images.downloadAttachment(attachment,8388608,{fetcher})).width,64);

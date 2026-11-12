@@ -63,10 +63,16 @@ function modalI(f,data){
     bridge.stop();f.app.stop();await client.destroy();
   });
   await run.test('submit uses the existing validation/staging/preview and never publishes automatically',async()=>{
-    let seen;const f=await setup({images:async(a,max)=>{seen={a,max};return {bytes:Buffer.from('validated'),media_type:'image/png',width:64,height:64};}});
+    let seen;const f=await setup({images:async(a,max,options)=>{seen={a,max,options};return {bytes:Buffer.from('validated'),media_type:'image/png',width:64,height:64};}});
     const m=buildUploadModal(f.draft,IDS.user,8388608).toJSON(),i=modalI(f,packet(m.custom_id,{limit:2097152}));
-    await f.app.handleInteraction(i);assert.equal(i.calls[0][0],'deferReply');assert.equal(i.calls[0][1].ephemeral,true);assert.equal(seen.max,2097152);assert.equal(seen.a.url,file.url);assert.equal(f.writes,1);assert.equal(f.messages.length,0);
+    await f.app.handleInteraction(i);assert.equal(i.calls[0][0],'deferReply');assert.equal(i.calls[0][1].ephemeral,true);assert.equal(seen.max,2097152);assert.equal(seen.options.inputMaxBytes,2097152);assert.equal(seen.a.url,file.url);assert.equal(f.writes,1);assert.equal(f.messages.length,0);
     const preview=readEdit(i);assert(preview.content.includes('Nothing has been published'));assert.deepEqual(preview.components[0].toJSON().components.map(c=>c.label),['Publish','Replace Image','Cancel']);assert.equal(preview.files.length,1);f.app.stop();
+  });
+  await run.test('20 MiB Discord input is separate from the 8 MiB stored output ceiling',async()=>{
+    let seen;const f=await setup({images:async(a,max,options)=>{seen={max,options};return {bytes:Buffer.from('validated'),media_type:'image/png',width:64,height:64};}});
+    const m=buildUploadModal(f.draft,IDS.user,20971520).toJSON();
+    await f.app.handleInteraction(modalI(f,packet(m.custom_id,{limit:20971520})));
+    assert.equal(seen.max,8388608);assert.equal(seen.options.inputMaxBytes,20971520);assert.equal(f.writes,1);f.app.stop();
   });
   await run.test('Replace Image opens the same picker and dismissing it keeps the old staged image',async()=>{
     const f=await setup();await f.store.stage(IDS.guild,IDS.user,f.s.id,0,{bytes:Buffer.from('original'),media_type:'image/png',width:64,height:64},f.draft.updated_at);

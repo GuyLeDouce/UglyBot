@@ -9,7 +9,7 @@ const {MadlibStore}=require('./madlibStore');
 const {MadlibEconomy,strictTransfer}=require('./madlibEconomy');
 const {MadlibPublishing,storyEmbeds,NO_MENTIONS}=require('./madlibPublishing');
 const {MadlibWorkers}=require('./madlibWorkers');
-const {downloadAttachment}=require('./madlibImages');
+const {downloadAttachment,MAX_INPUT_BYTES}=require('./madlibImages');
 const {memberAccess,eligible}=require('./madlibAccess');
 const {UploadModalBridge,buildUploadModal,draftStamp,modalTarget,uploadLimit}=require('./madlibUploadModal');
 const {check,component,parseComponent,safeDiscord,errorMessage}=core;
@@ -159,14 +159,14 @@ class MadlibFeature{
         return this.checkUploadDraft(i,c.id,c.revision);
       })(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new core.MadlibError('SLOW','Checks are taking too long to open the form. Try Upload Image again, or use /madlib-upload.')),1400);})]);
       // A modal must use this button's initial response; never defer before showModal.
-      try{await i.showModal(buildUploadModal(selected.draft,i.user.id,uploadLimit(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit)));}
+      try{await i.showModal(buildUploadModal(selected.draft,i.user.id,uploadLimit(MAX_INPUT_BYTES,i.attachmentSizeLimit)));}
       catch(_){throw new core.MadlibError('UPLOAD_MODAL','Discord could not open the upload form. Reopen SHOW or use /madlib-upload for the same saved story.');}
     }finally{clearTimeout(timer);}
   }
   async saveUploadedImage(i,access,sid,revision,attachment,rawLimit=null,stamp=null){
     await eligible(this.deps,this.cfg,access);
     const {session:s,draft}=await this.checkUploadDraft(i,sid,revision,stamp);
-    const image=await this.images(attachment,uploadLimit(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit,rawLimit));
+    const image=await this.images(attachment,uploadLimit(this.cfg.MADLIB_MAX_IMAGE_BYTES,i.attachmentSizeLimit,rawLimit),{inputMaxBytes:uploadLimit(MAX_INPUT_BYTES,i.attachmentSizeLimit,rawLimit)});
     // The database rechecks the selection under lock AFTER download/decode finishes.
     const saved=await this.store.stage(i.guildId,i.user.id,s.id,revision,image,draft.updated_at);
     return this.preview(i,s,saved,image);

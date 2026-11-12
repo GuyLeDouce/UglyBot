@@ -20,7 +20,7 @@ function modalTarget(control){
 function buildUploadModal(draft,owner,maxBytes){
   check(Number.isSafeInteger(maxBytes)&&maxBytes>0,'IMAGE_SIZE',FALLBACK);
   const payload={custom_id:component('upload-submit',`${draft.session_id}-${draftStamp(draft)}`,draft.revision,owner),title:'Upload your Squig image',components:[{
-    type:18,label:'Choose one image',description:`Still PNG, JPG/JPEG or WebP. Maximum ${(maxBytes/1048576).toFixed(2)} MiB. Preview first; Publish shares it.`,
+    type:18,label:'Choose one image',description:`PNG/JPEG/WebP ≤${(maxBytes/1048576).toFixed(2)} MiB. Auto-resized to fit. Preview before Publish.`,
     component:{type:19,custom_id:INPUT_ID,min_values:1,max_values:1,required:true},
   }]};
   // showModal accepts a JSONEncodable on both baseline and modern discord.js.

@@ -48,13 +48,24 @@ if (require.main === module && typeof process.send === 'function') {
       const oriented = media_type === 'image/jpeg' && image.width === height && image.height === width;
       if (!same && !oriented) throw Error('Dimensions changed');
       stage = 'ENCODE';
-      const canvas = createCanvas(image.width, image.height);
-      canvas.getContext('2d').drawImage(image, 0, 0);
-      const normalized = Buffer.from(canvas.toBuffer('image/png'));
-      if (normalized.length > maxBytes) {
-        process.send({ok:false, code:'IMAGE_SIZE', diagnostics:diagnostics('OUTPUT_SIZE')}); return;
+      // Bound the stored PNG while preserving transparency and the full composition.
+      let scale = Math.min(1, 2048 / Math.max(image.width, image.height));
+      for (let attempt = 0; attempt < 16; attempt++) {
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(image.height * scale));
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(image, 0, 0, width, height);
+        const normalized = Buffer.from(canvas.toBuffer('image/png'));
+        if (normalized.length <= maxBytes) {
+          process.send({ok:true, bytes:normalized, width, height}); return;
+        }
+        if (Math.min(width, height) <= 32) break;
+        scale *= Math.min(0.8, Math.sqrt(maxBytes / normalized.length) * 0.9);
       }
-      process.send({ok:true, bytes:normalized, width:image.width, height:image.height});
+      process.send({ok:false, code:'IMAGE_SIZE', diagnostics:diagnostics('OUTPUT_SIZE')});
     } catch (error) {
       process.send({ok:false, diagnostics:diagnostics(failureReason(error))});
     }

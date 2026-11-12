@@ -6,7 +6,8 @@ const {check,MadlibError}=require('./madlibCore');
 const {safeVersion}=require('./madlibImageWorker');
 // Attachment MIME is optional. File signatures and decoding establish the real format.
 const MIME=new Set(['image/png','image/x-png','image/jpeg','image/jpg','image/pjpeg','image/jfif','image/webp','image/x-webp','application/octet-stream','binary/octet-stream','application/binary','']);
-const MAX_PIXELS=4096*4096;
+const MAX_PIXELS=50000000;
+const MAX_INPUT_BYTES=20*1024*1024;
 const typeHint=a=>String(a?.contentType??a?.content_type??'').split(';')[0].trim().toLowerCase();
 function dimensions(bytes) {
   check(Buffer.isBuffer(bytes)&&bytes.length>=24,'IMAGE','That file is not a supported image.');let type,width,height;
@@ -25,11 +26,12 @@ function dimensions(bytes) {
     else if(tag==='VP8 '){check(bytes.length>=30&&bytes.subarray(23,26).equals(Buffer.from([157,1,42])),'IMAGE','Invalid WebP frame.');width=bytes.readUInt16LE(26)&16383;height=bytes.readUInt16LE(28)&16383;}
     else if(tag==='VP8L'){check(bytes.length>=25&&bytes[20]===47,'IMAGE','Invalid lossless WebP frame.');const bits=bytes.readUInt32LE(21);width=(bits&16383)+1;height=((bits>>>14)&16383)+1;}
   }
-  check(type&&Number.isInteger(width)&&Number.isInteger(height)&&width>=32&&height>=32&&width<=4096&&height<=4096&&width*height<=MAX_PIXELS,'IMAGE','Use a still PNG, JPEG or WebP, 32–4096 pixels per side including 4096 × 4096.');return {media_type:type,width,height};
+  check(type,'IMAGE','Use a still PNG, JPEG or WebP. HEIC, GIF and other formats must be exported as PNG or JPEG first. Your story is saved.');
+  check(Number.isInteger(width)&&Number.isInteger(height)&&width>=32&&height>=32&&width<=16384&&height<=16384&&width*height<=MAX_PIXELS,'IMAGE_DIMENSIONS','Use a still PNG, JPEG or WebP, 32–16384 pixels per side and at most 50 megapixels. Export a smaller copy; your story is saved.');return {media_type:type,width,height};
 }
 function validateAttachment(a,maxBytes=8388608){
-  check(a&&typeof a.url==='string'&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=maxBytes,'IMAGE_SIZE',`Attach one image no larger than ${Math.floor(maxBytes/1048576)} MiB.`);
-  check(MIME.has(typeHint(a)),'IMAGE_TYPE','Attach a still PNG, JPG/JPEG or WebP image (not a webpage, SVG, animation, or document).');
+  check(a&&typeof a.url==='string'&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=maxBytes,'IMAGE_SIZE',`Attach one image no larger than ${Math.floor(maxBytes/1048576)} MiB. Export a smaller copy and retry; your story is saved.`);
+  check(MIME.has(typeHint(a)),'IMAGE_TYPE','Attach a still PNG, JPG/JPEG or WebP. Export HEIC or other formats as PNG/JPEG first; your story is saved.');
   let u;try{u=new URL(a.url);}catch(_){throw new MadlibError('IMAGE_URL','Invalid Discord attachment URL.');}
   // Slash-command uploads can use /ephemeral-attachments/ rather than /attachments/.
   // Keep the exact Discord hosts and signed query string; do not rewrite paths or follow redirects.
@@ -42,7 +44,7 @@ function decoderFailure(message) {
   const code=message?.code==='IMAGE_SIZE'?'IMAGE_SIZE':'IMAGE';
   // Never log the image, its metadata, signed URL, credentials or native error text.
   console.warn(`[MadLibs] IMAGE_WORKER stage=${stage} reason=${reason} canvas=${safeVersion(d.canvasVersion)} node=${safeVersion(process.versions.node)}`);
-  const text=code==='IMAGE_SIZE'?'This image becomes too large when prepared for Discord. Upload a smaller image.':
+  const text=code==='IMAGE_SIZE'?'This image becomes too large when prepared for Discord. Export a smaller copy; your story is saved.':
     stage==='INIT'?'The bot image decoder could not initialize (IMAGE_INIT). Ask an admin to check its installation. Your story is saved.':
     `The image could not be processed (IMAGE_${stage}). Your story is saved. Share this code with an admin.`;
   return new MadlibError(code,text);
@@ -60,11 +62,21 @@ async function normalizeImage(bytes,info,maxBytes){
     });
     let result=null,failure=null,settled=false;
     const terminate=()=>{if(!child.killed)child.kill('SIGKILL');};
-    const timer=setTimeout(()=>{failure=new MadlibError('IMAGE','Image decoding timed out. Try a smaller still image.');terminate();},5000);
+    const timer=setTimeout(()=>{failure=new MadlibError('IMAGE','Image decoding timed out. Try a smaller still image.');terminate();},15000);
     child.once('message',m=>{
-      const valid=m?.ok&&Buffer.isBuffer(m.bytes)&&m.bytes.length>0&&m.bytes.length<=maxBytes&&
-        ((m.width===info.width&&m.height===info.height)||(info.media_type==='image/jpeg'&&m.width===info.height&&m.height===info.width));
-      if(valid)result={media_type:'image/png',width:m.width,height:m.height,bytes:m.bytes};
+      const valid=m?.ok&&Number.isInteger(m.width)&&Number.isInteger(m.height)&&m.width>=1&&m.height>=1&&m.width<=2048&&m.height<=2048&&Buffer.isBuffer(m.bytes)&&m.bytes.length>0&&m.bytes.length<=maxBytes&&
+        ((m.width<=info.width&&m.height<=info.height)||(info.media_type==='image/jpeg'&&m.width<=info.height&&m.height<=info.width));
+      let outputMatches=false;
+      if(valid){
+        try{
+          const header=m.bytes.length>=24&&m.bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+            ? {media_type:'image/png',width:m.bytes.readUInt32BE(16),height:m.bytes.readUInt32BE(20)} : {};
+          const proportional=(w,h)=>Math.abs(m.width*h-m.height*w)<=w+h;
+          outputMatches=header.media_type==='image/png'&&header.width===m.width&&header.height===m.height&&
+            (proportional(info.width,info.height)||(info.media_type==='image/jpeg'&&proportional(info.height,info.width)));
+        }catch(_){}
+      }
+      if(valid&&outputMatches)result={media_type:'image/png',width:m.width,height:m.height,bytes:m.bytes};
       else failure=decoderFailure(m);
       terminate();
     });
@@ -77,15 +89,16 @@ async function normalizeImage(bytes,info,maxBytes){
     catch (_) {failure=new MadlibError('IMAGE','The image could not be sent to the checker.');terminate();}
   });}finally{activeDecodes--;}
 }
-async function downloadAttachment(attachment,maxBytes=8388608,{fetcher=fetch,decode=normalizeImage}={}){
-  const url=validateAttachment(attachment,maxBytes),abort=new AbortController();const timer=setTimeout(()=>abort.abort(),12000);let res;
+async function downloadAttachment(attachment,maxBytes=8388608,{fetcher=fetch,decode=normalizeImage,inputMaxBytes=maxBytes}={}){
+  inputMaxBytes=Math.min(inputMaxBytes,MAX_INPUT_BYTES);
+  const url=validateAttachment(attachment,inputMaxBytes),abort=new AbortController();const timer=setTimeout(()=>abort.abort(),12000);let res;
   try{
-    res=await fetcher(url,{signal:abort.signal,redirect:'manual',size:maxBytes,timeout:12000});check(res.status===200,'IMAGE_DOWNLOAD','Discord could not supply the attachment. Upload it again.');
-    const contentLength=Number(res.headers.get('content-length')||0);check(Number.isFinite(contentLength)&&contentLength<=maxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');
-    const chunks=[];let total=0;for await(const chunk of res.body){total+=chunk.length;check(total<=maxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');chunks.push(chunk);}
+    res=await fetcher(url,{signal:abort.signal,redirect:'manual',size:inputMaxBytes,timeout:12000});check(res.status===200,'IMAGE_DOWNLOAD','Discord could not supply the attachment. Upload it again.');
+    const contentLength=Number(res.headers.get('content-length')||0);check(Number.isFinite(contentLength)&&contentLength<=inputMaxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');
+    const chunks=[];let total=0;for await(const chunk of res.body){total+=chunk.length;check(total<=inputMaxBytes,'IMAGE_SIZE','Image exceeds the upload limit.');chunks.push(chunk);}
     // The declared raster MIME can be wrong; headers plus full decoding prove the type.
     const bytes=Buffer.concat(chunks),info=dimensions(bytes);return await decode(bytes,info,maxBytes);
   }catch(e){if(e instanceof MadlibError)throw e;throw new MadlibError('IMAGE_DOWNLOAD','The upload could not be downloaded safely. Attach the image again.');}
   finally{clearTimeout(timer);abort.abort();res?.body?.destroy?.();}
 }
-module.exports={dimensions,validateAttachment,normalizeImage,downloadAttachment,decoderFailure};
+module.exports={MAX_INPUT_BYTES,dimensions,validateAttachment,normalizeImage,downloadAttachment,decoderFailure};
