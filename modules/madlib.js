@@ -21,7 +21,7 @@ function buildMadlibSlashCommands(env=process.env){
   if(!core.enabled(env))return [];
   const panel=new SlashCommandBuilder().setName('madlib').setDescription('Post the Squig Mad Libs PLAY / SHOW panel (admins only).').setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
   const upload=new SlashCommandBuilder().setName('madlib-upload').setDescription('Privately preview one generated image for your completed Mad Lib.').setDMPermission(false)
-    .addAttachmentOption(o=>o.setName('image').setDescription('One PNG, JPEG or WebP image; up to 8 MiB.').setRequired(true))
+    .addAttachmentOption(o=>o.setName('image').setDescription('One PNG, JPEG or WebP image; up to 20 MiB, subject to Discord limits.').setRequired(true))
     .addStringOption(o=>o.setName('story_id').setDescription('Optional saved story ID; otherwise use your current SHOW selection.').setMaxLength(36));
   const admin=new SlashCommandBuilder().setName('madlib-admin').setDescription('Inspect and safely review Mad Lib payments/publications.').setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addStringOption(o=>o.setName('action').setDescription('Administrative action.').setRequired(true).addChoices(...ADMIN_ACTIONS.map(name=>({name,value:name}))))
@@ -64,7 +64,7 @@ class MadlibFeature{
       this.store=store||new MadlibStore(deps.madlibPool,{random:deps.random||Math.random});await this.store.ensureMadlibTables();
       this.economy=new MadlibEconomy(this.store,deps);this.publishing=new MadlibPublishing(this.store,deps,this.cfg);
       this.workers=new MadlibWorkers({deps,store:this.store,economy:this.economy,publishing:this.publishing,cfg:this.cfg,timers,log:code=>this.log(code)});
-      this.available=true;return true;
+      this.available=true;this.log(`CATALOG_READY ${this.templates.length} STORIES`);return true;
     })().catch(error=>{this.failure=error instanceof core.MadlibError?error.code:'INITIALIZATION_FAILED';this.available=false;this.log(this.failure);return false;});
   }
   log(code){console.warn(`[MadLibs] ${String(code).replace(/[^A-Z0-9_: -]/gi,'').slice(0,100)}`);}
@@ -79,8 +79,8 @@ class MadlibFeature{
   async panel(i,access){
     await this.requireAdmin(i,access);const id=core.id(),cfg=this.cfg;
     const description=[
-      'Mad Libs is a fill-in-the-blanks word game: you supply the words before seeing the story. Our Squig version also gives you a matching image prompt for some human-world mischief.',
-      '**1. PLAY** — Answer a few questions to reveal your story and image prompt.\n**2. Make your image** — Copy the prompt into your image generator and attach your Squig as the reference.\n**3. SHOW** — Choose your saved story, press **Upload Image**, and check your private preview.',
+      'Mad Libs is a fill-in-the-blanks word game: you supply the words before seeing the story. Our Squig version also gives you a matching image prompt for chaotic Ugly Family adventures.',
+      '**1. PLAY** — Supply 13–14 words to reveal your story and image prompt.\n**2. Make your image** — Copy the prompt into your image generator and attach your Squig as the reference.\n**3. SHOW** — Choose your saved story, press **Upload Image**, and check your private preview.',
       '**Hidden until you decide to Publish.** Your answers, story, prompt and image preview stay private in Discord. Only **Publish** shares your finished story and image with the channel.',
       `One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,
     ].join('\n\n');

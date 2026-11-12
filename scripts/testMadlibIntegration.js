@@ -34,8 +34,8 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
   });
   await run.test('one-input modal uses initial response; submit saves once and never chains another modal',async()=>{
     const {app,store}=await feature(),s=store.read();const open=interaction({customId:core.component('answer',s.id,s.revision,IDS.user),privateMessage:true});await app.handleInteraction(open);assert.deepEqual(open.calls.map(c=>c[0]),['showModal']);assert.equal(open.calls[0][1].components.length,1);assert.equal(open.calls[0][1].components[0].components.length,1);
-    const submit=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'curiously happy'});await app.handleInteraction(submit);assert.equal(store.read().step,1);assert.equal(store.read().answers.emotion,'curiously happy');assert(!submit.calls.some(c=>c[0]==='showModal'));assert.equal(lastEdit(submit).embeds[0].toJSON().title,'Question 2 of 6');
-    const stale=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'overwrite'});await app.handleInteraction(stale);assert.equal(store.read().answers.emotion,'curiously happy');assert(stale.calls.some(c=>c[0]==='followUp'));
+    const submit=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'curiously happy'});await app.handleInteraction(submit);assert.equal(store.read().step,1);assert.equal(store.read().answers.word_1,'curiously happy');assert(!submit.calls.some(c=>c[0]==='showModal'));assert.equal(lastEdit(submit).embeds[0].toJSON().title,'Question 2 of 14');
+    const stale=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'overwrite'});await app.handleInteraction(stale);assert.equal(store.read().answers.word_1,'curiously happy');assert(stale.calls.some(c=>c[0]==='followUp'));
   });
   await run.test('invalid answers preserve controls; cross-user and forged public controls expose nothing',async()=>{
     const {app,store}=await feature(),s=store.read();const blank=interaction({customId:core.component('submit',s.id,0,IDS.user),privateMessage:true,answer:' '});await app.handleInteraction(blank);assert.equal(store.read().step,0);assert(blank.calls.some(c=>c[0]==='followUp'));
@@ -43,7 +43,7 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
     const forged=interaction({customId:core.component('play','fakepanel',0,'public')});await app.handleInteraction(forged);assert(lastEdit(forged).content.includes('not registered'));
   });
   await run.test('completion shows separate private prompt/story and exports full saved bytes after holder loss',async()=>{
-    const {app,store}=await feature();for(let n=0;n<6;n++){const s=store.read(),i=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:s.template.questions[s.step].example});await app.handleInteraction(i);if(n===5){assert.equal(lastEdit(i).embeds[0].toJSON().title,'Image Prompt');const f=i.calls.find(c=>c[0]==='followUp');assert(f&&f[1].ephemeral);assert(f[1].embeds[0].toJSON().title.startsWith('Classic Mad Lib Story'));}}
+    const {app,store}=await feature();for(let n=0;n<templates[0].questions.length;n++){const s=store.read(),i=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:s.template.questions[s.step].example});await app.handleInteraction(i);if(n===templates[0].questions.length-1){assert.equal(lastEdit(i).embeds[0].toJSON().title,'Image Prompt');const f=i.calls.find(c=>c[0]==='followUp');assert(f&&f[1].ephemeral);assert(f[1].embeds[0].toJSON().title.startsWith('Classic Mad Lib Story'));}}
     const s=store.read();assert(s.prompt&&s.story&&s.state==='completed');for(const kind of ['prompt','story']){const i=interaction({customId:core.component(`export-${kind}`,s.id,0,IDS.user),privateMessage:true});await app.handleInteraction(i);assert.equal(lastEdit(i).files[0].attachment.toString('utf8'),s[kind]);}
     app.deps.getWalletLinks=async()=>[];app.deps.getOwnedTokenIdsForContractMany=async()=>[];const h=interaction({command:'madlib-history'});await app.handleInteraction(h);assert(lastEdit(h).content.includes('SHOW / History'));assert(!lastEdit(h).content.includes('Connect'));
   });
@@ -127,10 +127,10 @@ React below if you think it's **UGLY**! 💜`);
   });
   await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
     const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
-    assert.equal(app.templates.length,60);assert(app.templates.every(t=>t.version===3&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===4&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
     const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
     const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
-    assert(panel.includes('human-world'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
+    assert(panel.includes('Ugly Family adventures'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
     assert.deepEqual(messages[0].components[0].toJSON().components.map(b=>b.label),['PLAY','SHOW']);
   });
   await run.test('completed saved v1 prompt and story remain byte-for-byte unchanged when reopened',async()=>{
@@ -147,6 +147,24 @@ React below if you think it's **UGLY**! 💜`);
       await app.handleInteraction(interaction({customId:core.component('submit',seed.id,before.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
     const end=store.read();assert.equal(end.state,'completed');assert.equal(end.id,seed.id);assert.equal(end.story,saved.story);
     assert.equal(end.template.version,1);assert(end.prompt.includes('EXPORT FOR UGLYBOT:'));
+  });
+  await run.test('all 23 new stories complete every ordered question and reveal the paired outputs privately',async()=>{
+    for(const template of templates){
+      const {app,store}=await feature(session(template));
+      for(let step=0;step<template.questions.length;step++){
+        const s=store.read(),q=template.questions[step];assert.equal(s.step,step);
+        const i=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:q.example});
+        await app.handleInteraction(i);
+        if(step<template.questions.length-1){assert.equal(store.read().state,'active');assert.equal(lastEdit(i).embeds[0].toJSON().title,`Question ${step+2} of ${template.questions.length}`);}
+        else{assert.equal(lastEdit(i).embeds[0].toJSON().title,'Image Prompt');assert(i.calls.some(([name,p])=>name==='followUp'&&p.ephemeral));}
+      }
+      const s=store.read(),expected=core.render(template,s.answers);assert.equal(s.state,'completed');assert.equal(s.story,expected.story);assert.equal(s.prompt,expected.prompt);app.stop();
+    }
+  });
+  await run.test('unfinished v3 session completes its saved six-question story after catalogue replacement',async()=>{
+    const saved=require('./fixtures/madlib-v3-session.json'),seed=session(saved.template),{app,store}=await feature(seed);
+    for(const q of saved.template.questions){const s=store.read();await app.handleInteraction(interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
+    assert.equal(store.read().story,saved.story);assert.equal(store.read().prompt,saved.prompt);assert.equal(store.read().template.version,3);app.stop();
   });
   await run.test('current integration retains all seven Mad Libs additions without freezing unrelated code',()=>{
     const {verify,additions}=require('./verifyMadlibIntegration');
