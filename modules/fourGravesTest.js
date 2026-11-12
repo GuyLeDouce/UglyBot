@@ -313,11 +313,11 @@ async function reset(i) {
     for (const g of graves) {
       const mark = "four-graves:" + e.id + ":" + g.grave_id;
       const ch = g.channel_id && guild.channels.cache.get(g.channel_id);
-      if (ch && (ch.topic !== mark || !ch.name.startsWith("test-grave-")))
+      if (ch && (ch.topic !== mark || ch.name !== "test-grave-" + g.grave_id.replaceAll("_", "-")))
         throw Error("Unrecognized channel " + g.channel_id + "; aborting reset.");
       const role = g.role_id && guild.roles.cache.get(g.role_id);
-      if (role && (!role.name.startsWith("[TEST] Grave ") ||
-                   !role.name.endsWith("[FG" + e.id + "]")))
+      const roleName = "[TEST] Grave — " + e.config.names[GRAVES.findIndex(x => x.id === g.grave_id)] + " [FG" + e.id + "]";
+      if (role && role.name !== roleName)
         throw Error("Unrecognized role " + g.role_id + "; aborting reset.");
     }
     const control = e.panel_channel_id && guild.channels.cache.get(e.panel_channel_id);
@@ -333,11 +333,11 @@ async function reset(i) {
     for (const g of graves) {
       const mark = "four-graves:" + e.id + ":" + g.grave_id;
       for (const ch of [...guild.channels.cache.values()].filter(c => c.topic === mark))
-        if (ch.name.startsWith("test-grave-"))
+        if (ch.name === "test-grave-" + g.grave_id.replaceAll("_", "-"))
           await ch.delete("Private Four Graves TEST reset");
         else throw Error("A channel marker exists without the test name; aborting reset.");
-      for (const role of [...guild.roles.cache.values()].filter(r =>
-        r.name.startsWith("[TEST] Grave ") && r.name.endsWith("[FG" + e.id + "]")))
+      const expectedRole = "[TEST] Grave — " + e.config.names[GRAVES.findIndex(x => x.id === g.grave_id)] + " [FG" + e.id + "]";
+      for (const role of [...guild.roles.cache.values()].filter(r => r.name === expectedRole))
         await role.delete("Private Four Graves TEST reset");
     }
     for (const ch of [...guild.channels.cache.values()].filter(
