@@ -1,6 +1,6 @@
 # Squig Mad Libs — owner and recovery guide
 
-Current catalogue: the 23 owner-supplied Ugly Family stories (version 4) replace the prior 60-scene pool for new plays. See [catalogue and compatibility](squig-madlibs-ugly-family.md). Historical rollout notes below describe earlier versions.
+Current catalogue: the 23 owner-supplied Ugly Family stories (version 5) replace the prior 60-scene pool for new plays. See [catalogue and compatibility](squig-madlibs-ugly-family.md). Historical rollout notes below describe earlier versions.
 ## Review boundary
 
 This feature is authored against main commit `fc02c69dfda8ec96120fa4f3b508d769995cfa73` on `feature/squig-madlibs`. A feature-branch commit or pull request is not authorization to merge, deploy Railway, migrate production, or transfer real $CHARM. Keep `MADLIB_ENABLED=false` until review and a separately authorized sandbox test. Automated checks never start the bot or use production credentials.

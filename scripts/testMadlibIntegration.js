@@ -127,7 +127,7 @@ React below if you think it's **UGLY**! 💜`);
   });
   await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
     const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
-    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===4&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===5&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
     const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
     const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
     assert(panel.includes('Ugly Family adventures'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
@@ -165,6 +165,11 @@ React below if you think it's **UGLY**! 💜`);
     const saved=require('./fixtures/madlib-v3-session.json'),seed=session(saved.template),{app,store}=await feature(seed);
     for(const q of saved.template.questions){const s=store.read();await app.handleInteraction(interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
     assert.equal(store.read().story,saved.story);assert.equal(store.read().prompt,saved.prompt);assert.equal(store.read().template.version,3);app.stop();
+  });
+  await run.test('unfinished v4 plays retain their saved image prompt after the reference-prompt update',async()=>{
+    const saved=require('./fixtures/madlib-v4-session.json'),seed=session(saved.template),{app,store}=await feature(seed);
+    for(const q of saved.template.questions){const s=store.read();await app.handleInteraction(interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
+    assert.equal(store.read().story,saved.story);assert.equal(store.read().prompt,saved.prompt);assert.equal(store.read().template.version,4);app.stop();
   });
   await run.test('current integration retains all seven Mad Libs additions without freezing unrelated code',()=>{
     const {verify,additions}=require('./verifyMadlibIntegration');

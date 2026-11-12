@@ -12,7 +12,7 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
     assert.equal(active.reduce((n,t)=>n+t.questions.length,0),302);
     assert.deepEqual(active.map(t=>t.questions.length),[14,14,14,...Array(20).fill(13)]);
     for(const [i,t] of active.entries()){
-      assert.equal(t.version,4);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
+      assert.equal(t.version,5);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
       assert.deepEqual(t.questions.map(q=>q.label),source[i].wordPrompts);
       assert.deepEqual(t.questions.map(q=>q.key),source[i].wordPrompts.map((_,j)=>`word_${j+1}`));
       assert(!t.id.startsWith('hw-'));
@@ -30,8 +30,8 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
   await run.test('every story and image preserves the authored text with literal numbered substitution',()=>{
     for(const [i,t] of active.entries()){
       const a=sample(t),out=core.render(t,a);
-      const replace=(text,quote=false)=>text.replace(/\[(\d+)\. [A-Z -]+\]/g,(_,n)=>quote?JSON.stringify(a[`word_${n}`]):a[`word_${n}`]);
-      assert.equal(out.story,replace(source[i].story));assert(out.prompt.includes(replace(source[i].imagePrompt,true)));
+      const replace=(text,quote=false)=>text.replace(/\[(\d+)\. [A-Z -]+\]/g,(_,n)=>quote?JSON.stringify(a[`word_${n}`]).slice(1,-1):a[`word_${n}`]);
+      assert.equal(out.story,replace(source[i].story));assert.equal(out.prompt,replace(source[i].imagePrompt,true));
       assert(!/\{\{word_\d+\}\}|\[\d+\. [A-Z -]+\]/.test(out.story+out.prompt));
       for(const q of t.questions)assert(out.story.includes(a[q.key]));
       for(const key of core.keysIn(t.imageTemplate))assert(out.prompt.includes(JSON.stringify(a[key])));
@@ -51,14 +51,14 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
       }
     }
   });
-  await run.test('multi-character scenes and requested lettering are not overridden by retired style rules',()=>{
+  await run.test('all complete reference prompts keep identity rules and prohibit lettering without duplicate wrappers',()=>{
     for(const t of active){const p=core.render(t,sample(t)).prompt;
-      assert(p.includes('vibrant comic-book aesthetic'));assert(p.includes('Invader Zim or web3 NFT art'));
-      assert(!p.includes(core.STYLE));assert(!p.includes('Do not add new lettering'));assert(!p.includes('ordinary human-world location'));
-      assert.equal(p.split('EXPORT FOR UGLYBOT:').length,2);assert(p.includes('1024 x 1024'));assert(p.includes('PNG (.png)'));
+      assert(p.startsWith(core.STYLE+'\n'));assert(p.includes('attached Squig as the clear focal character'));
+      assert(p.includes('Do not add new lettering, captions, brand logos or watermarks.'));
+      for(const heading of ['LOCATION:','SINGLE FROZEN MOMENT:','COMPOSITION:','SETTING:','EXPORT FOR UGLYBOT:'])assert.equal(p.split(heading).length,2);
+      assert(!p.includes('Invader Zim'));assert(!p.includes('JSON delimiters'));assert(!p.includes('""'));
+      assert.equal(p.split(core.STYLE).length,2);
     }
-    assert(core.render(active[0],sample(active[0])).prompt.includes('speech bubble'));
-    assert(core.render(active[22],sample(active[22])).prompt.includes('an Amphibian Squig, and a Robot Squig'));
   });
   await run.test('export settings stay snapshot-specific without changing stories',()=>{
     const t=structuredClone(active[0]),a=sample(t),original=core.render(t,a);t.output={maxImageBytes:2097152};const out=core.render(t,a);
@@ -67,12 +67,12 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
     const frozen=core.selectTemplate([t],[],()=>0);t.output.maxImageBytes=8388608;assert.equal(frozen.output.maxImageBytes,2097152);
     for(const n of [0,-1,NaN,Infinity,8388609,'8388608',1.5])assert.throws(()=>core.imageOutputGuidance(n),errorCode('RENDER'));
   });
-  await run.test('saved v1, v2 and v3 stories survive replacement without rerolling or mutation',()=>{
-    for(const version of [1,2,3]){
+  await run.test('saved v1, v2, v3 and v4 stories survive replacement without rerolling or mutation',()=>{
+    for(const version of [1,2,3,4]){
       const saved=require(`./fixtures/madlib-v${version}-session.json`),before=JSON.stringify(saved);
       const out=core.render(saved.template,saved.answers);assert.equal(out.story,saved.story);assert.deepEqual(out.answers,saved.answers);
       if(version>=2)assert.equal(out.prompt,saved.prompt);
-      assert(!active.some(t=>t.id===saved.template.id));assert.equal(JSON.stringify(saved),before);
+      if(version<4)assert(!active.some(t=>t.id===saved.template.id));else assert.equal(active.find(t=>t.id===saved.template.id).version,5);assert.equal(JSON.stringify(saved),before);
     }
   });
   await run.test('answers containing placeholders remain literal and never substitute a second time',()=>{

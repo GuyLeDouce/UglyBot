@@ -14,7 +14,7 @@ See [docs/trick-or-treat.md](docs/trick-or-treat.md) for configuration, rollout,
 
 **Image uploads:** SHOW → choose a saved story → **Upload Image** → choose a file → private preview → **Publish**. **Replace Image** opens the same picker. `/madlib-upload` remains an optional fallback. See [button-upload setup and compatibility](docs/squig-madlibs-upload-button.md).
 
-**Ugly Family story library:** New plays select from the owner's 23 version-4 stories, with 13–14 ordered word prompts each and a separately authored matching image prompt. Multi-Squig scenes and speech bubbles retain the supplied comic-book direction. Saved and in-progress plays keep their original snapshots. [Catalogue and compatibility](docs/squig-madlibs-ugly-family.md).
+**Ugly Family story library:** New plays select from the owner's 23 version-5 stories, with 13–14 ordered word prompts each and a separately authored matching image prompt. Image prompts preserve the attached Squig as the focal character, with the supplied reference rules, secondary characters and no new lettering. Saved and in-progress plays keep their original snapshots. [Catalogue and compatibility](docs/squig-madlibs-ugly-family.md).
 
 See the [Squig Mad Libs owner guide](docs/squig-madlibs.md) for setup, publishing, payment recovery and rollback. On the running UglyBot service, `MADLIB_ENABLED=true` registers `/madlib`, `/madlib-upload`, `/madlib-history` and `/madlib-admin`. An administrator runs `/madlib` to post the PLAY / SHOW panel; it is not posted automatically.
 
