@@ -44,7 +44,7 @@ async function acknowledge(i){
 async function edit(i,data){const payload=privatePayload({content:null,embeds:[],components:[],attachments:[],...data});return i.deferred||i.replied?i.editReply(payload):i.reply({...payload,ephemeral:true});}
 async function follow(i,data){return i.followUp(privatePayload({...data,ephemeral:true}));}
 function resultControls(s){return [row(button('Get Copyable Prompt','copy',s.id,0,s.user_id),button('Download Prompt .txt','export-prompt',s.id,0,s.user_id),button('Download Story .txt','export-story',s.id,0,s.user_id)),row(button('Classic Story','story',s.id,0,s.user_id),button('SHOW / History','history','0',0,s.user_id))];}
-function instruction(s){return (s?.template?.version===6?safeDiscord(s.template.imageSetup)+'\n\n':'')+'Copy the complete prompt into your image tool, attach the Squig reference(s) listed in the prompt, generate the image, then return to SHOW. Prefer a still 1024 x 1024 PNG; JPEG/WebP are also accepted. Follow the export limits in your prompt and check the actual file size. UglyBot does not generate images in V1.';}
+function instruction(s){return ([6,7].includes(s?.template?.version)?safeDiscord(s.template.imageSetup)+'\n\n':'')+'Copy the complete prompt into your image tool, attach the Squig reference(s) listed in the prompt, generate the image, then return to SHOW. Prefer a still 1024 x 1024 PNG; JPEG/WebP are also accepted. Follow the export limits in your prompt and check the actual file size. UglyBot does not generate images in V1.';}
 function stateMessage(s){
   if(s.state==='awaiting_payment')return 'Payment is being checked. Do not pay again. Resume opens the same saved play after confirmation.';
   if(s.state==='payment_review')return 'Payment under review. The outcome was uncertain; no second charge will be sent. Ask an admin to inspect the operation below.';
@@ -80,7 +80,7 @@ class MadlibFeature{
     await this.requireAdmin(i,access);const id=core.id(),cfg=this.cfg;
     const description=[
       'Mad Libs is a fill-in-the-blanks word game: you supply the words before seeing the story. Our Squig version also gives you a matching image prompt for chaotic Ugly Family adventures.',
-      '**1. PLAY** — Supply 13–14 words to reveal your story and image prompt.\n**2. Make your image** — Copy the prompt into your image generator and attach your Squig as the reference.\n**3. SHOW** — Choose your saved story, press **Upload Image**, and check your private preview.',
+      '**1. PLAY** — Supply 10 words to reveal your story and image prompt.\n**2. Make your image** — Copy the prompt into your image generator and attach your Squig as the reference.\n**3. SHOW** — Choose your saved story, press **Upload Image**, and check your private preview.',
       '**Hidden until you decide to Publish.** Your answers, story, prompt and image preview stay private in Discord. Only **Publish** shares your finished story and image with the channel.',
       `One free play every ${cfg.MADLIB_FREE_COOLDOWN_HOURS} hours. Extra plays cost ${cfg.MADLIB_EXTRA_PLAY_COST_CHARM.toLocaleString('en-US')} $CHARM.`,
     ].join('\n\n');

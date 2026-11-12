@@ -34,7 +34,7 @@ const lastEdit=i=>i.calls.filter(([name])=>name==='editReply').at(-1)?.[1];
   });
   await run.test('one-input modal uses initial response; submit saves once and never chains another modal',async()=>{
     const {app,store}=await feature(),s=store.read();const open=interaction({customId:core.component('answer',s.id,s.revision,IDS.user),privateMessage:true});await app.handleInteraction(open);assert.deepEqual(open.calls.map(c=>c[0]),['showModal']);assert.equal(open.calls[0][1].components.length,1);assert.equal(open.calls[0][1].components[0].components.length,1);
-    const submit=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'curiously happy'});await app.handleInteraction(submit);assert.equal(store.read().step,1);assert.equal(store.read().answers.word_1,'curiously happy');assert(!submit.calls.some(c=>c[0]==='showModal'));assert.equal(lastEdit(submit).embeds[0].toJSON().title,'Question 2 of 14');
+    const submit=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'curiously happy'});await app.handleInteraction(submit);assert.equal(store.read().step,1);assert.equal(store.read().answers.word_1,'curiously happy');assert(!submit.calls.some(c=>c[0]==='showModal'));assert.equal(lastEdit(submit).embeds[0].toJSON().title,'Question 2 of 10');
     const stale=interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:'overwrite'});await app.handleInteraction(stale);assert.equal(store.read().answers.word_1,'curiously happy');assert(stale.calls.some(c=>c[0]==='followUp'));
   });
   await run.test('invalid answers preserve controls; cross-user and forged public controls expose nothing',async()=>{
@@ -127,7 +127,7 @@ React below if you think it's **UGLY**! 💜`);
   });
   await run.test('new panel and library snapshot configured export limits without changing commands',async()=>{
     const {app,messages}=await feature(null,{env:{...env,MADLIB_MAX_IMAGE_BYTES:'2097152'}});
-    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===6&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
+    assert.equal(app.templates.length,23);assert(app.templates.every(t=>t.version===7&&t.output.maxImageBytes===2097152));assert(templates.every(t=>t.output===undefined));
     const selected=core.selectTemplate(app.templates,[],()=>0);app.templates[0].output.maxImageBytes=1048576;assert.equal(selected.output.maxImageBytes,2097152);
     const i=interaction({command:'madlib'});await app.handleInteraction(i);const panel=messages[0].embeds[0].toJSON().description;
     assert(panel.includes('Ugly Family adventures'));assert(!panel.includes('Ugly City'));assert(panel.includes('1,000 $CHARM'));
@@ -170,6 +170,14 @@ React below if you think it's **UGLY**! 💜`);
     const saved=require('./fixtures/madlib-v4-session.json'),seed=session(saved.template),{app,store}=await feature(seed);
     for(const q of saved.template.questions){const s=store.read();await app.handleInteraction(interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
     assert.equal(store.read().story,saved.story);assert.equal(store.read().prompt,saved.prompt);assert.equal(store.read().template.version,4);app.stop();
+  });
+  await run.test('unfinished v5 and v6 plays finish their original question lists after the ten-word replacement',async()=>{
+    for(const version of [5,6]){
+      const saved=require(`./fixtures/madlib-v${version}-session.json`),seed=session(saved.template),{app,store}=await feature(seed);
+      assert.equal(seed.template.questions.length,14);
+      for(const q of saved.template.questions){const s=store.read();await app.handleInteraction(interaction({customId:core.component('submit',s.id,s.revision,IDS.user),privateMessage:true,answer:saved.answers[q.key]}));}
+      assert.equal(store.read().story,saved.story);assert.equal(store.read().prompt,saved.prompt);assert.equal(store.read().template.version,version);app.stop();
+    }
   });
   await run.test('current integration retains all seven Mad Libs additions without freezing unrelated code',()=>{
     const {verify,additions}=require('./verifyMadlibIntegration');

@@ -3,16 +3,16 @@ const fs=require('node:fs'),path=require('node:path');
 const {assert,harness,errorCode}=require('./madlibTestUtils');
 const core=require('../modules/madlibCore');
 const {storyEmbeds,publicPayload}=require('../modules/madlibPublishing');
-const templates=require('../modules/madlibTemplates'),source=require('../modules/data/madlibStoriesV4.json');
+const templates=require('../modules/madlibTemplates'),source=require('../modules/data/madlibStoriesV7.json');
 const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[q.key,q.example]));
 (async()=>{
   const active=core.validateTemplates(templates),report=[];
-  await run.test('exactly 23 authored pairs and 302 ordered word prompts replace the old pool',()=>{
+  await run.test('exactly 23 authored pairs and 230 ordered word prompts replace the old pool',()=>{
     assert.equal(active.length,23);assert.equal(new Set(active.map(t=>t.id)).size,23);
-    assert.equal(active.reduce((n,t)=>n+t.questions.length,0),302);
-    assert.deepEqual(active.map(t=>t.questions.length),[14,14,14,...Array(20).fill(13)]);
+    assert.equal(active.reduce((n,t)=>n+t.questions.length,0),230);
+    assert.deepEqual(active.map(t=>t.questions.length),Array(23).fill(10));
     for(const [i,t] of active.entries()){
-      assert.equal(t.version,6);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
+      assert.equal(t.version,7);assert.equal(t.format,'authored-pair');assert.equal(t.title,source[i].title);
       assert.deepEqual(t.questions.map(q=>q.label),source[i].wordPrompts);
       assert.deepEqual(t.questions.map(q=>q.key),source[i].wordPrompts.map((_,j)=>`word_${j+1}`));
       assert(!t.id.startsWith('hw-'));
@@ -37,7 +37,7 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
       for(const key of core.keysIn(t.imageTemplate))assert(out.prompt.includes(JSON.stringify(a[key])));
       report.push({title:t.title,wordPrompts:t.questions.map(q=>q.label),...out});
     }
-    const beach=active[18],a=sample(beach);a.word_7='left pinky';assert.equal(core.render(beach,a).story.split('left pinky').length-1,2);
+    const beach=active[18],a=sample(beach);a.word_5='left pinky';assert.equal(core.render(beach,a).story.split('left pinky').length-1,1);
   });
   await run.test('Unicode, punctuation, maximum answers and Discord embed limits work for all 23 pairs',()=>{
     for(const t of active){
@@ -51,23 +51,23 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
       }
     }
   });
-  await run.test('all complete reference prompts keep identity rules and prohibit lettering without duplicate wrappers',()=>{
+  await run.test('owner prompts retain their sections without previous rewrite instructions',()=>{
     for(const t of active){const p=core.render(t,sample(t)).prompt;
-      assert(p.startsWith('PLAYER SETUP: '+t.imageSetup));assert(p.includes('Keep a mouthless reference mouthless.'));
-      assert(p.includes('Do not add new lettering, captions, brand logos or watermarks.'));
-      for(const heading of ['LOCATION:','SINGLE FROZEN MOMENT:','COMPOSITION:','SETTING:','EXPORT FOR UGLYBOT:'])assert.equal(p.split(heading).length,2);
-      assert(!p.includes('Invader Zim'));assert(!p.includes('JSON delimiters'));assert(!p.includes('""'));
-      assert.equal(p.split('ART DIRECTION:').length,2);
+      assert(p.startsWith("Use the user's ATTACHED Squig as the absolute character reference for the primary character."));
+      for(const heading of ['SUBJECT & ACTION:','SETTING & LIGHTING:','COMPOSITION & CAMERA:','EXPORT FOR UGLYBOT:'])assert.equal(p.split(heading).length,2);
+      for(const retired of ['PLAYER SETUP:','ART DIRECTION:','Reference 2:','Label each attachment','Keep a mouthless reference mouthless.','JSON delimiters'])assert(!p.includes(retired));
+      assert(!p.includes('""'));assert.equal(t.imageCast,undefined);
     }
   });
-  await run.test('cast counts and reference roles agree across every player instruction and prompt',()=>{
-    assert.deepEqual(active.map(t=>t.imageCast.length),[3,2,3,2,2,3,2,3,2,2,3,3,3,2,2,4,1,2,4,3,2,3,5]);
+  await run.test('one or two Squigs agree with player instructions and only one primary reference is requested',()=>{
+    assert.deepEqual(active.map(t=>t.squigCount),Array.from({length:23},(_,i)=>[7,11,17,21].includes(i+1)?1:2));
     for(const t of active){
       const p=core.render(t,sample(t)).prompt;
-      assert(p.includes(`Draw exactly ${t.imageCast.length} Squig`));
-      for(const [i,c] of t.imageCast.entries())assert(t.imageSetup.includes(`Reference ${i+1}: ${c.type} (${c.role})`));
-      const bad=structuredClone(active);bad.find(x=>x.id===t.id).imageCast=[];
-      assert.throws(()=>core.validateTemplates(bad),errorCode('TEMPLATES'));
+      assert(p.includes(`featuring ${t.squigCount===1?'ONE Squig':'TWO Squigs'} total:`));
+      assert(t.imageSetup.includes(`This image features ${t.squigCount} Squig`));
+      assert(t.imageSetup.includes('Attach your Squig image as the primary character reference.'));
+      for(const count of [0,3,'2',undefined]){const bad=structuredClone(active);bad.find(x=>x.id===t.id).squigCount=count;
+        assert.throws(()=>core.validateTemplates(bad),errorCode('TEMPLATES'));}
     }
   });
   await run.test('export settings stay snapshot-specific without changing stories',()=>{
@@ -77,12 +77,12 @@ const run=harness('templates'),sample=t=>Object.fromEntries(t.questions.map(q=>[
     const frozen=core.selectTemplate([t],[],()=>0);t.output.maxImageBytes=8388608;assert.equal(frozen.output.maxImageBytes,2097152);
     for(const n of [0,-1,NaN,Infinity,8388609,'8388608',1.5])assert.throws(()=>core.imageOutputGuidance(n),errorCode('RENDER'));
   });
-  await run.test('saved v1 through v5 stories survive replacement without rerolling or mutation',()=>{
-    for(const version of [1,2,3,4,5]){
+  await run.test('saved v1 through v6 stories survive replacement without rerolling or mutation',()=>{
+    for(const version of [1,2,3,4,5,6]){
       const saved=require(`./fixtures/madlib-v${version}-session.json`),before=JSON.stringify(saved);
       const out=core.render(saved.template,saved.answers);assert.equal(out.story,saved.story);assert.deepEqual(out.answers,saved.answers);
       if(version>=2)assert.equal(out.prompt,saved.prompt);
-      if(version<4)assert(!active.some(t=>t.id===saved.template.id));else assert.equal(active.find(t=>t.id===saved.template.id).version,6);assert.equal(JSON.stringify(saved),before);
+      if(version<4)assert(!active.some(t=>t.id===saved.template.id));else assert.equal(active.find(t=>t.id===saved.template.id).version,7);assert.equal(JSON.stringify(saved),before);
     }
   });
   await run.test('answers containing placeholders remain literal and never substitute a second time',()=>{

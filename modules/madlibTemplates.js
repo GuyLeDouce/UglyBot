@@ -1,7 +1,7 @@
 'use strict';
 // The active catalogue is the owner's 23 authored pairs. Saved sessions carry their
 // own template snapshots, so retiring older catalogue entries never rewrites a play.
-const stories=require('./data/madlibStoriesV4.json');
+const stories=require('./data/madlibStoriesV7.json');
 const examples={Place:'bowling alley',Adjective:'glittery',Noun:'rubber duck','Body Part':'elbow',
   'Plural Noun':'spatulas',Adverb:'dramatically',Number:'42',Food:'lasagna',Liquid:'lemonade',
   'Verb ending in -ing':'juggling','Past-tense Verb':'somersaulted',Exclamation:'Holy noodles',Verb:'dance'};
@@ -17,8 +17,8 @@ function compile(text,words){
   });
 }
 module.exports=stories.map(s=>({
-  id:`ugly-family-${String(s.number).padStart(2,'0')}`,version:6,promptFormat:'cast-reference',format:'authored-pair',enabled:true,
-  imageCast:s.imageCast,imageSetup:s.imageSetup,
+  id:`ugly-family-${String(s.number).padStart(2,'0')}`,version:7,promptFormat:'primary-reference',format:'authored-pair',enabled:true,
+  squigCount:s.squigCount,imageSetup:`This image features ${s.squigCount} Squig${s.squigCount===1?'':'s'} total. Attach your Squig image as the primary character reference.`,
   title:s.title,category:'Ugly Family Adventures',
   storyTemplate:compile(s.story,s.wordPrompts),imageTemplate:compile(s.imagePrompt,s.wordPrompts),
   questions:s.wordPrompts.map((type,i)=>{
